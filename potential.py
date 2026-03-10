@@ -1,0 +1,562 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from torch.nn.utils.rnn import pad_sequence
+
+
+# TODO canvas wegen rot und shift größer machen, damit nicht abgeschnitten wird
+# TODO limits für rot und shift
+
+
+class DifferentiablePotential(nn.Module):
+    def __init__(self, train_methods, init_positions, init_intensities, shape,
+                 pixel_size_nm, wavelength_nm, device, init_blur_sigma=1.0,
+                 max_shifts=None, max_rotations=None, train_small_area_square=None):
+        super().__init__()
+        #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
+        self.pixel_size_m = pixel_size_nm
+        self.wavelength_m = wavelength_nm
+        self.device = device
+        self.max_shifts = max_shifts
+        self.max_rotations = max_rotations
+
+        self.H, self.W = shape
+
+        self.train_methods = train_methods
+        #self.positions_method = "graphen_shift"
+        #self.intensity_classes = "free" # "free", "vacancies", "classes"
+        self.blur_sigma_ = nn.Parameter(torch.tensor(init_blur_sigma, dtype=torch.float32, device=device),
+                     requires_grad=self.train_methods.train_blur)
+
+
+        self._IDX = {"Gr": 0, "S1": 1, "W": 2, "S2": 3}
+        self.N_l = len(init_positions)
+
+        self.initialize_positions_parameters(init_positions)
+        self.initialize_intensities_parameters(init_intensities)
+        self.train_small_area_square = train_small_area_square
+
+    def apply_trainable_selection(self):
+            self.intensities_[0].requires_grad = self.train_methods.train_graphen_intensities
+            self.intensities_[1].requires_grad = self.train_methods.train_S1_intensities
+            self.intensities_[2].requires_grad = self.train_methods.train_W_intensities
+            self.intensities_[3].requires_grad = self.train_methods.train_S2_intensities
+
+            self.occupancies_[0].requires_grad = self.train_methods.train_graphen_occupancies
+            self.occupancies_[1].requires_grad = self.train_methods.train_S1_occupancies
+            self.occupancies_[2].requires_grad = self.train_methods.train_W_occupancies
+            self.occupancies_[3].requires_grad = self.train_methods.train_S2_occupancies
+
+            self.shifts_[0].requires_grad = self.train_methods.graphen_shift
+            self.rotations_[0].requires_grad = self.train_methods.graphen_rotation
+            self.positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
+
+            self.shifts_[1].requires_grad = self.train_methods.WS2_shift
+            self.rotations_[1].requires_grad = self.train_methods.WS2_rotation
+            for i in range(self.N_l):
+                if i != self._IDX["Gr"]:
+                    self.positions_[i].requires_grad = self.train_methods.WS2_free_positions
+
+    def zero_grads_for_frozen(self):
+        if not self.train_methods.train_graphen_intensities:
+            self.intensities_[0].grad = None
+        if not self.train_methods.train_S1_intensities:
+            self.intensities_[1].grad = None
+        if not self.train_methods.train_W_intensities:
+            self.intensities_[2].grad = None
+        if not self.train_methods.train_S2_intensities:
+            self.intensities_[3].grad = None
+
+        if not  self.train_methods.train_graphen_occupancies:
+            self.occupancies_[0].grad = None
+        if not self.train_methods.train_S1_occupancies:
+            self.occupancies_[1].grad = None
+        if not self.train_methods.train_W_occupancies:
+            self.occupancies_[2].grad = None
+        if not self.train_methods.train_S2_occupancies:
+            self.occupancies_[3].grad = None
+
+        if not self.train_methods.graphen_shift:
+            self.shifts_[0].grad = None
+        if not self.train_methods.graphen_rotation:
+            self.rotations_[0].grad = None
+        if not self.train_methods.graphen_free_positions:
+            self.positions_[self._IDX["Gr"]].grad = None
+
+        if not self.train_methods.WS2_shift:
+            self.shifts_[1].grad = None
+        if not self.train_methods.WS2_rotation:
+            self.rotations_[1].grad = None
+        for i in range(self.N_l):
+            if i != self._IDX["Gr"] and not self.train_methods.WS2_free_positions:
+                self.positions_[i].grad = None
+
+
+    def initialize_positions_parameters(self, init_positions):
+        self.positions_ = nn.ParameterList(
+            [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions])
+        self.shifts_ = nn.ParameterList([torch.zeros(2, dtype=torch.float32, device=self.device) for _ in range(2)])
+        self.rotations_ = nn.ParameterList([torch.zeros(1, dtype=torch.float32, device=self.device) for _ in range(2)])
+        self.scales_ = nn.ParameterList([torch.ones(1, dtype=torch.float32, device=self.device) for _ in range(2)])
+
+
+        self.positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
+        for i in range(self.N_l):
+            if i != self._IDX["Gr"]:
+                self.positions_[i].requires_grad = self.train_methods.WS2_free_positions
+
+
+        self.shifts_[0].requires_grad = self.train_methods.graphen_shift
+        self.rotations_[0].requires_grad = self.train_methods.graphen_rotation
+        self.scales_[0].requires_grad = self.train_methods.graphen_scale
+
+        self.shifts_[1].requires_grad = self.train_methods.WS2_shift
+        self.rotations_[1].requires_grad = self.train_methods.WS2_rotation
+        self.scales_[1].requires_grad = self.train_methods.WS2_scale
+        print()
+
+
+    def initialize_intensities_parameters(self, init_intensities):
+        self.intensities_ = nn.ParameterList(
+            [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
+        self.occupancies_ = nn.ParameterList(
+            [torch.ones(I.shape, dtype=torch.float32, device=self.device)*0.1 for I in init_intensities])
+
+
+        self.apply_trainable_selection()
+        self.zero_grads_for_frozen()
+
+
+        if False:
+
+            if self.train_methods.intensity_classes == "free":
+                for i in range(len(init_intensities)):
+                    self.intensities_[i].requires_grad = True
+                    self.occupancies_[i].requires_grad = True
+            elif self.train_methods.intensity_classes == "free_ws2":
+                for n in self._IDX:
+                    if n == "Gr":
+                        self.intensities_[self._IDX[n]].requires_grad = False
+                    else:
+                        self.intensities_[self._IDX[n]].requires_grad = True
+
+            elif self.train_methods.intensity_classes == "vacancies":
+                raise NotImplementedError("Vacancies not implemented yet")
+                self.vacancies_ = nn.ParameterList(
+                    [torch.ones(init_intensities[i].shape, dtype=torch.float32, device=self.device)
+                     for i in range(len(init_intensities))])
+
+            elif self.train_methods.intensity_classes == "vacancies_WS2":
+                raise NotImplementedError("Vacancies not implemented yet")
+                self.vacancies_ = nn.ParameterList(
+                    [torch.ones(init_intensities[i].shape, dtype=torch.float32, device=self.device)
+                     for i in range(len(init_intensities))])
+
+                self.vacancies_[self._IDX["Gr"]].requires_grad = False
+
+
+            elif self.train_methods.intensity_classes == "classes": ## eher über loss funktion (abweichung von 16, 32, 74)
+                raise NotImplementedError("Classes not implemented yet")
+                self.classes = torch.nn.Parameter(torch.tensor([0.0, 16., 32., 74.], dtype=torch.float32, device=self.device))
+                K = len(self.classes)
+                N = self.positions.shape[0]
+                self.intensities_ = torch.nn.Parameter(torch.rand(N, K))
+            elif self.train_methods.intensity_classes == "fixed":
+                for i in range(len(init_intensities)):
+                    self.intensities_[i].requires_grad = False
+            else:
+
+                raise ValueError("Unknown intensity class type")
+
+
+    def initialize_intensities_parameters_old(self, init_intensities):
+        if self.train_methods.intensity_classes == "free":
+            self.intensities_ = nn.ParameterList(
+                [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
+        elif self.train_methods.intensity_classes == "free_ws2":
+            self.register_buffer("init_intensities_Gr", torch.tensor(init_intensities[self._IDX["Gr"]],
+                                                                   dtype=torch.float32, device=self.device))
+            self.intensities_ = nn.ParameterList(
+                [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities[1:]])
+        elif self.train_methods.intensity_classes == "vacancies":
+            self.register_buffer("init_intensities_Gr", torch.tensor(init_intensities[self._IDX["Gr"]],
+                                                                     dtype=torch.float32, device=self.device))
+            #self.init_intensities = [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities]
+            # self.init_intensities = init_intensities
+            # self.register_buffer("init_intensities", torch.tensor(init_intensities, dtype=torch.float32))
+            self.vacanciesS1 = nn.Parameter(
+                torch.ones(init_intensities[1].shape, dtype=torch.float32, device=self.device))
+            self.vacanciesW = nn.Parameter(
+                torch.ones(init_intensities[2].shape, dtype=torch.float32, device=self.device))
+            self.vacanciesS2 = nn.Parameter(
+                torch.ones(init_intensities[3].shape, dtype=torch.float32, device=self.device))
+            #vacancies_list = [self.vacanciesS1, self.vacanciesW, self.vacanciesS2]
+
+            #self.vacancies_tensor = pad_sequence(vacancies_list, batch_first=True)
+
+
+        elif self.intensity_classes == "classes": ## eher über loss funktion (abweichung von 16, 32, 74)
+            self.classes = torch.nn.Parameter(torch.tensor([0.0, 16., 32., 74.], dtype=torch.float32, device=self.device))
+            K = len(self.classes)
+            N = self.positions.shape[0]
+            self.intensities_ = torch.nn.Parameter(torch.rand(N, K))
+        elif self.intensity_classes == "fixed":
+            self.intensities_ = [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities]
+        else:
+
+            raise ValueError("Unknown intensity class type")
+
+
+    def get_positions(self):
+        ret_positions = []
+        for i in range(self.N_l):
+            if i == self._IDX["Gr"]:
+                idx_s_r = 0
+            else:
+                idx_s_r = 1
+
+
+
+            # Rotation um den Mittelpunkt der Graphen-Positionen
+
+            center = torch.tensor((self.H/2, self.W/2), device=self.device)
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_rotation)):
+                theta = self.rotations_[idx_s_r]
+            else:
+                theta = self.rotations_[idx_s_r].detach()
+
+            if self.max_rotations is not None:
+                theta = torch.clamp(theta, 0.0, self.max_rotations[idx_s_r])
+            cos_theta = torch.cos(theta)
+            sin_theta = torch.sin(theta)
+
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_shift) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_shift)):
+                shifts = self.shifts_[idx_s_r]
+            else:
+                shifts = self.shifts_[idx_s_r].detach()
+            shift = torch.clamp(shifts, -self.max_shifts[idx_s_r],
+                                self.max_shifts[idx_s_r]) if self.max_shifts is not None else shifts
+
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_free_positions) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_free_positions)):
+                positions = self.positions_[i]
+            else:
+                positions = self.positions_[i].detach()
+
+
+            shifted_positions = positions - center + shift
+
+            rotated_positions = torch.zeros_like(shifted_positions)
+            rotated_positions[:, 0] = cos_theta * shifted_positions[:, 0] - sin_theta * shifted_positions[:, 1]
+            rotated_positions[:, 1] = sin_theta * shifted_positions[:, 0] + cos_theta * shifted_positions[:, 1]
+
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_scale) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_scale)):
+
+                scales = torch.clamp(self.scales_[idx_s_r], min=0.9, max=1.1)
+            else:
+                scales = self.scales_[idx_s_r].detach()
+            rotated_positions = rotated_positions * scales
+
+            new_positions = rotated_positions + center
+
+            ret_positions.append(new_positions)
+        return ret_positions
+
+
+    def get_positions_old(self):
+        ret_positions = []
+        for i in range(self.N_l):
+            if i == self._IDX["Gr"]:
+                idx_s_r = 0
+            else:
+                idx_s_r = 1
+
+            # Rotation um den Mittelpunkt der Graphen-Positionen
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_rotation)):
+                center = torch.tensor((self.H/2, self.W/2), device=self.device)
+                theta = self.rotations_[idx_s_r]
+                if self.max_rotations is not None:
+                    if i == self._IDX["Gr"]:
+                        theta = torch.clamp(theta, 0.0, self.max_rotations[0])
+                    else:
+                        theta = torch.clamp(theta, 0.0, self.max_rotations[0])
+                cos_theta = torch.cos(theta)
+                sin_theta = torch.sin(theta)
+            else:
+                center = torch.zeros(2, device=self.device)
+
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_shift) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_shift)):
+                shift = torch.clamp(self.shifts_[idx_s_r], -self.max_shifts[0],
+                                    self.max_shifts[0]) if self.max_shifts is not None else self.shifts_[idx_s_r]
+                shifted_positions = self.positions_[i] - center + shift
+            else:
+                shifted_positions = self.positions_[i] - center
+
+            if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation) or
+                    (i != self._IDX["Gr"] and self.train_methods.WS2_rotation)):
+                rotated_positions = torch.zeros_like(shifted_positions)
+                rotated_positions[:, 0] = cos_theta * shifted_positions[:, 0] - sin_theta * shifted_positions[:, 1]
+                rotated_positions[:, 1] = sin_theta * shifted_positions[:, 0] + cos_theta * shifted_positions[:, 1]
+            else:
+                center = torch.zeros(2, device=self.device)
+                rotated_positions = shifted_positions
+
+            new_positions = rotated_positions + center
+
+            ret_positions.append(new_positions)
+        return ret_positions
+
+    def get_intensities(self):
+        intensities = []
+        vacancies = []
+        for i in range(self.N_l):
+            if ((i == self._IDX["Gr"] and self.train_methods.train_graphen_intensities) or
+                    (i == self._IDX["S1"] and self.train_methods.train_S1_intensities) or
+                    (i == self._IDX["W"] and self.train_methods.train_W_intensities) or
+                    (i == self._IDX["S2"] and self.train_methods.train_S2_intensities)):
+                intensities.append(self.intensities_[i])
+            else:
+                intensities.append(self.intensities_[i].detach())
+
+            if ((i == self._IDX["Gr"] and self.train_methods.train_graphen_occupancies) or
+                    (i == self._IDX["S1"] and self.train_methods.train_S1_occupancies) or
+                    (i == self._IDX["W"] and self.train_methods.train_W_occupancies) or
+                    (i == self._IDX["S2"] and self.train_methods.train_S2_occupancies)):
+                vacancies.append(self.occupancies_[i].sigmoid())
+            else:
+                vacancies.append(self.occupancies_[i].sigmoid().detach())
+
+
+        return [intensities[i] * vacancies[i] for i in range(self.N_l)]
+
+    def get_intensities_raw(self):
+        return self.intensities_ #* torch.sigmoid(self.occupancies_)
+
+
+        if False:
+            if self.train_methods.intensity_classes == "classes":
+                raise NotImplementedError("Classes not implemented yet")
+                # Softmax → Gewichtung über Klassen
+                weights = F.softmax(self.intensities_, dim=1)  # shape (N, K)
+                q = torch.sum(weights * self.classes, dim=1)  # gewichteter Mittelwert
+                ret_intensities = q.unsqueeze(1)  # shape (N, 1)
+                return ret_intensities
+            elif (self.train_methods.intensity_classes == "free" or self.train_methods.intensity_classes == "fixed" or
+                  self.train_methods.intensity_classes == "vacancies_WS2"):
+                return self.intensities_
+            elif self.train_methods.intensity_classes == "vacancies":
+                raise NotImplementedError("Vacancies not implemented yet")
+                return [self.init_intensities_Gr,
+                        self.vacanciesS1.sigmoid() * 16.,
+                        self.vacanciesW.sigmoid() * 74.,
+                        self.vacanciesS2.sigmoid() * 16.
+                        ]
+
+
+    def get_pos_and_ints(self, pos_idx):
+        intensities = self.get_intensities_raw()[pos_idx].cpu().detach().numpy()
+        occ = self.occupancies_[pos_idx].sigmoid().cpu().detach().numpy()
+        occ_neg_mask = occ < 0.5
+        intensities[occ_neg_mask] = None
+        positions = self.get_positions()[pos_idx].cpu().detach().numpy()
+        return (positions[:,0], positions[:,1]), intensities
+
+    def get_intensities_old(self):
+        if self.train_methods.intensity_classes == "classes":
+            # Softmax → Gewichtung über Klassen
+            weights = F.softmax(self.intensities_, dim=1)  # shape (N, K)
+            q = torch.sum(weights * self.classes, dim=1)  # gewichteter Mittelwert
+            ret_intensities = q.unsqueeze(1)  # shape (N, 1)
+            return ret_intensities
+        elif self.train_methods.intensity_classes == "free":
+            return self.intensities_
+        elif self.intensity_classes == "free_ws2":
+            ret_intensities = [self.init_intensities_Gr]
+            for i in range(len(self.intensities_)):
+                ret_intensities.append(self.intensities_[i])
+            return ret_intensities
+        elif self.train_methods.intensity_classes == "vacancies":
+            raise NotImplementedError("Vacancies not implemented yet")
+            return [self.init_intensities_Gr,
+                    self.vacanciesS1.sigmoid() * 16.,
+                    self.vacanciesW.sigmoid() * 74.,
+                    self.vacanciesS2.sigmoid() * 16.
+                    ]
+        elif self.train_methods.intensity_classes == "fixed":
+            return self.intensities_
+
+
+    def aux_loss(self):
+
+        if self.train_methods.intensity_classes == "classes":
+            weights = F.softmax(self.intensities_, dim=1)
+            entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()
+        elif self.train_methods.intensity_classes == "free":
+            entropy = 0.0
+        elif self.train_methods.intensity_classes == "vacancies":
+            entropies = []
+            ps = [self.vacanciesS1.sigmoid(),
+                    self.vacanciesW.sigmoid(),
+                    self.vacanciesS2.sigmoid()
+                    ]
+            for i in range(1, len(ps)):
+               p = ps[i]
+               entropy = -(p * torch.log(p + 1e-8) + (1-p) * torch.log(1-p + 1e-8)).mean()
+               entropies.append(entropy)
+            entropy = torch.mean(torch.stack(entropies))
+        else:
+            entropy = 0.0
+        return entropy
+
+
+    def forward(self, _):
+
+        potential_list = []
+        positions = self.get_positions()
+        intensities = self.get_intensities()
+
+        for i in range(self.N_l):
+            rho_i = self.create_rho(positions[i], intensities[i])
+            # rho_i = self.simulation.calc_rho(self.positions[i], torch.abs(self.intensities[i]).unsqueeze(1))
+
+            potential_i = self.potential_2d_fft_nm(rho_i, device=self.device)
+            potential_list.append(potential_i)
+
+        return potential_list, self.aux_loss()
+
+
+
+
+
+    def create_rho(self, pxpositions, intensities, multiplier=1.0):
+        # pxpositions: (N, 2) Tensor
+        # intensities: (N,) Tensor
+
+        intensities = intensities.unsqueeze(1)  # (N, 1) Tensor
+
+        pad = 2
+
+        rho = torch.zeros((self.W + pad * 2, self.H + pad * 2), device=self.device)
+
+        # potential.fill_(self.background)  # Torch-Äquivalent
+
+        py, px = pxpositions[:, 0], pxpositions[:, 1]
+
+        pos_mask = (px >= 0.0) & (px <= self.W) & (py >= 0.0) & (py <= self.H)
+        px = px[pos_mask]
+        py = py[pos_mask]
+        intensities = intensities[pos_mask]
+        # offset = int(self.canvas_size / self.kernelsize)
+        offset = pad
+
+        # Integer-Anteile
+        # ix = torch.clamp(px.floor().to(torch.int64), min=0, max=self.shape[0] + self.canvas_size - 2)
+        # iy = torch.clamp(py.floor().to(torch.int64), min=0, max=self.shape[1] + self.canvas_size - 2)
+
+        ix = px.floor().to(torch.int64)
+        iy = py.floor().to(torch.int64)
+
+        # Bruchteile
+        fx = px - ix
+        fy = py - iy
+
+        # Pixelgewichte
+        w00 = torch.matmul((1 - fx), (1 - fy)) * intensities * multiplier
+        w10 = torch.matmul(fx, (1 - fy)) * intensities* multiplier
+        w11 = torch.matmul(fx, fy) * intensities* multiplier
+        w01 = torch.matmul((1 - fx), fy) * intensities* multiplier
+
+        # Indizes für alle vier Nachbarn
+        idx00 = (offset + iy, offset + ix)
+        idx10 = (offset + iy, offset + ix + 1)
+        idx11 = (offset + iy + 1, offset + ix + 1)
+        idx01 = (offset + iy + 1, offset + ix)
+
+        # In-place Akkumulation wie np.add.at
+        rho.index_put_(idx00, w00[:idx00[0].shape[0], 0], accumulate=True)
+        rho.index_put_(idx10, w10[:idx10[0].shape[0], 0], accumulate=True)
+        rho.index_put_(idx11, w11[:idx11[0].shape[0], 0], accumulate=True)
+        rho.index_put_(idx01, w01[:idx01[0].shape[0], 0], accumulate=True)
+
+        return torch.abs(rho[pad:-pad, pad:-pad])  # Entfernen des Pads
+
+    def potential_2d_nm(self, rho, sigma=0.1, epsilon0_nm=8.854e-21, device=None):
+        """
+        Berechnet geglättetes 2D-Potential aus Delta-Peaks (nm-Einheiten)
+
+        rho: 2D-Tensor [ny,nx] in Vielfachen von e
+        spacing: Pixelgröße in nm
+        sigma: Glättungs-Gauss in nm
+        epsilon0_nm: Permittivität in F/nm
+        """
+        e = 1.602e-19
+        rho = rho.to(device, dtype=torch.float32)
+        ny, nx = (self.W, self.H)
+        spacing = self.pixel_size_m
+
+        # Gaussian-Kernel
+        s_pix = max(1, int(6 * sigma / spacing))
+        if s_pix % 2 == 0: s_pix += 1
+        coords = torch.arange(s_pix, device=device) - s_pix // 2
+        Y, X = torch.meshgrid(coords, coords, indexing='ij')
+        R2 = (X * spacing) ** 2 + (Y * spacing) ** 2
+        G_kernel = torch.exp(-R2 / (2 * sigma ** 2))
+        G_kernel /= G_kernel.sum()
+
+        # Faltung
+        rho_input = rho.unsqueeze(0).unsqueeze(0)
+        kernel = G_kernel.unsqueeze(0).unsqueeze(0)
+        V = F.conv2d(rho_input, kernel, padding=s_pix // 2)
+        V = V[0, 0] / (4 * torch.pi * epsilon0_nm)  # Volt
+
+        return V
+
+    def solve_potential(self,iterations=100):
+        V = torch.zeros_like(self.potential)  # initial guess
+        for _ in range(iterations):
+            V = 0.25 * (F.pad(V, (1, 1, 1, 1), mode='replicate')[:, :-2, 1:-1] +
+                        F.pad(V, (1, 1, 1, 1), mode='replicate')[:, 2:, 1:-1] +
+                        F.pad(V, (1, 1, 1, 1), mode='replicate')[:, 1:-1, :-2] +
+                        F.pad(V, (1, 1, 1, 1), mode='replicate')[:, 1:-1, 2:] +
+                        self.potential)  # simple Jacobi iteration
+        return V
+
+    def potential_2d_fft_nm(self, rho, epsilon0_nm=8.854e-21, device=None):
+        """
+        Berechnet 2D Potential mit FFT-Faltung (viel schneller für große Raster)
+
+        rho: 2D-Tensor [ny,nx] in Vielfachen von e
+        spacing: Pixelgröße in nm
+        sigma: Glättungs-Gauss in nm
+        """
+
+        sigma = self.blur_sigma_ * 1.e-3
+
+        e = 1.602e-19
+        ny, nx = (self.W, self.H)
+        spacing = self.pixel_size_m
+
+        # Frequenzraum-Koordinaten
+        y = torch.fft.fftfreq(ny, d=spacing, device=device)
+        x = torch.fft.fftfreq(nx, d=spacing, device=device)
+        Y, X = torch.meshgrid(y, x, indexing='ij')
+        R2 = X ** 2 + Y ** 2
+
+        # FFT von 1/sqrt(r^2 + sigma^2) in Fourierraum:
+        # Für Gaussian-Kernel einfacher: F(G) = exp(-2 pi^2 sigma^2 (fx^2 + fy^2))
+        G_fft = torch.exp(-2 * torch.pi ** 2 * sigma ** 2 * R2)
+
+        # FFT des Rasters
+        rho_fft = torch.fft.fft2(rho * e)
+
+        # Faltung im Fourierraum
+        V_fft = rho_fft * G_fft
+        V = torch.fft.ifft2(V_fft).real / (4 * torch.pi * epsilon0_nm)
+
+        return V
