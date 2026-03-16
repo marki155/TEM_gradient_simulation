@@ -11,10 +11,18 @@ class TrainState:
 
 @dataclass
 class TrainMethod:
-    intensity_classes: str = "free"   # "free", "vacancies", "classes"
-    train_blur: bool = False
 
-    learning_rate: float = 0.01
+    loss_mse: float = 0.0
+    loss_ncc: float = 1.0
+    loss_local_ncc: float = 0.0
+    loss_ssim: float = 0.0
+    loss_l1: float = 0.0
+    loss_fft: float = 0.0
+
+    train_blur: bool = False
+    train_amplitude_contrast: bool = False
+
+    learning_rate: float = 0.00001
 
     train_graphen_intensities: bool = False
     train_S1_intensities: bool = False
@@ -27,17 +35,17 @@ class TrainMethod:
     train_S2_occupancies: bool = False
 
     graphen_shift: bool = True
-    graphen_rotation: bool = False
+    graphen_rotation: bool = True
     graphen_free_positions: bool = False
-    graphen_scale: bool = False
+    graphen_scale: bool = True
 
-    WS2_shift: bool = True
-    WS2_rotation: bool = True
+    WS2_shift: bool = False
+    WS2_rotation: bool = False
     WS2_free_positions: bool = False
     WS2_scale: bool = False
 
 
-    train_ctf_aberrations: bool = False
+    train_ctf_aberrations: bool = True
     train_aberrations = {"C10": True,
                    'C12': True,
                    'C23': True,
@@ -55,9 +63,9 @@ class TrainMethod:
 
     train_multislice_sigma: bool = False
 
-    only_train_small_area: int = 0 # TODO
+    only_train_small_area: int = 1 # TODO
 
 
     #train_amp_contrast: bool = False # TODO
 
-    train_small_area_squares = [(500, 600, 1000, 1000), (0, 0, 300, 300)]
+    train_small_area_squares = [(50, 50, 350, 350), (500, 600, 1000, 1000)]

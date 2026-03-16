@@ -42,8 +42,8 @@ class TrainMethodEditor:
 
             # str -> combobox (für bekannte Attribute / bekannte Werte)
             elif isinstance(value, str):
-                if name == "intensity_classes":
-                    options = ["free", "vacancies", "classes"]
+                if name == "loss_fkt":
+                    options = ["MSE", "NCC", "SSIM"]
                     var = tk.StringVar(value=value)
                     combo = ttk.Combobox(
                         self.frame,
@@ -79,6 +79,99 @@ class TrainMethodEditor:
                 self.tk_vars[name] = var
 
             row += 1
+
+    def graphen_training(self):
+        self.train_method.learing_rate = 1.e-9
+
+        self.train_method.train_graphen_intensities = False
+        self.train_method.train_S1_intensities = False
+        self.train_method.train_W_intensities = False
+        self.train_method.train_S2_intensities = False
+
+        self.train_method.train_graphen_occupancies = False
+        self.train_method.train_S1_occupancies = False
+        self.train_method.train_W_occupancies = False
+        self.train_method.train_S2_occupancies = False
+
+        self.train_method.graphen_shift = True
+        self.train_method.graphen_rotation = True
+        self.train_method.graphen_free_positions = False
+        self.train_method.graphen_scale = True
+        self.train_method.WS2_shift = False
+        self.train_method.WS2_rotation = False
+        self.train_method.WS2_free_positions = False
+        self.train_method.WS2_scale = False
+        self.train_method.train_ctf_aberrations = False
+        self.train_method.train_multislice_sigma = False
+
+        self.train_method.only_train_small_area = 0
+
+        self.refresh_from_object()
+
+    def WS2_training(self):
+
+        self.train_method.train_blur = True
+        self.train_method.train_amplitude_contrast = True
+
+        self.train_method.learing_rate = 0.00001
+        self.train_method.train_graphen_intensities = False
+        self.train_method.train_S1_intensities = False
+        self.train_method.train_W_intensities = False
+        self.train_method.train_S2_intensities = False
+
+        self.train_method.train_graphen_occupancies = False
+        self.train_method.train_S1_occupancies = False
+        self.train_method.train_W_occupancies = False
+        self.train_method.train_S2_occupancies = False
+
+        self.train_method.graphen_shift = False
+        self.train_method.graphen_rotation = False
+        self.train_method.graphen_free_positions = False
+        self.train_method.graphen_scale = False
+        self.train_method.WS2_shift = True
+        self.train_method.WS2_rotation = True
+        self.train_method.WS2_free_positions = False
+        self.train_method.WS2_scale = True
+        self.train_method.train_ctf_aberrations = True
+        self.train_method.train_multislice_sigma = True
+
+        self.train_method.train_env_parameters = True
+
+        self.train_method.only_train_small_area = 1
+
+        self.refresh_from_object()
+
+    def main_training(self):
+        self.train_method.learing_rate = 0.0001
+
+        self.train_method.train_blur = False
+        self.train_method.train_amplitude_contrast = False
+
+        self.train_method.train_graphen_intensities = False
+        self.train_method.train_S1_intensities = False
+        self.train_method.train_W_intensities = False
+        self.train_method.train_S2_intensities = False
+
+        self.train_method.train_graphen_occupancies = False
+        self.train_method.train_S1_occupancies = True
+        self.train_method.train_W_occupancies = True
+        self.train_method.train_S2_occupancies = True
+
+        self.train_method.graphen_shift = False
+        self.train_method.graphen_rotation = False
+        self.train_method.graphen_free_positions = False
+        self.train_method.graphen_scale = False
+        self.train_method.WS2_shift = False
+        self.train_method.WS2_rotation = False
+        self.train_method.WS2_free_positions = True
+        self.train_method.WS2_scale = False
+        self.train_method.train_ctf_aberrations = False
+        self.train_method.train_multislice_sigma = False
+
+        self.train_method.only_train_small_area = -1
+
+        self.refresh_from_object()
+
 
     def _update_attr(self, name, value):
         setattr(self.train_method, name, value)

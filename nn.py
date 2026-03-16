@@ -4,6 +4,7 @@ import torch.fft as fft
 import torch.nn.functional as F
 import math
 
+from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss
 from multislice import DifferentiableMultislice_Free, DifferentiableMultislice
 from potential import DifferentiablePotential
 from simulation import Simulation
@@ -185,17 +186,18 @@ class NN_particles(nn.Module):
         aberrations = {'C10': -57., 'C12': 1.0, 'C23': 3.0e3,
                        'C21': 50.0e3, 'C30': 5.0e3, 'C34': 20.0e3, 'C32': 50.0e3}
 
-        aberrations = {'C10': -57., 'C30': 2.}
 
-        aberrations = {"C10": -15.,
+
+        aberrations = {"C10": -13.,
                        'C12': 1.0, "phi12": 0.,
-                       'C23': 5., 'phi23': 0.,
-                       'C21': 5., 'phi21': 0.,
+                       'C23': 2., 'phi23': 0.,
+                       'C21': 2., 'phi21': 0.,
                        "C30": 4., #um
                        'C34': .02, 'phi34': 0., #um
                        'C45': .05, 'phi45': 0.} #um
 
         #aberrations = {'C10': -7., 'C30': 5.}
+        #aberrations = {'C10': -13., 'C30': 2.}
 
 
 
@@ -207,7 +209,7 @@ class NN_particles(nn.Module):
             'use_detector': False,
         }
 
-        amp_contrast = .5
+        amp_contrast = .1
         ctf_layer = CTFLayer(H, W, self.pixel_size_nm, self.voltage_kV, self.wavelength_nm,
                             amp_contrast,
                              aberrations=aberrations,
@@ -221,11 +223,19 @@ class NN_particles(nn.Module):
             ctf_layer)
 
 
-    def loss(self, target_image, brightness=None, constrast=None):
+    def loss_old(self, target_image, brightness=None, constrast=None):
 
         intensities = torch.pow(self.intensities, self.contrast)
         potential = self.simulation.calc_potential(self.positions, torch.abs(intensities))
         simulated_image = self.simulation.simulate(potential, self.aberrations, blur=self.blur)
+
+
+
+        if self.train_methods.only_train_small_area >= 0:
+            # train_small_area_square = [(500, 600), (1000, 1000)]
+            x_min, y_min, x_max, y_max = self.train_small_area_square[self.train_methods.only_train_small_area]
+            simulated_image = simulated_image[x_min:x_max,y_min:y_max]
+            target_image = target_image[x_min:x_max, y_min:y_max]
 
         minimum_sim_image = torch.min(simulated_image)
         maximum_sim_image = torch.max(simulated_image)
@@ -233,13 +243,12 @@ class NN_particles(nn.Module):
         contrast_sim_image = torch.std(simulated_image)
         # Normalisierung der Simulation
         simulated_image = (simulated_image - brightness_sim_image) / contrast_sim_image
-        #simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
+        # simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
 
-        if self.train_methods.only_train_small_area >= 0:
-            # train_small_area_square = [(500, 600), (1000, 1000)]
-            x_min, y_min, x_max, y_max = self.train_small_area_square[self.train_methods.only_train_small_area]
-            simulated_image = simulated_image[x_min:x_max,y_min:y_max]
-            target_image = target_image[x_min:x_max, y_min:y_max]
+        brightness_tgt_image = torch.mean(target_image)
+        contrast_tgt_image = torch.std(target_image)
+        # Normalisierung des Zielbildes
+        target_image = (target_image - brightness_tgt_image) / contrast_tgt_image
 
         return simulated_image, F.mse_loss(simulated_image, target_image)
 
@@ -275,10 +284,43 @@ class NN_particles(nn.Module):
         error = torch.sum((torch.mean(simulation) - simulation) * (torch.mean(image) - image)) / \
                      (torch.std(simulation) * torch.std(image) * (imageHeight * imageWidth - 1))
 
+        loss_fft = RadialPowerSpectrumLoss(log_scale=True, weighting="bragg")
+        #loss, P_diff = loss_fn(simulation.unsqueeze(0).unsqueeze(0),  # → (1, 1, H, W)
+        #               image.unsqueeze(0).unsqueeze(0))
 
+        error = torch.corrcoef(torch.stack([simulation.flatten(), image.flatten()]))[0, 1]
+        diff_image = (simulation - image)
 
-        #error = torch.corrcoef(torch.stack([simulation.flatten(), image.flatten()]))[0, 1]
-        return - error + F.mse_loss(simulation, image)
+        ncc_loss = NCCLoss()
+        ssim_loss = SSIMLoss(data_range=1.0)
+        local_ncc_loss = LocalNCCLoss(window_size=11)
+        loss_l1 = nn.L1Loss()
+        loss_MSE = nn.MSELoss()
+        tt = image.unsqueeze(0).unsqueeze(0)
+        sim = simulation.unsqueeze(0).unsqueeze(0)
+        a_mse = float(self.train_method.loss_mse)
+        a_ncc = float(self.train_method.loss_ncc)
+        a_local_ncc = float(self.train_method.loss_local_ncc)
+        a_ssim = float(self.train_method.loss_ssim)
+        a_l1 = float(self.train_method.loss_l1)
+        a_fft = float(self.train_method.loss_fft)
+
+        P_diff = None
+        total_loss = 0.0
+        if a_mse > 0:
+             total_loss += a_mse * loss_MSE(sim, tt)
+        if a_ncc > 0:
+             total_loss += a_ncc * ncc_loss(sim, tt)
+        if a_local_ncc > 0:
+             total_loss += a_local_ncc * local_ncc_loss(sim, tt)
+        if a_ssim > 0:
+             total_loss += a_ssim * ssim_loss(sim, tt)
+        if a_l1 > 0:
+             total_loss += a_l1 * loss_l1(sim, tt)
+        if a_fft > 0:
+            _loss_fft, P_diff = loss_fft(sim, tt)
+            total_loss += a_fft * _loss_fft
+        return  total_loss, P_diff
 
     def loss_multislice(self, target_image, brightness=None, contrast=None):
         """Berechnet den Unterschied zwischen Simulation und Zielbild."""
@@ -286,11 +328,7 @@ class NN_particles(nn.Module):
 
         simulated_image, aux_loss = self.model(None)
 
-        #simulated_image = simulated_image[:target_image.shape[0], :target_image.shape[1]]
-        minimum_sim_image = torch.min(simulated_image)
-        maximum_sim_image = torch.max(simulated_image)
-        simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
-        #simulated_image = (simulated_image - brightness_sim_image) / contrast_sim_image
+
 
         train_area_idx = int(self.train_methods.only_train_small_area)
 
@@ -300,6 +338,22 @@ class NN_particles(nn.Module):
             simulated_image = simulated_image[x_min:x_max,y_min:y_max]
             target_image = target_image[x_min:x_max, y_min:y_max]
 
-        rec_error = self.calc_error(simulated_image, target_image, target_image.shape[0], target_image.shape[1])
+        # simulated_image = simulated_image[:target_image.shape[0], :target_image.shape[1]]
+        minimum_sim_image = torch.min(simulated_image)
+        maximum_sim_image = torch.max(simulated_image)
+        brightness_sim_image = torch.mean(simulated_image)
+        contrast_sim_image = torch.std(simulated_image)
+        #simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
+        simulated_image = (simulated_image - brightness_sim_image) / contrast_sim_image
 
-        return simulated_image, rec_error + aux_loss
+        minimum_target_image = torch.min(target_image)
+        maximum_target_image = torch.max(target_image)
+        brightness_tgt_image = torch.mean(target_image)
+        contrast_t = torch.std(target_image)
+        #target_image = (target_image - minimum_target_image) / (maximum_target_image - minimum_target_image)
+        target_image = (target_image - brightness_tgt_image) / contrast_t
+
+
+        rec_error, P_diff = self.calc_error(simulated_image, target_image, target_image.shape[0], target_image.shape[1])
+
+        return simulated_image, target_image, P_diff, rec_error + aux_loss

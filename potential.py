@@ -57,6 +57,10 @@ class DifferentiablePotential(nn.Module):
                 if i != self._IDX["Gr"]:
                     self.positions_[i].requires_grad = self.train_methods.WS2_free_positions
 
+            self.blur_sigma_.requires_grad = self.train_methods.train_blur
+
+
+
     def zero_grads_for_frozen(self):
         if not self.train_methods.train_graphen_intensities:
             self.intensities_[0].grad = None
@@ -219,7 +223,11 @@ class DifferentiablePotential(nn.Module):
 
             # Rotation um den Mittelpunkt der Graphen-Positionen
 
-            center = torch.tensor((self.H/2, self.W/2), device=self.device)
+            #center = torch.tensor((self.H/2, self.W/2), device=self.device)
+            x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[idx_s_r]
+            center = torch.tensor([(x_min + x_max) / 2, (y_min + y_max) / 2], device=self.device)
+
+
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation) or
                     (i != self._IDX["Gr"] and self.train_methods.WS2_rotation)):
                 theta = self.rotations_[idx_s_r]
@@ -255,7 +263,7 @@ class DifferentiablePotential(nn.Module):
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_scale) or
                     (i != self._IDX["Gr"] and self.train_methods.WS2_scale)):
 
-                scales = torch.clamp(self.scales_[idx_s_r], min=0.9, max=1.1)
+                scales = torch.clamp(self.scales_[idx_s_r], min=0.90, max=1.1)
             else:
                 scales = self.scales_[idx_s_r].detach()
             rotated_positions = rotated_positions * scales
@@ -268,13 +276,18 @@ class DifferentiablePotential(nn.Module):
 
     def occupy_layers_in_area(self, area, layers):
         x0, y0, x1, y1 = area
+        pad = 70
+        x0 -= pad
+        x1 += pad
+        y0 -= pad
+        y1 += pad
         for l in layers:
             pos = self.positions_[l]
             xs, ys = pos[:,0], pos[:,1]
             for i in range(pos.shape[0]):
                 if (xs[i] >= x0 and xs[i] <= x1) and \
                         (ys[i] >= y0 and ys[i] <= y1):
-                    self.occupancies_[l][i] = -10
+                    self.occupancies_[l][i] = -100
 
 
     def get_positions_old(self):
@@ -370,10 +383,10 @@ class DifferentiablePotential(nn.Module):
 
 
     def get_pos_and_ints(self, pos_idx):
-        intensities = self.get_intensities_raw()[pos_idx].cpu().detach().numpy()
-        occ = self.occupancies_[pos_idx].sigmoid().cpu().detach().numpy()
+        intensities = self.get_intensities_raw()[pos_idx].detach().clone().numpy()
+        occ = self.occupancies_[pos_idx].sigmoid().detach().numpy()
         occ_neg_mask = occ < 0.5
-        #intensities[occ_neg_mask] = None # TODO
+        intensities[occ_neg_mask] = None # TODO
         positions = self.get_positions()[pos_idx].cpu().detach().numpy()
         return (positions[:,0], positions[:,1]), intensities
 
@@ -404,6 +417,16 @@ class DifferentiablePotential(nn.Module):
 
     def aux_loss(self):
 
+        entropies = []
+        ps = [self.occupancies_[i].sigmoid() for i in range(self.N_l)
+              ]
+        for i in range(1, len(ps)):
+            p = ps[i]
+            entropy = -(p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).mean()
+            entropies.append(entropy)
+        entropy = torch.mean(torch.stack(entropies))
+
+        return entropy
         if self.train_methods.intensity_classes == "classes":
             weights = F.softmax(self.intensities_, dim=1)
             entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()

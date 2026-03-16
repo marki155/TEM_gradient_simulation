@@ -37,6 +37,7 @@ class SharedVizState:
     ctf_phase: Optional[np.ndarray] = None
     ring_mask: Optional[np.ndarray] = None
     intensities: Optional[np.ndarray] = None
+    p_diff: Optional[np.ndarray] = None
 
     # lock for thread-safe access
     lock: threading.Lock = threading.Lock()
@@ -117,6 +118,7 @@ class LiveTrainGUI:
     def _apply_trainable_selection(self):
         self.pot_layer.apply_trainable_selection()
 
+
     def _zero_grads_for_frozen(self):
         self.pot_layer.zero_grads_for_frozen()
 
@@ -141,7 +143,7 @@ class LiveTrainGUI:
 
         # ---- 3x3 figure
         self.fig = Figure(figsize=(9.5, 7.5), dpi=100)
-        self.axes = [self.fig.add_subplot(3, 4, i + 1) for i in range(10)]
+        self.axes = [self.fig.add_subplot(3, 4, i + 1) for i in range(11)]
 
         for ax in self.axes:
             ax.set_xticks([])
@@ -157,6 +159,7 @@ class LiveTrainGUI:
         self.axes[7].set_title("Potential 3 (blur)")
         self.axes[8].set_title("CTF phase + ringmask")
         self.axes[9].set_title("Intensities")
+        self.axes[10].set_title("Diff Power spectrum (optional)")
 
         self.fig.tight_layout(pad=1.0)
 
@@ -230,23 +233,30 @@ class LiveTrainGUI:
 
         quick = ttk.Frame(self.ctrl_frame)
         quick.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(quick, text="All on", command=self._all_on).grid(row=0, column=0, sticky="ew")
-        ttk.Button(quick, text="All off", command=self._all_off).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        ttk.Button(quick, text="Graphen area", command=self._graphen_training).grid(row=0, column=0, sticky="ew")
+        ttk.Button(quick, text="WS2 area", command=self._ws2_training).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        ttk.Button(quick, text="main training", command=self._main_training).grid(row=0, column=2, sticky="ew", padx=(6, 0))
         quick.columnconfigure(0, weight=1)
         quick.columnconfigure(1, weight=1)
+
+        self._graphen_training()
 
     def _on_checkbox_change(self):
         self._apply_trainable_selection()
 
-    def _all_on(self):
-        for v in self.group_vars:
-            v.set(True)
+    def _graphen_training(self):
+        self.train_method_editor.graphen_training()
         self._apply_trainable_selection()
 
-    def _all_off(self):
-        for v in self.group_vars:
-            v.set(False)
+    def _ws2_training(self):
+        self.train_method_editor.WS2_training()
         self._apply_trainable_selection()
+
+    def _main_training(self):
+        self.train_method_editor.main_training()
+        self._apply_trainable_selection()
+
+
 
     # -------------------------
     # Training Thread
@@ -269,11 +279,11 @@ class LiveTrainGUI:
 
             # TRAIN STEP
             self.optimizer.zero_grad(set_to_none=True)
-            self.optimizer.learning_rate = self.train_method.learning_rate
+            self.optimizer.learning_rate = float(self.train_method.learning_rate)
 
             # === your forward/loss ===
             # simulated_image, loss = self.model.loss(self.target, self.brightness, self.contrast)
-            simulated_image, loss = self.model.loss_multislice(self.target, self.brightness, self.contrast)
+            simulated_image, target_image, P_diff, loss = self.model.loss_multislice(self.target, self.brightness, self.contrast)
 
             loss.backward()
 
@@ -295,15 +305,22 @@ class LiveTrainGUI:
             # VIS UPDATE EVERY N STEPS
             if step % self.plot_every == 0 or step == 0:
                 # --- compute sim/diff/target
-                sim_img = simulated_image.detach().cpu().numpy()
-                tgt_img = self.target.detach().cpu().numpy()
+                sim_img = simulated_image.clone().detach().cpu().numpy()
+                tgt_img = target_image.clone().detach().cpu().numpy()
 
-                x_min, y_min, x_max, y_max = self.train_method.train_small_area_squares[
-                    int(self.train_method.only_train_small_area)]
-                target_image_selected = tgt_img[x_min:x_max, y_min:y_max]
+                #train_area_idx = int(self.train_method.only_train_small_area)
+                #if train_area_idx >= 0 and train_area_idx < len(self.train_method.train_small_area_squares):
+                #    x_min, y_min, x_max, y_max = self.train_method.train_small_area_squares[train_area_idx]
+                #    target_image_selected = tgt_img[x_min:x_max, y_min:y_max]
+                #else:
+                #    target_image_selected = tgt_img
+#
+#                if self.train_method.show_selected_area_target:
+#                    tgt_img = target_image_selected
 
 
-                diff_img = (sim_img - target_image_selected) ** 2
+
+                diff_img = (sim_img - tgt_img)
 
                 # --- potentials
                 potentials, _ = self.pot_layer(None)  # as in your code
@@ -333,6 +350,10 @@ class LiveTrainGUI:
                     self.viz.ctf_phase = ctf_phase
                     self.viz.ring_mask = ring
                     self.viz.intensities = intensities
+                    if P_diff is not None:
+                        self.viz.p_diff = P_diff.detach().cpu().numpy()
+                    else:
+                        self.viz.p_diff = None
 
                 if step == 0:
                     self.init_images()
@@ -402,6 +423,7 @@ class LiveTrainGUI:
             ring = self.viz.ring_mask
             status = self.viz.status
             intensities = self.viz.intensities
+            P_diff = self.viz.p_diff
 
 
         self.status_var.set(status)
@@ -440,8 +462,14 @@ class LiveTrainGUI:
 
         if tgt is not None:
             #self.axes[3].imshow(tgt, cmap="viridis")
-            #self.im_tgt.set_data(tgt)
-            pass
+            self.im_tgt.set_data(tgt)
+
+
+        if P_diff is not None:
+            self.axes[10].clear()
+            self.axes[10].imshow(P_diff[0,:,:], aspect='auto', origin='lower', cmap='viridis')
+            #self.axes[10].plot(np.linspace(0,1, P_diff.shape[1]), P_diff[0,:])
+            self.axes[10].set_title("Diff Power Spectrum")
 
         if intensities is not None:
             self.axes[9].clear()

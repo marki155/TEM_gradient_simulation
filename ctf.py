@@ -134,7 +134,7 @@ class CTFLayer(nn.Module):
         self.W = W
         self.pixel_size_nm = pixel_size_nm
         self.voltage_kV = voltage_kV
-        self.amp_contrast = amp_contrast#nn.Parameter(torch.tensor(amp_contrast), device=device)
+        self.amp_contrast = nn.Parameter(torch.tensor(amp_contrast, device=device))
         self.envelope_params = envelope_params
         self.deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], device=device))
         self.Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], device=device))
@@ -208,9 +208,12 @@ class CTFLayer(nn.Module):
 
         aberr_phase = zernike_phase(alpha, phi, aberrations, device=self.device)
         chi = 2.0 * math.pi * aberr_phase / lam  # klassische TEM-Phase
-
-
-        ctf = torch.exp(-1j * chi)  # 0.5 * coher + 0.5 * 1j * imag_part  # komplexe CTF
+        if self.train_method is not None and self.train_method.train_amplitude_contrast:
+            Q = torch.clamp(self.amp_contrast, 0.0, 1.0)
+        else:
+            Q = torch.clamp(self.amp_contrast.detach(), 0.0, 1.0)
+        ac = math.sqrt(1.0 - Q ** 2) - 1j * Q
+        ctf = ac * torch.exp(-1j * chi)
 
         if self.train_method.train_env_params["deltaE"] and self.train_method.train_env_parameters:
             deltaE = torch.clamp(self.deltaE, min=0.25, max=0.45)

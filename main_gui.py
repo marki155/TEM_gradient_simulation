@@ -34,15 +34,15 @@ if __name__ == '__main__':
     image = tifffile.imread('NPL11-1_crop_big.tif')
     image[np.where(image == 0.0)] = np.median(image)
     H, W = image.shape
-    fov = 7.58  # 4.163565463642421 # TODO als Parameter
+    fov = 7.58#7.58  # 4.163565463642421 # TODO als Parameter
 
     pixel_size_nm = fov / image.shape[1]
 
-    max_rot_graphen = np.deg2rad(30)
+    max_rot_graphen = np.deg2rad(10)
     canvas_H_rot_graphen = np.cos(max_rot_graphen) * H + np.sin(max_rot_graphen) * W
     canvas_W_rot_graphen = np.cos(max_rot_graphen) * W + np.sin(max_rot_graphen) * H
 
-    max_shift_graphen = 2.47 * .1 / pixel_size_nm
+    max_shift_graphen = 3*2.47 * .1 / pixel_size_nm
     canvas_H_shift_graphen = H + 2 * max_shift_graphen
     canvas_W_shift_graphen = W + 2 * max_shift_graphen
 
@@ -53,7 +53,7 @@ if __name__ == '__main__':
     max_rot_ws2 = np.deg2rad(5)
     canvas_H_rot_ws2 = np.cos(max_rot_ws2) * H + np.sin(max_rot_ws2) * W
     canvas_W_rot_ws2 = np.cos(max_rot_ws2) * W + np.sin(max_rot_ws2) * H
-    max_shift_ws2 = 3.18 * .1 / pixel_size_nm
+    max_shift_ws2 = 3*3.18 * .1 / pixel_size_nm
     canvas_H_shift_ws2 = H + 2 * max_shift_ws2
     canvas_W_shift_ws2 = W + 2 * max_shift_ws2
     canvas_size_ws2 = (int(max(canvas_H_rot_ws2, canvas_H_shift_ws2)),
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     ws2.translate((-10, -10, 0))
     graphen = ase.build.graphene(vacuum=1.0)*(graphen_H_atoms, graphen_W_atoms,1)
     graphen.rotate(0, 'z', )
-    graphen.translate((-15, -20,0))
+    graphen.translate((-10, -18,0))
 
     model = ws2
 
@@ -154,7 +154,7 @@ if __name__ == '__main__':
 
     ctf_layer = model.model[2]
     pot_layer = model.model[0]
-    pot_layer.occupy_layers_in_area(train_method.train_small_area_squares[1], [1,2,3])
+    pot_layer.occupy_layers_in_area(train_method.train_small_area_squares[0], [1,2,3])
 
     # Optimierer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
