@@ -152,7 +152,7 @@ class NN_free_potential(nn.Module):
         return simulated_image, F.mse_loss(simulated_image, target_image)
 
 class NN_particles(nn.Module):
-    def __init__(self, image_shape, fov, voltage_kV, train_method, device='cpu', train_small_area_square=None):
+    def __init__(self, image_shape, fov, voltage_kV, train_method, device='cpu', train_methods=None):
         super().__init__()
         self.shape = image_shape
         self.fov = fov
@@ -161,7 +161,7 @@ class NN_particles(nn.Module):
         self.device = device
         self.train_method = train_method
         self.wavelength_nm = relativistic_wavelength_nm(voltage_kV)
-        self.train_small_area_square = train_small_area_square
+        self.train_methods = train_methods
 
 
     def build_multislice(self, init_positions, init_intensities, dz, max_shifts=None, max_rotations=None):
@@ -170,8 +170,7 @@ class NN_particles(nn.Module):
 
         potential_layer = DifferentiablePotential(self.train_method, init_positions, init_intensities,self.shape, self.pixel_size_nm,
                                                   self.wavelength_nm, device=self.device,
-                                                  max_shifts=max_shifts, max_rotations=max_rotations,
-                                                  train_small_area_square=self.train_small_area_square)
+                                                  max_shifts=max_shifts, max_rotations=max_rotations)
 
 
         multislice = DifferentiableMultislice(
@@ -236,10 +235,9 @@ class NN_particles(nn.Module):
         simulated_image = (simulated_image - brightness_sim_image) / contrast_sim_image
         #simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
 
-        if self.train_methods.only_train_small_area:
+        if self.train_methods.only_train_small_area >= 0:
             # train_small_area_square = [(500, 600), (1000, 1000)]
-            x_min, y_min = self.train_small_area_square[0]
-            x_max, y_max = self.train_small_area_square[1]
+            x_min, y_min, x_max, y_max = self.train_small_area_square[self.train_methods.only_train_small_area]
             simulated_image = simulated_image[x_min:x_max,y_min:y_max]
             target_image = target_image[x_min:x_max, y_min:y_max]
 
@@ -293,6 +291,14 @@ class NN_particles(nn.Module):
         maximum_sim_image = torch.max(simulated_image)
         simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
         #simulated_image = (simulated_image - brightness_sim_image) / contrast_sim_image
+
+        train_area_idx = int(self.train_methods.only_train_small_area)
+
+        if train_area_idx >= 0:
+            # train_small_area_square = [(500, 600), (1000, 1000)]
+            x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[train_area_idx]
+            simulated_image = simulated_image[x_min:x_max,y_min:y_max]
+            target_image = target_image[x_min:x_max, y_min:y_max]
 
         rec_error = self.calc_error(simulated_image, target_image, target_image.shape[0], target_image.shape[1])
 

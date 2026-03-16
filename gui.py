@@ -88,7 +88,7 @@ class LiveTrainGUI:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._trainer_thread: Optional[threading.Thread] = None
-        self.train_small_area_square = train_small_area_square
+        self.train_small_area_square = train_method.train_small_area_squares
 
         # Shared state for visualization
         self.viz = SharedVizState(
@@ -166,9 +166,9 @@ class LiveTrainGUI:
         # Prepare image handles (for speed)
         dummy_img = np.zeros_like(self.target.detach().cpu())
 
-        self.im_sim = self.axes[1].imshow(dummy_img, cmap="viridis")
-        self.im_diff = self.axes[2].imshow(dummy_img, cmap="viridis")
-        self.im_tgt = self.axes[3].imshow(self.target.detach().cpu(), cmap="viridis")
+        self.im_sim = self.axes[1].imshow(dummy_img, cmap="viridis", origin="lower")
+        self.im_diff = self.axes[2].imshow(dummy_img, cmap="viridis", origin="lower")
+        self.im_tgt = self.axes[3].imshow(self.target.detach().cpu(), cmap="viridis", origin="lower")
 
         for i in range(len(self.train_small_area_square)):
             x0, y0, x1, y1 = self.train_small_area_square[i]
@@ -297,7 +297,13 @@ class LiveTrainGUI:
                 # --- compute sim/diff/target
                 sim_img = simulated_image.detach().cpu().numpy()
                 tgt_img = self.target.detach().cpu().numpy()
-                diff_img = (sim_img - tgt_img) ** 2
+
+                x_min, y_min, x_max, y_max = self.train_method.train_small_area_squares[
+                    int(self.train_method.only_train_small_area)]
+                target_image_selected = tgt_img[x_min:x_max, y_min:y_max]
+
+
+                diff_img = (sim_img - target_image_selected) ** 2
 
                 # --- potentials
                 potentials, _ = self.pot_layer(None)  # as in your code
@@ -502,9 +508,9 @@ class LiveTrainGUI:
             ctf_phase = self.viz.ctf_phase
             ring = self.viz.ring_mask
             intensities = self.viz.intensities
-        self.im_sim = self.axes[1].imshow(sim, cmap="viridis")
-        self.im_diff = self.axes[2].imshow(diff, cmap="viridis")
-        self.im_tgt = self.axes[3].imshow(tgt, cmap="viridis")
+        self.im_sim = self.axes[1].imshow(sim, cmap="viridis", origin="lower")
+        self.im_diff = self.axes[2].imshow(diff, cmap="viridis", origin="lower")
+        self.im_tgt = self.axes[3].imshow(tgt, cmap="viridis", origin="lower")
         self.pots_scatter = []
         for i in range(4):
                 pos, ints = self.pot_layer.get_pos_and_ints(i)

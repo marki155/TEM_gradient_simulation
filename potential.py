@@ -12,7 +12,7 @@ from torch.nn.utils.rnn import pad_sequence
 class DifferentiablePotential(nn.Module):
     def __init__(self, train_methods, init_positions, init_intensities, shape,
                  pixel_size_nm, wavelength_nm, device, init_blur_sigma=1.0,
-                 max_shifts=None, max_rotations=None, train_small_area_square=None):
+                 max_shifts=None, max_rotations=None):
         super().__init__()
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
         self.pixel_size_m = pixel_size_nm
@@ -35,7 +35,6 @@ class DifferentiablePotential(nn.Module):
 
         self.initialize_positions_parameters(init_positions)
         self.initialize_intensities_parameters(init_intensities)
-        self.train_small_area_square = train_small_area_square
 
     def apply_trainable_selection(self):
             self.intensities_[0].requires_grad = self.train_methods.train_graphen_intensities
@@ -267,6 +266,17 @@ class DifferentiablePotential(nn.Module):
         return ret_positions
 
 
+    def occupy_layers_in_area(self, area, layers):
+        x0, y0, x1, y1 = area
+        for l in layers:
+            pos = self.positions_[l]
+            xs, ys = pos[:,0], pos[:,1]
+            for i in range(pos.shape[0]):
+                if (xs[i] >= x0 and xs[i] <= x1) and \
+                        (ys[i] >= y0 and ys[i] <= y1):
+                    self.occupancies_[l][i] = -10
+
+
     def get_positions_old(self):
         ret_positions = []
         for i in range(self.N_l):
@@ -363,7 +373,7 @@ class DifferentiablePotential(nn.Module):
         intensities = self.get_intensities_raw()[pos_idx].cpu().detach().numpy()
         occ = self.occupancies_[pos_idx].sigmoid().cpu().detach().numpy()
         occ_neg_mask = occ < 0.5
-        intensities[occ_neg_mask] = None
+        #intensities[occ_neg_mask] = None # TODO
         positions = self.get_positions()[pos_idx].cpu().detach().numpy()
         return (positions[:,0], positions[:,1]), intensities
 

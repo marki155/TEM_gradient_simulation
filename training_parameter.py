@@ -55,7 +55,9 @@ class TrainMethod:
 
     train_multislice_sigma: bool = False
 
-    only_train_small_area: bool = True # TODO
+    only_train_small_area: int = 0 # TODO
 
 
     #train_amp_contrast: bool = False # TODO
+
+    train_small_area_squares = [(500, 600, 1000, 1000), (0, 0, 300, 300)]

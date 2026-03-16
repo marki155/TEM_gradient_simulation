@@ -18,7 +18,7 @@ from scipy.ndimage import gaussian_filter
 from testing import show_init_positions
 from training_parameter import TrainMethod
 
-torch.set_default_device("cuda")
+torch.set_default_device("cpu")
 
 
 VOLTAGE_KV = 80
@@ -143,17 +143,18 @@ if __name__ == '__main__':
     train_method = TrainMethod()
 
 
-    train_small_area_squares = [(500, 600, 1000, 1000), (0,0,200,200)]
+
 
 
     model = NN_particles(image_shape=image.shape, fov=fov, voltage_kV=VOLTAGE_KV, train_method=train_method,
-                         device='cuda', train_small_area_square=train_small_area_squares)
+                         device='cpu', train_methods=train_method)
     model.build_multislice(init_positions=init_positions, init_intensities=init_intensities, dz=slice_thickness/10,
                            max_shifts=(max_shift_graphen, max_shift_ws2),
                            max_rotations=(max_rot_graphen, max_rot_ws2))
 
     ctf_layer = model.model[2]
     pot_layer = model.model[0]
+    pot_layer.occupy_layers_in_area(train_method.train_small_area_squares[1], [1,2,3])
 
     # Optimierer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -181,8 +182,7 @@ if __name__ == '__main__':
         ctf_layer=ctf_layer,
         plot_every=5,
         max_steps=2_000_000,
-        train_method=train_method,
-        train_small_area_square=train_small_area_squares
+        train_method=train_method
     )
 
     root.mainloop()
