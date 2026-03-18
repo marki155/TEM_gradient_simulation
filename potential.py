@@ -383,11 +383,11 @@ class DifferentiablePotential(nn.Module):
 
 
     def get_pos_and_ints(self, pos_idx):
-        intensities = self.get_intensities_raw()[pos_idx].detach().clone().numpy()
-        occ = self.occupancies_[pos_idx].sigmoid().detach().numpy()
+        intensities = self.get_intensities_raw()[pos_idx].detach().clone().cpu().numpy()
+        occ = self.occupancies_[pos_idx].sigmoid().detach().cpu().numpy()
         occ_neg_mask = occ < 0.5
         intensities[occ_neg_mask] = None # TODO
-        positions = self.get_positions()[pos_idx].cpu().detach().numpy()
+        positions = self.get_positions()[pos_idx].cpu().detach().cpu().numpy()
         return (positions[:,0], positions[:,1]), intensities
 
     def get_intensities_old(self):

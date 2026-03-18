@@ -135,11 +135,34 @@ class LiveTrainGUI:
 
         plot_frame = ttk.Frame(main)
         self.ctrl_frame = ttk.Frame(main)
+        tune_frame = ttk.Frame(main)
 
-        plot_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        tune_frame.grid(row=0, column=0, sticky="nsew")
+        plot_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         self.ctrl_frame.grid(row=0, column=1, sticky="ns")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(0, weight=1)
+
+        def on_spinbox_change():
+            value = spinbox.get()
+            print("Value changed to:", value)
+
+
+        # tune frame (optional, z.B. für Hyperparameter während des Trainings)
+        for i, name in enumerate(["scale", "shift", "rotation"]):
+            lbl = tk.Label(tune_frame, text=name)
+            lbl.grid(row=0, column=i, sticky="nsew")
+            # Creating a Spinbox
+            spinbox = tk.Spinbox(tune_frame, from_=0, to=100, width=10, relief="sunken", repeatdelay=500, repeatinterval=100,
+                                 font=("Arial", 12), bg="lightgrey", fg="blue", command=on_spinbox_change)
+
+            # Setting options for the Spinbox
+            spinbox.config(state="normal", cursor="hand2", bd=3, justify="center", wrap=True)
+
+            # Placing the Spinbox in the window
+            spinbox.grid(row=1, column=i, padx=5, pady=5, sticky="nsew")
+
+
 
         # ---- 3x3 figure
         self.fig = Figure(figsize=(9.5, 7.5), dpi=100)
