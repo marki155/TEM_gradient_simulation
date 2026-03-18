@@ -72,6 +72,7 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
                     )
                     self.form.addRow(name, w)
                     self.widgets[name] = w
+
             else:
                 w = QtWidgets.QLineEdit(str(value))
                 w.editingFinished.connect(
@@ -79,6 +80,12 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
                 )
                 self.form.addRow(name, w)
                 self.widgets[name] = w
+
+    def _set_learning_rate(self, value: float):
+        if hasattr(self.train_method, "learning_rate"):
+            self.train_method.learning_rate = value
+        if hasattr(self.train_method, "learing_rate"):
+            self.train_method.learing_rate = value
 
     def _update_attr(self, name, value):
         setattr(self.train_method, name, value)
@@ -122,7 +129,7 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
 
     def graphen_training(self):
         tm = self.train_method
-        tm.learning_rate = 1e-9
+        self._set_learning_rate(1e-9)
 
         tm.train_graphen_intensities = False
         tm.train_S1_intensities = False
@@ -146,16 +153,22 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
 
         tm.train_ctf_aberrations = False
         tm.train_multislice_sigma = False
-        tm.only_train_small_area = 0
+
+        if hasattr(tm, "only_train_small_area"):
+            tm.only_train_small_area = 0
 
         self.refresh_from_object()
         self.changed.emit()
 
     def WS2_training(self):
         tm = self.train_method
-        tm.train_blur = True
-        tm.train_amplitude_contrast = True
-        tm.learning_rate = 1e-5
+
+        if hasattr(tm, "train_blur"):
+            tm.train_blur = True
+        if hasattr(tm, "train_amplitude_contrast"):
+            tm.train_amplitude_contrast = True
+
+        self._set_learning_rate(1e-5)
 
         tm.train_graphen_intensities = False
         tm.train_S1_intensities = False
@@ -179,18 +192,24 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
 
         tm.train_ctf_aberrations = True
         tm.train_multislice_sigma = True
-        tm.train_env_parameters = True
-        tm.only_train_small_area = 1
+
+        if hasattr(tm, "train_env_parameters"):
+            tm.train_env_parameters = True
+
+        if hasattr(tm, "only_train_small_area"):
+            tm.only_train_small_area = 1
 
         self.refresh_from_object()
         self.changed.emit()
 
     def main_training(self):
         tm = self.train_method
-        tm.learning_rate = 1e-4
+        self._set_learning_rate(1e-4)
 
-        tm.train_blur = False
-        tm.train_amplitude_contrast = False
+        if hasattr(tm, "train_blur"):
+            tm.train_blur = False
+        if hasattr(tm, "train_amplitude_contrast"):
+            tm.train_amplitude_contrast = False
 
         tm.train_graphen_intensities = False
         tm.train_S1_intensities = False
@@ -198,9 +217,10 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
         tm.train_S2_intensities = False
 
         tm.train_graphen_occupancies = False
-        tm.train_S1_occupancies = True
-        tm.train_W_occupancies = True
-        tm.train_S2_occupancies = True
+        tm.train_S1_occupancies = False
+        tm.train_W_occupancies = False
+        tm.train_S2_occupancies = False
+
 
         tm.graphen_shift = False
         tm.graphen_rotation = False
@@ -214,7 +234,9 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
 
         tm.train_ctf_aberrations = False
         tm.train_multislice_sigma = False
-        tm.only_train_small_area = -1
+
+        if hasattr(tm, "only_train_small_area"):
+            tm.only_train_small_area = -1
 
         self.refresh_from_object()
         self.changed.emit()

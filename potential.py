@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from displacement_field import SplineDisplacementField2D
+
 from torch.nn.utils.rnn import pad_sequence
 
 
@@ -15,8 +17,8 @@ class DifferentiablePotential(nn.Module):
                  max_shifts=None, max_rotations=None):
         super().__init__()
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
-        self.pixel_size_m = pixel_size_nm
-        self.wavelength_m = wavelength_nm
+        self.pixel_size_nm = pixel_size_nm
+        self.wavelength_nm = wavelength_nm
         self.device = device
         self.max_shifts = max_shifts
         self.max_rotations = max_rotations
@@ -24,6 +26,14 @@ class DifferentiablePotential(nn.Module):
         self.H, self.W = shape
 
         self.train_methods = train_methods
+
+        self.ws2_displacement = SplineDisplacementField2D(
+            image_shape=shape,
+            control_shape=(3,3),
+            init_scale=0.0,
+            device=device,
+            dtype=torch.float32,
+        )
         #self.positions_method = "graphen_shift"
         #self.intensity_classes = "free" # "free", "vacancies", "classes"
         self.blur_sigma_ = nn.Parameter(torch.tensor(init_blur_sigma, dtype=torch.float32, device=device),
@@ -35,6 +45,8 @@ class DifferentiablePotential(nn.Module):
 
         self.initialize_positions_parameters(init_positions)
         self.initialize_intensities_parameters(init_intensities)
+
+
 
     def apply_trainable_selection(self):
             self.intensities_[0].requires_grad = self.train_methods.train_graphen_intensities
@@ -58,6 +70,9 @@ class DifferentiablePotential(nn.Module):
                     self.positions_[i].requires_grad = self.train_methods.WS2_free_positions
 
             self.blur_sigma_.requires_grad = self.train_methods.train_blur
+
+            for p in self.ws2_displacement.parameters():
+                p.requires_grad = getattr(self.train_methods, "WS2_strain_field", False)
 
 
 
@@ -101,7 +116,14 @@ class DifferentiablePotential(nn.Module):
             [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions])
         self.shifts_ = nn.ParameterList([torch.zeros(2, dtype=torch.float32, device=self.device) for _ in range(2)])
         self.rotations_ = nn.ParameterList([torch.zeros(1, dtype=torch.float32, device=self.device) for _ in range(2)])
-        self.scales_ = nn.ParameterList([torch.ones(1, dtype=torch.float32, device=self.device) for _ in range(2)])
+        self.scales_ = nn.ParameterList([torch.ones(2, dtype=torch.float32, device=self.device) for _ in range(2)])
+
+        self.shifts_ = nn.ParameterList([torch.tensor([-9.5, -11.0], dtype=torch.float32, device=self.device),
+                                         torch.tensor([15.9, -5.0], dtype=torch.float32, device=self.device)])
+        self.rotations_ = nn.ParameterList([torch.tensor([0.025], dtype=torch.float32, device=self.device),
+                                            torch.tensor([0.0], dtype=torch.float32, device=self.device)])
+        self.scales_ = nn.ParameterList([torch.tensor([1.12, 1.14], dtype=torch.float32, device=self.device),
+                                         torch.tensor([1.05, 1.09], dtype=torch.float32, device=self.device)])
 
 
         self.positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
@@ -235,7 +257,7 @@ class DifferentiablePotential(nn.Module):
                 theta = self.rotations_[idx_s_r].detach()
 
             if self.max_rotations is not None:
-                theta = torch.clamp(theta, 0.0, self.max_rotations[idx_s_r])
+                theta = torch.clamp(theta, - self.max_rotations[idx_s_r], self.max_rotations[idx_s_r])
             cos_theta = torch.cos(theta)
             sin_theta = torch.sin(theta)
 
@@ -263,15 +285,38 @@ class DifferentiablePotential(nn.Module):
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_scale) or
                     (i != self._IDX["Gr"] and self.train_methods.WS2_scale)):
 
-                scales = torch.clamp(self.scales_[idx_s_r], min=0.90, max=1.1)
+                scales = torch.clamp(self.scales_[idx_s_r], min=0.80, max=1.2)
             else:
                 scales = self.scales_[idx_s_r].detach()
             rotated_positions = rotated_positions * scales
 
             new_positions = rotated_positions + center
 
+            if i != self._IDX["Gr"]:
+                new_positions = self.ws2_displacement(new_positions)
+
             ret_positions.append(new_positions)
         return ret_positions
+
+    def ws2_elastic_loss(self, lambda_=1.0, mu=1.0, sample_layers=("S1", "W", "S2")):
+        """
+        Elastische Energie des WS2-Verschiebungsfeldes.
+        Bewertet an den aktuellen WS2-Atompositionen.
+        """
+        coords = []
+
+        for name in sample_layers:
+            idx = self._IDX[name]
+            pos = self.get_positions()[idx].detach()
+            coords.append(pos)
+
+        coords = torch.cat(coords, dim=0)
+
+        # Für autograd auf den Koordinaten:
+        coords = coords.clone().detach().requires_grad_(True)
+
+        W = self.ws2_displacement.elastic_energy_density(coords, lambda_=lambda_, mu=mu)
+        return W.mean()
 
 
     def occupy_layers_in_area(self, area, layers):
@@ -382,12 +427,22 @@ class DifferentiablePotential(nn.Module):
                         ]
 
 
-    def get_pos_and_ints(self, pos_idx):
+    def get_pos_and_ints(self, pos_idx, filter_by_area=False):
+
         intensities = self.get_intensities_raw()[pos_idx].detach().clone().cpu().numpy()
         occ = self.occupancies_[pos_idx].sigmoid().detach().cpu().numpy()
         occ_neg_mask = occ < 0.5
         intensities[occ_neg_mask] = None # TODO
         positions = self.get_positions()[pos_idx].cpu().detach().cpu().numpy()
+        if filter_by_area:
+            idx = self.train_method.only_train_small_area
+            x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[idx]
+            mask = ((positions[:, 0] >= x_min) & (positions[:, 0] <= x_max) &
+                    (positions[:, 1] >= y_min) & (positions[:, 1] <= y_max))
+            positions = positions[mask]
+            intensities = intensities[mask]
+            #pos_idx = mask.nonzero(as_tuple=True)[0]
+
         return (positions[:,0], positions[:,1]), intensities
 
     def get_intensities_old(self):
@@ -479,7 +534,7 @@ class DifferentiablePotential(nn.Module):
 
         # potential.fill_(self.background)  # Torch-Äquivalent
 
-        py, px = pxpositions[:, 0], pxpositions[:, 1]
+        py, px = pxpositions[:, 0], pxpositions[:, 1] # TODO warum vertauscht
 
         pos_mask = (px >= 0.0) & (px <= self.W) & (py >= 0.0) & (py <= self.H)
         px = px[pos_mask]
@@ -531,7 +586,7 @@ class DifferentiablePotential(nn.Module):
         e = 1.602e-19
         rho = rho.to(device, dtype=torch.float32)
         ny, nx = (self.W, self.H)
-        spacing = self.pixel_size_m
+        spacing = self.pixel_size_nm
 
         # Gaussian-Kernel
         s_pix = max(1, int(6 * sigma / spacing))
@@ -573,7 +628,7 @@ class DifferentiablePotential(nn.Module):
 
         e = 1.602e-19
         ny, nx = (self.W, self.H)
-        spacing = self.pixel_size_m
+        spacing = self.pixel_size_nm
 
         # Frequenzraum-Koordinaten
         y = torch.fft.fftfreq(ny, d=spacing, device=device)
