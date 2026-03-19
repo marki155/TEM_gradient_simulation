@@ -68,7 +68,7 @@ class LiveTrainGUI:
         train_small_area_square = None
     ):
         self.root = root
-        self.root.title("Live Training (3x3) + Start/Pause + Trainable Checkboxes")
+        self.root.title("Live TEM Simulation Optimizer")
 
         self.model = model
         self.optimizer = optimizer
