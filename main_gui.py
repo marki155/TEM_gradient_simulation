@@ -18,7 +18,9 @@ from scipy.ndimage import gaussian_filter
 from testing import show_init_positions
 from training_parameter import TrainMethod
 
-torch.set_default_device("cpu")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+torch.set_default_device(DEVICE)
 
 
 VOLTAGE_KV = 80
@@ -147,7 +149,7 @@ if __name__ == '__main__':
 
 
     model = NN_particles(image_shape=image.shape, fov=fov, voltage_kV=VOLTAGE_KV, train_method=train_method,
-                         device='cpu', train_methods=train_method)
+                         device=DEVICE, train_methods=train_method)
     model.build_multislice(init_positions=init_positions, init_intensities=init_intensities, dz=slice_thickness/10,
                            max_shifts=(max_shift_graphen, max_shift_ws2),
                            max_rotations=(max_rot_graphen, max_rot_ws2))

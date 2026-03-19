@@ -34,6 +34,8 @@ class TrainMethod:
     train_W_occupancies: bool = False
     train_S2_occupancies: bool = False
 
+    WS2_strain_field: bool = False
+
     graphen_shift: bool = True
     graphen_rotation: bool = True
     graphen_free_positions: bool = False
