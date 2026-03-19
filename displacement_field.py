@@ -339,15 +339,215 @@ class SplineDisplacementField2D(nn.Module):
 
         return result
 
+    def grid_deformation_test(
+            self,
+            nx=12,
+            ny=12,
+            margin=20.0,
+            return_numpy=True,
+    ):
+        """
+        Erzeugt ein reguläres Testgitter, deformiert es mit dem aktuellen
+        Verschiebungsfeld und gibt Original- und Zielkoordinaten zurück.
+
+        Parameter
+        ---------
+        nx, ny:
+            Anzahl der Gitterpunkte in x- und y-Richtung.
+        margin:
+            Randabstand in Pixeln, damit das Testgitter nicht direkt am Rand liegt.
+        return_numpy:
+            Falls True, werden NumPy-Arrays zurückgegeben.
+
+        Returns
+        -------
+        dict mit:
+            x0, y0:
+                ursprüngliche Gitterkoordinaten, Form (ny, nx)
+            x1, y1:
+                deformierte Gitterkoordinaten, Form (ny, nx)
+            ux, uy:
+                Verschiebungsfelder auf dem Testgitter, Form (ny, nx)
+            coords0:
+                ursprüngliche Punkte, Form (ny*nx, 2)
+            coords1:
+                deformierte Punkte, Form (ny*nx, 2)
+        """
+        xs = torch.linspace(
+            margin, self.W - 1 - margin, nx,
+            device=self.device, dtype=self.dtype
+        )
+        ys = torch.linspace(
+            margin, self.H - 1 - margin, ny,
+            device=self.device, dtype=self.dtype
+        )
+
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        coords0 = torch.stack([xx, yy], dim=-1).reshape(-1, 2)  # (N, 2)
+
+        coords1 = self(coords0)
+        u = coords1 - coords0
+
+        x0 = coords0[:, 0].reshape(ny, nx)
+        y0 = coords0[:, 1].reshape(ny, nx)
+
+        x1 = coords1[:, 0].reshape(ny, nx)
+        y1 = coords1[:, 1].reshape(ny, nx)
+
+        ux = u[:, 0].reshape(ny, nx)
+        uy = u[:, 1].reshape(ny, nx)
+
+        out = {
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
+            "ux": ux,
+            "uy": uy,
+            "coords0": coords0,
+            "coords1": coords1,
+        }
+
+        if return_numpy:
+            out = {k: v.detach().cpu().numpy() for k, v in out.items()}
+
+        return out
+
+    def plot_grid_deformation_test(
+            self,
+            nx=12,
+            ny=12,
+            margin=20.0,
+            show_vectors=True,
+            vector_scale=1.0,
+            ax=None,
+    ):
+        """
+        Visualisiert ein Testgitter vor und nach der Deformation.
+
+        Schwarz: ursprüngliches Gitter
+        Rot: deformiertes Gitter
+        Blau: Verschiebungsvektoren (optional)
+        """
+        import matplotlib.pyplot as plt
+
+        data = self.grid_deformation_test(
+            nx=nx,
+            ny=ny,
+            margin=margin,
+            return_numpy=True,
+        )
+
+        x0, y0 = data["x0"], data["y0"]
+        x1, y1 = data["x1"], data["y1"]
+        ux, uy = data["ux"], data["uy"]
+
+        created_fig = False
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 8))
+            created_fig = True
+
+        # Ursprüngliches Gitter
+        for j in range(ny):
+            ax.plot(x0[j, :], y0[j, :], "k-", lw=1.0, alpha=0.7)
+        for i in range(nx):
+            ax.plot(x0[:, i], y0[:, i], "k-", lw=1.0, alpha=0.7)
+
+        # Deformiertes Gitter
+        for j in range(ny):
+            ax.plot(x1[j, :], y1[j, :], "r-", lw=1.2)
+        for i in range(nx):
+            ax.plot(x1[:, i], y1[:, i], "r-", lw=1.2)
+
+        # Punkte
+        ax.plot(x0.ravel(), y0.ravel(), "ko", ms=2, alpha=0.8)
+        ax.plot(x1.ravel(), y1.ravel(), "ro", ms=2, alpha=0.8)
+
+        # Verschiebungsvektoren
+        if show_vectors:
+            ax.quiver(
+                x0, y0, ux, uy,
+                angles="xy",
+                scale_units="xy",
+                scale=1.0 / vector_scale if vector_scale != 0 else 1.0,
+                color="tab:blue",
+                alpha=0.8,
+                width=0.0025,
+            )
+
+        ax.set_xlim(0, self.W - 1)
+        ax.set_ylim(0, self.H - 1)
+        ax.set_aspect("equal")
+        ax.set_title("Grid deformation test")
+        ax.set_xlabel("x [px]")
+        ax.set_ylabel("y [px]")
+
+        # Damit Plot-Bildkoordinaten zu imshow(origin='lower') passen
+        ax.invert_yaxis()
+
+        if created_fig:
+            plt.tight_layout()
+            plt.show()
+
+        return data
+
+    def demo_linear_deformation_and_grid_test(
+            self,
+            a=0.01,
+            b=-0.02,
+            nx=12,
+            ny=12,
+            margin=20.0,
+    ):
+        """
+        Setzt testweise ein lineares Feld
+            u_x = a * x
+            u_y = b * y
+        und visualisiert die resultierende Gitterdeformation.
+        """
+        import matplotlib.pyplot as plt
+
+        old_control = self.control.detach().clone()
+
+        try:
+            with torch.no_grad():
+                Hc, Wc = self.control_shape
+                xs = torch.linspace(0, self.W - 1, Wc, device=self.device, dtype=self.dtype)
+                ys = torch.linspace(0, self.H - 1, Hc, device=self.device, dtype=self.dtype)
+                yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+
+                self.control.zero_()
+                self.control[0, 0] = a * xx
+                self.control[0, 1] = b * yy
+
+            fig, ax = plt.subplots(figsize=(8, 8))
+            data = self.plot_grid_deformation_test(
+                nx=nx,
+                ny=ny,
+                margin=margin,
+                show_vectors=True,
+                vector_scale=1.0,
+                ax=ax,
+            )
+            ax.set_title(f"Linear deformation test: ux={a}·x, uy={b}·y")
+            plt.tight_layout()
+            plt.show()
+
+            return data
+
+        finally:
+            with torch.no_grad():
+                self.control.copy_(old_control)
+
 if __name__ == "__main__":
     field = SplineDisplacementField2D(
         image_shape=(256, 256),
-        control_shape=(100,100),
+        control_shape=(8, 8),
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
-    result = field.self_test()
-    print(result["passed"])
-    print(result["stats"])
+    # 1. Mit aktuellem Feld testen
+    field.plot_grid_deformation_test()
 
-    field.plot_self_test()
+    # 2. Künstliches lineares Testfeld setzen und Gitter anschauen
+    field.demo_linear_deformation_and_grid_test(a=0.05, b=-0.00)

@@ -105,7 +105,7 @@ class TrainingWorker(QtCore.QObject):
         elif hasattr(self.optimizer, "learning_rate"):
             self.optimizer.learning_rate = lr
 
-    spin_values_changed = QtCore.Signal(float, float, float, float, float, bool)  # scale, rot, shift_x, shift_y
+    spin_values_changed = QtCore.Signal(float, float, float, float, float, float, float,n  bool)  # scale, rot, shift_x, shift_y
 
 
 
@@ -151,8 +151,10 @@ class TrainingWorker(QtCore.QObject):
                 rot_val = float(self.pot_layer.rotations_[idx].detach().cpu().item())
                 shift_x_val = float(self.pot_layer.shifts_[idx][0].detach().cpu().item())
                 shift_y_val = float(self.pot_layer.shifts_[idx][1].detach().cpu().item())
+                ux_val = float(self.pot_layer.ws2_displacement.ux.detach().cpu().numpy())
+                uy_val = float(self.pot_layer.ws2_displacement.uy.detach().cpu().numpy())
 
-            self.spin_values_changed.emit(scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, True)
+            self.spin_values_changed.emit(scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, ux_val, uy_val, True)
 
     def build_heavy_payload(self, step: int, loss_item: float, simulated_image, target_image, p_diff):
         sim_img = simulated_image.detach().cpu().numpy()
