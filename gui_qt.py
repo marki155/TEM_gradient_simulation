@@ -21,6 +21,19 @@ from train_methods_gui_builder_qt import TrainMethodEditor
 
 
 @dataclass
+class TunableParameters:
+    scale_Gr: List[float]
+    rotation_Gr: float
+    shift_Gr: List[float]
+
+    scale_WS2: List[float]
+    rotation_WS2: float
+    shift_WS2: List[float]
+
+
+
+
+@dataclass
 class VizPayload:
     step: int
     loss: float

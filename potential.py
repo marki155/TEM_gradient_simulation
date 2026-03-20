@@ -1,14 +1,36 @@
+from dataclasses import dataclass
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from displacement_field import SplineDisplacementField2D
+import numpy as np
+
+from displacement_field import SplineDisplacementField2D, StrainTunableParameters
 
 from torch.nn.utils.rnn import pad_sequence
 
 
-# TODO canvas wegen rot und shift größer machen, damit nicht abgeschnitten wird
-# TODO limits für rot und shift
+
+
+@dataclass
+class TunablePotentialParameters:
+    scale_Gr: List[float]
+    rotation_Gr: float
+    shift_Gr: List[float]
+
+    scale_WS2: List[float]
+    rotation_WS2: float
+    shift_WS2: List[float]
+
+    blur_sigma: float
+
+    positions: Optional[np.ndarray]
+    intensities: Optional[np.ndarray]
+    occupancies: Optional[np.ndarray]
+
+    ws2_displacement: StrainTunableParameters
 
 
 class DifferentiablePotential(nn.Module):
@@ -45,6 +67,12 @@ class DifferentiablePotential(nn.Module):
 
         self.initialize_positions_parameters(init_positions)
         self.initialize_intensities_parameters(init_intensities)
+
+    def get_tunable_parameters(self):
+        TunablePotentialParameters(
+            scale_Gr=...,
+
+        )
 
 
 
@@ -114,9 +142,9 @@ class DifferentiablePotential(nn.Module):
     def initialize_positions_parameters(self, init_positions):
         self.positions_ = nn.ParameterList(
             [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions])
-        self.shifts_ = nn.ParameterList([torch.zeros(2, dtype=torch.float32, device=self.device) for _ in range(2)])
-        self.rotations_ = nn.ParameterList([torch.zeros(1, dtype=torch.float32, device=self.device) for _ in range(2)])
-        self.scales_ = nn.ParameterList([torch.ones(2, dtype=torch.float32, device=self.device) for _ in range(2)])
+        #self.shifts_ = nn.ParameterList([torch.zeros(2, dtype=torch.float32, device=self.device) for _ in range(2)])
+        #self.rotations_ = nn.ParameterList([torch.zeros(1, dtype=torch.float32, device=self.device) for _ in range(2)])
+        #self.scales_ = nn.ParameterList([torch.ones(2, dtype=torch.float32, device=self.device) for _ in range(2)])
 
         self.shifts_ = nn.ParameterList([torch.tensor([-9.5, -11.0], dtype=torch.float32, device=self.device),
                                          torch.tensor([15.9, -5.0], dtype=torch.float32, device=self.device)])
