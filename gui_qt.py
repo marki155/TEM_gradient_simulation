@@ -9,6 +9,11 @@ from PySide6 import QtCore, QtWidgets
 
 import matplotlib
 
+from ctf import TunableCTFParameters
+from multislice import TunableMultisliceParameters
+from nn import ParticlesTunableParameters
+from parameter_frame import ParametersFrame
+from potential import TunablePotentialParameters
 from training_parameter import TrainMethod
 
 matplotlib.use("QtAgg")
@@ -19,16 +24,6 @@ from matplotlib import patches
 
 from train_methods_gui_builder_qt import TrainMethodEditor
 
-
-@dataclass
-class TunableParameters:
-    scale_Gr: List[float]
-    rotation_Gr: float
-    shift_Gr: List[float]
-
-    scale_WS2: List[float]
-    rotation_WS2: float
-    shift_WS2: List[float]
 
 
 
@@ -118,8 +113,8 @@ class TrainingWorker(QtCore.QObject):
         elif hasattr(self.optimizer, "learning_rate"):
             self.optimizer.learning_rate = lr
 
-    spin_values_changed = QtCore.Signal(float, float, float, float, float, float, float,n  bool)  # scale, rot, shift_x, shift_y
-
+    #spin_values_changed = QtCore.Signal(float, float, float, float, float, float, float,n  bool)  # scale, rot, shift_x, shift_y
+    parameter_update = QtCore.Signal(ParticlesTunableParameters)
 
 
 
@@ -168,6 +163,9 @@ class TrainingWorker(QtCore.QObject):
                 uy_val = float(self.pot_layer.ws2_displacement.uy.detach().cpu().numpy())
 
             self.spin_values_changed.emit(scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, ux_val, uy_val, True)
+
+    def emit_parameter_update(self):
+        self.parameter_update.emit(self.model.get_tunable_parameters())
 
     def build_heavy_payload(self, step: int, loss_item: float, simulated_image, target_image, p_diff):
         sim_img = simulated_image.detach().cpu().numpy()
@@ -272,7 +270,8 @@ class TrainingWorker(QtCore.QObject):
                     loss_item,
                     np.asarray(self.losses, dtype=np.float32).copy()
                 )
-                self.emit_current_spin_values()
+                #self.emit_current_spin_values()
+                self.emit_parameter_update()
 
             if step % self.heavy_every == 0 or step == 0:
                 payload = self.build_heavy_payload(
@@ -596,6 +595,14 @@ class MplCanvas(FigureCanvasQTAgg):
             self.axes_cmap["ctf"].set_title(f"CTF (Step {payload.step})")
 
 
+def dummy_parameters():
+    return ParticlesTunableParameters(
+        potential_parameters=TunablePotentialParameters(),
+        ctf_parameters = TunableCTFParameters(),
+        multislice_parameters = TunableMultisliceParameters()
+    )
+
+
 class LiveTrainWindow(QtWidgets.QMainWindow):
     request_heavy_refresh_signal = QtCore.Signal()
     show_positions_signal = QtCore.Signal(bool)
@@ -657,62 +664,68 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         layout.addLayout(left, stretch=4)
         layout.addLayout(right, stretch=1)
 
-        top_tune = QtWidgets.QGroupBox("Tune")
-        tune_layout = QtWidgets.QGridLayout(top_tune)
+        if False:
+            top_tune = QtWidgets.QGroupBox("Tune")
+            tune_layout = QtWidgets.QGridLayout(top_tune)
 
-        self.scale_spin_x = QtWidgets.QDoubleSpinBox()
-        self.scale_spin_x.setDecimals(5)
-        self.scale_spin_x.setRange(0.80, 1.20)
-        self.scale_spin_x.setSingleStep(0.01)
-        self.scale_spin_x.setValue(1.12)
+            self.scale_spin_x = QtWidgets.QDoubleSpinBox()
+            self.scale_spin_x.setDecimals(5)
+            self.scale_spin_x.setRange(0.80, 1.20)
+            self.scale_spin_x.setSingleStep(0.01)
+            self.scale_spin_x.setValue(1.12)
 
-        self.scale_spin_y = QtWidgets.QDoubleSpinBox()
-        self.scale_spin_y.setDecimals(5)
-        self.scale_spin_y.setRange(0.80, 1.20)
-        self.scale_spin_y.setSingleStep(0.01)
-        self.scale_spin_y.setValue(1.14)
+            self.scale_spin_y = QtWidgets.QDoubleSpinBox()
+            self.scale_spin_y.setDecimals(5)
+            self.scale_spin_y.setRange(0.80, 1.20)
+            self.scale_spin_y.setSingleStep(0.01)
+            self.scale_spin_y.setValue(1.14)
 
-        self.shift_spin_x = QtWidgets.QDoubleSpinBox()
-        self.shift_spin_x.setDecimals(5)
-        self.shift_spin_x.setRange(-50.0, 50.0)
-        self.shift_spin_x.setSingleStep(0.1)
-        self.shift_spin_x.setValue(-9.5)
+            self.shift_spin_x = QtWidgets.QDoubleSpinBox()
+            self.shift_spin_x.setDecimals(5)
+            self.shift_spin_x.setRange(-50.0, 50.0)
+            self.shift_spin_x.setSingleStep(0.1)
+            self.shift_spin_x.setValue(-9.5)
 
-        self.shift_spin_y = QtWidgets.QDoubleSpinBox()
-        self.shift_spin_y.setDecimals(5)
-        self.shift_spin_y.setRange(-50.0, 50.0)
-        self.shift_spin_y.setSingleStep(0.1)
-        self.shift_spin_y.setValue(-11.0)
+            self.shift_spin_y = QtWidgets.QDoubleSpinBox()
+            self.shift_spin_y.setDecimals(5)
+            self.shift_spin_y.setRange(-50.0, 50.0)
+            self.shift_spin_y.setSingleStep(0.1)
+            self.shift_spin_y.setValue(-11.0)
 
-        self.rotation_spin = QtWidgets.QDoubleSpinBox()
-        self.rotation_spin.setDecimals(5)
-        self.rotation_spin.setRange(-np.pi/6, np.pi/6)
-        self.rotation_spin.setSingleStep(0.01)
-        self.rotation_spin.setValue(0.025)
+            self.rotation_spin = QtWidgets.QDoubleSpinBox()
+            self.rotation_spin.setDecimals(5)
+            self.rotation_spin.setRange(-np.pi/6, np.pi/6)
+            self.rotation_spin.setSingleStep(0.01)
+            self.rotation_spin.setValue(0.025)
 
-        self.show_positions_checkbox = QtWidgets.QCheckBox("Show positions on target")
-        self.show_positions_checkbox.setChecked(True)
-
-
-        tune_layout.addWidget(QtWidgets.QLabel("scale"), 0, 0)
-        tune_layout.addWidget(self.scale_spin_x, 1, 0)
-        tune_layout.addWidget(self.scale_spin_y, 2, 0)
-
-        tune_layout.addWidget(QtWidgets.QLabel("shift"), 0, 1)
-        tune_layout.addWidget(self.shift_spin_x, 1, 1)
-        tune_layout.addWidget(self.shift_spin_y, 2, 1)
-
-        tune_layout.addWidget(QtWidgets.QLabel("rotation"), 0, 2)
-        tune_layout.addWidget(self.rotation_spin, 1, 2)
-
-        tune_layout.addWidget(self.show_positions_checkbox, 2, 2)
+            self.show_positions_checkbox = QtWidgets.QCheckBox("Show positions on target")
+            self.show_positions_checkbox.setChecked(True)
 
 
+            tune_layout.addWidget(QtWidgets.QLabel("scale"), 0, 0)
+            tune_layout.addWidget(self.scale_spin_x, 1, 0)
+            tune_layout.addWidget(self.scale_spin_y, 2, 0)
 
-        left.addWidget(top_tune, stretch=0)
+            tune_layout.addWidget(QtWidgets.QLabel("shift"), 0, 1)
+            tune_layout.addWidget(self.shift_spin_x, 1, 1)
+            tune_layout.addWidget(self.shift_spin_y, 2, 1)
+
+            tune_layout.addWidget(QtWidgets.QLabel("rotation"), 0, 2)
+            tune_layout.addWidget(self.rotation_spin, 1, 2)
+
+            tune_layout.addWidget(self.show_positions_checkbox, 2, 2)
+
+
+
+            left.addWidget(top_tune, stretch=0)
+
+        self.parameter_frame = ParametersFrame()
+        left.addWidget(self.parameter_frame, stretch=0)
 
         self.canvas = MplCanvas(target_tensor=self.target)
         left.addWidget(self.canvas, stretch=1)
+
+
 
         status_box = QtWidgets.QGroupBox("Status")
         status_layout = QtWidgets.QFormLayout(status_box)
@@ -767,13 +780,14 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.editor.graphen_training()
         self._apply_trainable_selection()
 
-        self._on_scale_x_changed(self.scale_spin_x.value())
-        self._on_scale_y_changed(self.scale_spin_y.value())
-        self._on_shift_x_changed(self.shift_spin_x.value())
-        self._on_shift_y_changed(self.shift_spin_y.value())
-        self._on_rotation_changed(self.rotation_spin.value())
+        #self._on_scale_x_changed(self.scale_spin_x.value())
+        #self._on_scale_y_changed(self.scale_spin_y.value())
+        #s#elf._on_shift_x_changed(self.shift_spin_x.value())
+        #s#elf._on_shift_y_changed(self.shift_spin_y.value())
+        #s#elf._on_rotation_changed(self.rotation_spin.value())
 
-
+    def _update_parameters_from_current_params(self):
+        pass
 
     def _update_spins_from_current_params(self):
         idx = self._current_transform_group()
@@ -860,6 +874,10 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     def on_spin_values_changed(self, scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, activated):
         self._update_spins_from_values(scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, activated)
 
+    @QtCore.Slot()
+    def on_parameter_update(self, params: ParticlesTunableParameters):
+        self.parameter_frame.update_from_model(params)
+
     def _set_spin_value_silent(self, spinbox, value: float):
         spinbox.blockSignals(True)
         spinbox.setValue(value)
@@ -890,12 +908,14 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.editor.changed.connect(self._apply_trainable_selection)
 
-        self.scale_spin_x.valueChanged.connect(self._on_scale_x_changed)
-        self.scale_spin_y.valueChanged.connect(self._on_scale_y_changed)
-        self.shift_spin_x.valueChanged.connect(self._on_shift_x_changed)
-        self.shift_spin_y.valueChanged.connect(self._on_shift_y_changed)
-        self.rotation_spin.valueChanged.connect(self._on_rotation_changed)
-        self.show_positions_checkbox.stateChanged.connect(self._on_show_positions_changed)
+        #self.scale_spin_x.valueChanged.connect(self._on_scale_x_changed)
+        #self.scale_spin_y.valueChanged.connect(self._on_scale_y_changed)
+        #self.shift_spin_x.valueChanged.connect(self._on_shift_x_changed)
+        #self.shift_spin_y.valueChanged.connect(self._on_shift_y_changed)
+        #self.rotation_spin.valueChanged.connect(self._on_rotation_changed)
+        #self.show_positions_checkbox.stateChanged.connect(self._on_show_positions_changed)
+
+        # TODO connect actions from tune frame
 
     def _apply_trainable_selection(self):
         if hasattr(self.pot_layer, "apply_trainable_selection"):
@@ -904,17 +924,17 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     def _graphen_training(self):
         self.editor.graphen_training()
         self._apply_trainable_selection()
-        self._update_spins_from_current_params()
+        self._update_parameters_from_current_params()
 
     def _ws2_training(self):
         self.editor.WS2_training()
         self._apply_trainable_selection()
-        self._update_spins_from_current_params()
+        self._update_parameters_from_current_params()
 
     def _main_training(self):
         self.editor.main_training()
         self._apply_trainable_selection()
-        self._update_spins_from_current_params()
+        self._update_parameters_from_current_params()
 
     def start_training(self):
         if self.thread is not None and self.thread.isRunning():
@@ -936,7 +956,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         )
         self.worker.moveToThread(self.thread)
 
-        self.worker.spin_values_changed.connect(self.on_spin_values_changed)
+        #self.worker.spin_values_changed.connect(self.on_spin_values_changed)
+        self.worker.parameter_update.connect(self.on_parameter_update)
 
         self.request_heavy_refresh_signal.connect(self.worker.request_heavy_refresh)
 

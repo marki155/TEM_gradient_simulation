@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.fft as fft
@@ -5,13 +7,13 @@ import torch.nn.functional as F
 import math
 
 from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss
-from multislice import DifferentiableMultislice_Free, DifferentiableMultislice
-from potential import DifferentiablePotential
+from multislice import DifferentiableMultislice_Free, DifferentiableMultislice, TunableMultisliceParameters
+from potential import DifferentiablePotential, TunablePotentialParameters
 from simulation import Simulation
 from torch.autograd import gradcheck
 from abtem.waves import PlaneWave
 
-from ctf import CTFLayer
+from ctf import CTFLayer, TunableCTFParameters
 from torch.nn.functional import max_pool2d
 
 
@@ -152,6 +154,13 @@ class NN_free_potential(nn.Module):
                                                 target_image.shape[1])
         return simulated_image, F.mse_loss(simulated_image, target_image)
 
+
+@dataclass
+class ParticlesTunableParameters:
+    potential_parameters: TunablePotentialParameters
+    ctf_parameters: TunableCTFParameters
+    multislice_parameters: TunableMultisliceParameters
+
 class NN_particles(nn.Module):
     def __init__(self, image_shape, fov, voltage_kV, train_method, device='cpu', train_methods=None):
         super().__init__()
@@ -221,6 +230,15 @@ class NN_particles(nn.Module):
             potential_layer,
             multislice,
             ctf_layer)
+
+        self.tunable_parameters = ParticlesTunableParameters(
+            potential_parameters=self.model[0].get_tunable_parameters(),
+            ctf_parameters=self.model[2].get_tunable_parameters(),
+            multislice_parameters=self.model[1].get_tunable_parameters()
+        )
+
+    def get_tunable_parameters(self):
+        return self.tunable_parameters
 
 
     def loss_old(self, target_image, brightness=None, constrast=None):

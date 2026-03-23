@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from typing import Dict
+
 import abtem
 import torch
 import torch.nn as nn
@@ -122,6 +125,22 @@ def zernike_phase(alpha, phi, coeffs, device='cpu'):
 
 
 
+@dataclass
+class TunableCTFParameters:
+    amp_contrast: nn.Parameter = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+    deltaE: nn.Parameter = nn.Parameter(torch.tensor(0.35, dtype=torch.float32))
+    Cc_um: nn.Parameter = nn.Parameter(torch.tensor(1.e3, dtype=torch.float32))
+    aberrations: nn.ParameterDict = nn.ParameterDict({"C10": -13.,
+                           'C12': 1.0, "phi12": 0.,
+                           'C23': 2., 'phi23': 0.,
+                           'C21': 2., 'phi21': 0.,
+                           "C30": 4., #um
+                           'C34': .02, 'phi34': 0., #um
+                           'C45': .05, 'phi45': 0.} #um
+                        )
+
+
+
 class CTFLayer(nn.Module):
     def __init__(self, H, W, pixel_size_nm, voltage_kV, lam,
                  amp_contrast=0.5, device=None,
@@ -134,30 +153,23 @@ class CTFLayer(nn.Module):
         self.W = W
         self.pixel_size_nm = pixel_size_nm
         self.voltage_kV = voltage_kV
-        self.amp_contrast = nn.Parameter(torch.tensor(amp_contrast, device=device))
+        #self.amp_contrast = nn.Parameter(torch.tensor(amp_contrast, device=device))
         self.envelope_params = envelope_params
-        self.deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], device=device))
-        self.Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], device=device))
+        #self.deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], device=device))
+        #self.Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], device=device))
         self.lam = lam
         self.semiangle_cutoff_mrad = semiangle_cutoff_mrad
         self.alpha_max_mrad = 50.
         self.device = device
         self.train_method = train_method
 
+        self.tunable_parameters = TunableCTFParameters(
+            amp_contrast=nn.Parameter(torch.tensor(amp_contrast, dtype=torch.float32)),
+            deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], dtype=torch.float32)),
+            Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], dtype=torch.float32)),
+            aberrations = nn.ParameterDict(aberrations)
+        )
 
-        # Wenn keine Aberrationen angegeben: leerer Dict
-        if aberrations is None:
-            aberrations = {}
-
-        # Alle Aberrations-Cij als nn.Parameter speichern
-        # z.B. 'C10', 'C12', 'C23', ...
-        self.aberr_params = nn.ParameterDict()
-        for key, val in aberrations.items():
-            if key == "C10" and val == "scherzer":
-                self.aberr_params[key] = nn.Parameter(torch.tensor(scherzer_defocus(aberrations["C30"],
-                                                                                    self.lam), device=device))
-            else:
-                self.aberr_params[key] = nn.Parameter(torch.tensor(val, device=device))
 
         # Frequenzen in 1/nm
         fx = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, W, device=device))
@@ -177,6 +189,25 @@ class CTFLayer(nn.Module):
         self.register_buffer('kx', kx)
         self.register_buffer('ky', ky)
 
+    def init_aberrations(self, aberrations=None):
+        # Wenn keine Aberrationen angegeben: leerer Dict
+        if aberrations is None:
+            aberrations = {}
+
+        # Alle Aberrations-Cij als nn.Parameter speichern
+        # z.B. 'C10', 'C12', 'C23', ...
+        self.aberr_params = nn.ParameterDict()
+        for key, val in aberrations.items():
+            if key == "C10" and val == "scherzer":
+                self.aberr_params[key] = nn.Parameter(torch.tensor(scherzer_defocus(aberrations["C30"],
+                                                                                    self.lam), device=device))
+            else:
+                self.aberr_params[key] = nn.Parameter(torch.tensor(val, device=device))
+
+
+    def get_tunable_parameters(self):
+        return self.tunable_parameters
+
 
 
     def _build_ctf(self, kx=None, ky=None):
@@ -189,7 +220,7 @@ class CTFLayer(nn.Module):
         for k, v in self.aberr_params.items():
             if self.train_method is not None and self.train_method.train_ctf_aberrations:
                 if k in self.train_method.train_aberrations and self.train_method.train_aberrations[k]:
-                    aberrations[k] = self.aberr_params[k]
+                    aberrations[k] = self.tunable_parameters.aberrations[k]
                 else:
                     aberrations[k] = v.detach()  # nicht trainierbar
             else:
@@ -209,21 +240,21 @@ class CTFLayer(nn.Module):
         aberr_phase = zernike_phase(alpha, phi, aberrations, device=self.device)
         chi = 2.0 * math.pi * aberr_phase / lam  # klassische TEM-Phase
         if self.train_method is not None and self.train_method.train_amplitude_contrast:
-            Q = torch.clamp(self.amp_contrast, 0.0, 1.0)
+            Q = torch.clamp(self.tunable_parameters.amp_contrast, 0.0, 1.0)
         else:
-            Q = torch.clamp(self.amp_contrast.detach(), 0.0, 1.0)
+            Q = torch.clamp(self.tunable_parameters.amp_contrast.detach(), 0.0, 1.0)
         ac = math.sqrt(1.0 - Q ** 2) - 1j * Q
         ctf = ac * torch.exp(-1j * chi)
 
         if self.train_method.train_env_params["deltaE"] and self.train_method.train_env_parameters:
-            deltaE = torch.clamp(self.deltaE, min=0.25, max=0.45)
+            deltaE = torch.clamp(self.tunable_parameters.deltaE, min=0.25, max=0.45)
         else:
-            deltaE = self.deltaE.detach()
+            deltaE = self.tunable_parameters.deltaE.detach()
 
         if self.train_method.train_env_params["Cc"] and self.train_method.train_env_parameters:
-            Cc_um = torch.clamp(self.Cc_um, min=1.e2, max=1.e4)
+            Cc_um = torch.clamp(self.tunable_parameters.Cc_um, min=1.e2, max=1.e4)
         else:
-            Cc_um = self.Cc_um.detach()
+            Cc_um = self.tunable_parameters.Cc_um.detach()
 
         # zentrieren
         if self.envelope_params is not None:
