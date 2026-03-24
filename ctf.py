@@ -123,21 +123,27 @@ def zernike_phase(alpha, phi, coeffs, device='cpu'):
 
     return phase
 
+def make_param_dict(a=None):
+    if a is None:
+        a = {"C10": -13.,
+                               'C12': 1.0, "phi12": 0.,
+                               'C23': 2., 'phi23': 0.,
+                               'C21': 2., 'phi21': 0.,
+                               "C30": 4., #um
+                               'C34': .02, 'phi34': 0., #um
+                               'C45': .05, 'phi45': 0.}
 
+    return nn.ParameterDict({
+        k: nn.Parameter(torch.tensor(v, dtype=torch.float32))
+        for k, v in a.items()
+    })
 
 @dataclass
 class TunableCTFParameters:
     amp_contrast: nn.Parameter = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
     deltaE: nn.Parameter = nn.Parameter(torch.tensor(0.35, dtype=torch.float32))
     Cc_um: nn.Parameter = nn.Parameter(torch.tensor(1.e3, dtype=torch.float32))
-    aberrations: nn.ParameterDict = nn.ParameterDict({"C10": -13.,
-                           'C12': 1.0, "phi12": 0.,
-                           'C23': 2., 'phi23': 0.,
-                           'C21': 2., 'phi21': 0.,
-                           "C30": 4., #um
-                           'C34': .02, 'phi34': 0., #um
-                           'C45': .05, 'phi45': 0.} #um
-                        )
+    aberrations: nn.ParameterDict = field(default_factory=make_param_dict)#um
 
 
 
@@ -167,7 +173,7 @@ class CTFLayer(nn.Module):
             amp_contrast=nn.Parameter(torch.tensor(amp_contrast, dtype=torch.float32)),
             deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], dtype=torch.float32)),
             Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], dtype=torch.float32)),
-            aberrations = nn.ParameterDict(aberrations)
+            aberrations = nn.ParameterDict(make_param_dict(aberrations))
         )
 
 
@@ -188,6 +194,10 @@ class CTFLayer(nn.Module):
 
         self.register_buffer('kx', kx)
         self.register_buffer('ky', ky)
+
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
 
     def init_aberrations(self, aberrations=None):
         # Wenn keine Aberrationen angegeben: leerer Dict
@@ -217,10 +227,10 @@ class CTFLayer(nn.Module):
             ky = self.ky
 
         aberrations = {}
-        for k, v in self.aberr_params.items():
+        for k, v in self.tunable_parameters.aberrations.items():
             if self.train_method is not None and self.train_method.train_ctf_aberrations:
                 if k in self.train_method.train_aberrations and self.train_method.train_aberrations[k]:
-                    aberrations[k] = self.tunable_parameters.aberrations[k]
+                    aberrations[k] = v
                 else:
                     aberrations[k] = v.detach()  # nicht trainierbar
             else:

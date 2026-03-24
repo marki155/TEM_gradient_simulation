@@ -313,3 +313,44 @@ class LocalNCCLoss(nn.Module):
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         return 1.0 - self.local_ncc(x, y)
+
+
+class FFTBraggLoss(nn.Module):
+    def __init__(self,
+                 norm="ortho",
+                 log_scale=True,
+                 bragg_weight=2.0,
+                 eps=1e-8):
+        super().__init__()
+        self.norm = norm
+        self.log_scale = log_scale
+        self.bragg_weight = bragg_weight
+        self.eps = eps
+
+    def forward(self, sim, target):
+        if sim.ndim == 3:
+            sim = sim.unsqueeze(1)
+        if target.ndim == 3:
+            target = target.unsqueeze(1)
+
+        Fsim = torch.fft.fft2(sim, norm=self.norm)
+        Ftar = torch.fft.fft2(target, norm=self.norm)
+
+        # lineare Powerspektren
+        Psim_lin = torch.abs(Fsim) ** 2
+        Ptar_lin = torch.abs(Ftar) ** 2
+
+        # Gewicht immer aus NICHTNEGATIVER linearer Power bauen
+        norm_tar = Ptar_lin / (Ptar_lin.amax(dim=(-2, -1), keepdim=True) + self.eps)
+        weight = 1.0 + self.bragg_weight * norm_tar
+
+        # Fehlerraum optional logarithmisch
+        if self.log_scale:
+            Psim = torch.log1p(Psim_lin)
+            Ptar = torch.log1p(Ptar_lin)
+        else:
+            Psim = Psim_lin
+            Ptar = Ptar_lin
+
+        loss = ((Psim - Ptar) ** 2 * weight).mean()
+        return loss, weight

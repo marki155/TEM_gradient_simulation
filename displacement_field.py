@@ -42,6 +42,10 @@ class SplineDisplacementField2D(nn.Module):
 
         self.tunable_parameters = StrainTunableParameters(control=nn.Parameter(control))
 
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
+
     def normalize_coords(self, coords_xy):
         """
         coords_xy: (N, 2) in pixel coordinates

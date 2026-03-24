@@ -33,6 +33,10 @@ class DifferentiableMultislice(nn.Module):
 
         self.train_method = train_method
 
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
+
     def get_tunable_parameters(self):
         return self.tunable_parameters
 

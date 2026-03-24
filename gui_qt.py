@@ -1,3 +1,4 @@
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional, List, Dict
@@ -97,6 +98,9 @@ class TrainingWorker(QtCore.QObject):
         self._pause = False
         self.losses = []
 
+        self._heavy_refresh_running = False
+        self._heavy_refresh_pending = False
+
     def _set_optimizer_lr(self):
         lr = None
         if hasattr(self.train_method, "learning_rate"):
@@ -120,23 +124,24 @@ class TrainingWorker(QtCore.QObject):
 
     @QtCore.Slot()
     def request_heavy_refresh(self):
-        try:
-            with torch.no_grad():
-                simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
-                    self.target, self.brightness, self.contrast
-                )
+        print("heavy refresh received")
+        #try:
+        with torch.no_grad():
+            simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
+                self.target, self.brightness, self.contrast
+            )
 
-                loss_item = float(loss.detach().cpu().item())
-                payload = self.build_heavy_payload(
-                    step=len(self.losses) - 1 if len(self.losses) > 0 else 0,
-                    loss_item=loss_item,
-                    simulated_image=simulated_image,
-                    target_image=target_image,
-                    p_diff=p_diff,
-                )
-                self.progress_heavy.emit(payload)
-        except Exception as exc:
-            print("request_heavy_refresh failed:", exc)
+            loss_item = float(loss.detach().cpu().item())
+            payload = self.build_heavy_payload(
+                step=len(self.losses) - 1 if len(self.losses) > 0 else 0,
+                loss_item=loss_item,
+                simulated_image=simulated_image,
+                target_image=target_image,
+                p_diff=p_diff,
+            )
+            self.progress_heavy.emit(payload)
+        #except Exception as exc:
+        #    print("request_heavy_refresh failed:", exc)
 
     def _current_transform_group(self) -> int:
         if hasattr(self.train_method, "only_train_small_area"):
@@ -168,6 +173,12 @@ class TrainingWorker(QtCore.QObject):
         self.parameter_update.emit(self.model.get_tunable_parameters())
 
     def build_heavy_payload(self, step: int, loss_item: float, simulated_image, target_image, p_diff):
+        if self._heavy_refresh_running:
+            self._heavy_refresh_pending = True
+            return
+
+        self._heavy_refresh_running = True
+
         sim_img = simulated_image.detach().cpu().numpy()
         tgt_img = target_image.detach().cpu().numpy()
         diff_img = sim_img - tgt_img
@@ -229,6 +240,9 @@ class TrainingWorker(QtCore.QObject):
             train_method=self.train_method,
             strain_maps=strain_maps
         )
+        self._heavy_refresh_running = False
+        if self._heavy_refresh_pending:
+            self._heavy_refresh_pending = False
         return payload
 
     @QtCore.Slot()
@@ -253,8 +267,10 @@ class TrainingWorker(QtCore.QObject):
             simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
                 self.target, self.brightness, self.contrast
             )
-
-            loss.backward()
+            try:
+                loss.backward()
+            except:
+                print("Loss failed:", sys.exc_info()[0])
 
             if hasattr(self.pot_layer, "zero_grads_for_frozen"):
                 self.pot_layer.zero_grads_for_frozen()
@@ -649,6 +665,9 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         if hasattr(self.train_method, "train_small_area_squares"):
             self.canvas.set_target_rectangles(self.train_method.train_small_area_squares)
 
+        self._heavy_refresh_running = False
+        self._heavy_refresh_pending = False
+
 
 
 
@@ -664,62 +683,9 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         layout.addLayout(left, stretch=4)
         layout.addLayout(right, stretch=1)
 
-        if False:
-            top_tune = QtWidgets.QGroupBox("Tune")
-            tune_layout = QtWidgets.QGridLayout(top_tune)
 
-            self.scale_spin_x = QtWidgets.QDoubleSpinBox()
-            self.scale_spin_x.setDecimals(5)
-            self.scale_spin_x.setRange(0.80, 1.20)
-            self.scale_spin_x.setSingleStep(0.01)
-            self.scale_spin_x.setValue(1.12)
-
-            self.scale_spin_y = QtWidgets.QDoubleSpinBox()
-            self.scale_spin_y.setDecimals(5)
-            self.scale_spin_y.setRange(0.80, 1.20)
-            self.scale_spin_y.setSingleStep(0.01)
-            self.scale_spin_y.setValue(1.14)
-
-            self.shift_spin_x = QtWidgets.QDoubleSpinBox()
-            self.shift_spin_x.setDecimals(5)
-            self.shift_spin_x.setRange(-50.0, 50.0)
-            self.shift_spin_x.setSingleStep(0.1)
-            self.shift_spin_x.setValue(-9.5)
-
-            self.shift_spin_y = QtWidgets.QDoubleSpinBox()
-            self.shift_spin_y.setDecimals(5)
-            self.shift_spin_y.setRange(-50.0, 50.0)
-            self.shift_spin_y.setSingleStep(0.1)
-            self.shift_spin_y.setValue(-11.0)
-
-            self.rotation_spin = QtWidgets.QDoubleSpinBox()
-            self.rotation_spin.setDecimals(5)
-            self.rotation_spin.setRange(-np.pi/6, np.pi/6)
-            self.rotation_spin.setSingleStep(0.01)
-            self.rotation_spin.setValue(0.025)
-
-            self.show_positions_checkbox = QtWidgets.QCheckBox("Show positions on target")
-            self.show_positions_checkbox.setChecked(True)
-
-
-            tune_layout.addWidget(QtWidgets.QLabel("scale"), 0, 0)
-            tune_layout.addWidget(self.scale_spin_x, 1, 0)
-            tune_layout.addWidget(self.scale_spin_y, 2, 0)
-
-            tune_layout.addWidget(QtWidgets.QLabel("shift"), 0, 1)
-            tune_layout.addWidget(self.shift_spin_x, 1, 1)
-            tune_layout.addWidget(self.shift_spin_y, 2, 1)
-
-            tune_layout.addWidget(QtWidgets.QLabel("rotation"), 0, 2)
-            tune_layout.addWidget(self.rotation_spin, 1, 2)
-
-            tune_layout.addWidget(self.show_positions_checkbox, 2, 2)
-
-
-
-            left.addWidget(top_tune, stretch=0)
-
-        self.parameter_frame = ParametersFrame()
+        self.parameter_frame = ParametersFrame(self.model.get_tunable_parameters())
+        self.parameter_frame.parameter_tuned.connect(self._trigger_heavy_refresh)
         left.addWidget(self.parameter_frame, stretch=0)
 
         self.canvas = MplCanvas(target_tensor=self.target)
@@ -789,30 +755,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     def _update_parameters_from_current_params(self):
         pass
 
-    def _update_spins_from_current_params(self):
-        idx = self._current_transform_group()
 
-        if idx is not None:
-
-            with torch.no_grad():
-                scale_x_val = float(self.pot_layer.scales_[idx][0].detach().cpu().item())
-                scale_y_val = float(self.pot_layer.scales_[idx][1].detach().cpu().item())
-                rot_val = float(self.pot_layer.rotations_[idx].detach().cpu().item())
-                shift_x_val = float(self.pot_layer.shifts_[idx][0].detach().cpu().item())
-                shift_y_val = float(self.pot_layer.shifts_[idx][1].detach().cpu().item())
-
-            widgets_and_values = [
-                (self.scale_spin_x, scale_x_val),
-                (self.scale_spin_y, scale_y_val),
-                (self.rotation_spin, rot_val),
-                (self.shift_spin_x, shift_x_val),
-                (self.shift_spin_y, shift_y_val),
-            ]
-
-            for widget, value in widgets_and_values:
-                widget.blockSignals(True)
-                widget.setValue(value)
-                widget.blockSignals(False)
 
 
     def _current_transform_group(self):
@@ -826,75 +769,13 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.canvas.show_positions_on_target = checked
         self._trigger_heavy_refresh()
 
-    def _on_scale_x_changed(self, value: float):
-        with torch.no_grad():
-            # 0 = Graphen, 1 = WS2
-            idx = self._current_transform_group()
-            if idx is not None:
-                self.pot_layer.scales_[idx][0] = float(value)
 
-        self._trigger_heavy_refresh()
-
-    def _on_scale_y_changed(self, value: float):
-        with torch.no_grad():
-            idx = self._current_transform_group()
-            if idx is not None:
-                self.pot_layer.scales_[idx][1] = float(value)
-
-        self._trigger_heavy_refresh()
-
-    def _on_rotation_changed(self, value: float):
-        with torch.no_grad():
-            idx = self._current_transform_group()
-            if idx is not None:
-                self.pot_layer.rotations_[idx][0] = float(value)
-
-        self._trigger_heavy_refresh()
-
-    def _on_shift_x_changed(self, value: float):
-        with torch.no_grad():
-            idx = self._current_transform_group()
-            if idx is not None:
-                # beide Komponenten gleich setzen
-                self.pot_layer.shifts_[idx][0] = float(value)
-
-        self._trigger_heavy_refresh()
-
-
-    def _on_shift_y_changed(self, value: float):
-        with torch.no_grad():
-            idx = self._current_transform_group()
-            if idx is not None:
-                # beide Komponenten gleich setzen
-                self.pot_layer.shifts_[idx][1] = float(value)
-
-        self._trigger_heavy_refresh()
-
-    @QtCore.Slot(float, float, float, float)
-    def on_spin_values_changed(self, scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, activated):
-        self._update_spins_from_values(scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, activated)
 
     @QtCore.Slot()
     def on_parameter_update(self, params: ParticlesTunableParameters):
-        self.parameter_frame.update_from_model(params)
+        self.parameter_frame.refresh_from_params()
 
-    def _set_spin_value_silent(self, spinbox, value: float):
-        spinbox.blockSignals(True)
-        spinbox.setValue(value)
-        spinbox.blockSignals(False)
 
-    def _update_spins_from_values(self, scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, activated):
-        self._set_spin_value_silent(self.scale_spin_x, scale_x_val)
-        self._set_spin_value_silent(self.scale_spin_y, scale_y_val)
-        self._set_spin_value_silent(self.rotation_spin, rot_val)
-        self._set_spin_value_silent(self.shift_spin_x, shift_x_val)
-        self._set_spin_value_silent(self.shift_spin_y, shift_y_val)
-
-        self.scale_spin_x.setEnabled(activated)
-        self.scale_spin_y.setEnabled(activated)
-        self.rotation_spin.setEnabled(activated)
-        self.shift_spin_x.setEnabled(activated)
-        self.shift_spin_y.setEnabled(activated)
 
     def _connect_actions(self):
         self.start_btn.clicked.connect(self.start_training)
@@ -977,23 +858,36 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.thread.start()
 
     def _do_local_heavy_refresh(self):
-        try:
-            with torch.no_grad():
-                simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
-                    self.target, self.brightness, self.contrast
-                )
-                loss_item = float(loss.detach().cpu().item())
+        if self._heavy_refresh_running:
+            self._heavy_refresh_pending = True
+            return
 
-                payload = self._build_local_heavy_payload(
-                    step=0,
-                    loss_item=loss_item,
-                    simulated_image=simulated_image,
-                    target_image=target_image,
-                    p_diff=p_diff
-                )
-                self.on_progress_heavy(payload)
+        self._heavy_refresh_running = True
+
+
+        print("do local refresh")
+        try:
+            simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
+                self.target, self.brightness, self.contrast
+            )
+            loss_item = float(loss.detach().cpu().item())
+            print("BEFORE on_progress_heavy")
+            payload = self._build_local_heavy_payload(
+                step=0,
+                loss_item=loss_item,
+                simulated_image=simulated_image,
+                target_image=target_image,
+                p_diff=p_diff
+            )
+            self.on_progress_heavy(payload)
+            print("AFTER on_progress_heavy")
         except Exception as exc:
             print("local heavy refresh failed:", exc)
+        finally:
+            self._heavy_refresh_running = False
+            if self._heavy_refresh_pending:
+                self._heavy_refresh_pending = False
+                self._trigger_heavy_refresh()
 
     def _build_local_heavy_payload(self, step, loss_item, simulated_image, target_image, p_diff):
         sim_img = simulated_image.detach().cpu().numpy()
@@ -1059,7 +953,12 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         )
 
     def _trigger_heavy_refresh(self):
-        if self.worker is not None:
+        print("TRIGGER heavy refresh")
+        if self._heavy_refresh_running:
+            self._heavy_refresh_pending = True
+            return
+
+        if self.worker is not None and not self.worker._pause:
             self.request_heavy_refresh_signal.emit()
         else:
             self._do_local_heavy_refresh()

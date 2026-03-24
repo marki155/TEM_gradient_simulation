@@ -77,6 +77,7 @@ class TensorEditor(QFrame):
     Schreibt Änderungen direkt in den Tensor.
     Kann Skalar- und beliebige Tensorformen editieren.
     """
+    value_changed = Signal()
 
     def __init__(
         self,
@@ -155,23 +156,29 @@ class TensorEditor(QFrame):
             return
         with torch.no_grad():
             self.tensor.copy_(torch.tensor(value, dtype=self.tensor.dtype, device=self.tensor.device))
+        self.value_changed.emit()
 
     def _write_at_index(self, index: tuple[int, ...], value: float):
         if self._building:
             return
         with torch.no_grad():
             self.tensor[index] = value
+        self.value_changed.emit()
 
     def refresh_from_tensor(self):
         self._building = True
         cpu_tensor = self.tensor.detach().cpu()
 
         if cpu_tensor.ndim == 0:
+            self.spinboxes[0].blockSignals(True)
             self.spinboxes[0].setValue(float(cpu_tensor.item()))
+            self.spinboxes[0].blockSignals(False)
         else:
             flat = cpu_tensor.reshape(-1).tolist()
             for sb, val in zip(self.spinboxes, flat):
+                sb.blockSignals(True)
                 sb.setValue(float(val))
+                sb.blockSignals(False)
 
         self._building = False
 
@@ -188,6 +195,8 @@ class ParametersFrame(QFrame):
       - nn.ParameterList
       - nn.ParameterDict
     """
+    parameter_tuned = Signal()
+
 
     def __init__(self, params_root: Any, parent: QWidget | None = None):
         super().__init__(parent)
@@ -249,6 +258,7 @@ class ParametersFrame(QFrame):
         # Einzelner Parameter
         if isinstance(value, nn.Parameter):
             editor = TensorEditor(name, value)
+            editor.value_changed.connect(self.parameter_tuned)
             self._tensor_editors.append(editor)
             layout.addWidget(editor)
             return
@@ -262,6 +272,7 @@ class ParametersFrame(QFrame):
                 if not isinstance(param, nn.Parameter):
                     continue
                 editor = TensorEditor(f"{name}[{i}]", param)
+                editor.value_changed.connect(self.parameter_tuned)
                 self._tensor_editors.append(editor)
                 section.content_layout.addWidget(editor)
             return
@@ -275,6 +286,7 @@ class ParametersFrame(QFrame):
                 if not isinstance(param, nn.Parameter):
                     continue
                 editor = TensorEditor(str(key), param)
+                editor.value_changed.connect(self.parameter_tuned)
                 self._tensor_editors.append(editor)
                 section.content_layout.addWidget(editor)
             return

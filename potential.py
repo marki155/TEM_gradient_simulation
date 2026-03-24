@@ -12,7 +12,8 @@ from displacement_field import SplineDisplacementField2D, StrainTunableParameter
 from torch.nn.utils.rnn import pad_sequence
 
 
-
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+torch.set_default_device(DEVICE)
 
 @dataclass
 class TunablePotentialParameters:
@@ -49,53 +50,62 @@ class DifferentiablePotential(nn.Module):
 
         self.H, self.W = shape
 
+        self._IDX = {"Gr": 0, "S1": 1, "W": 2, "S2": 3}
+        self.N_l = len(init_positions)
+
         self.train_methods = train_methods
 
-        ws2_displacement = SplineDisplacementField2D(
+        self.ws2_displacement = SplineDisplacementField2D(
             image_shape=shape,
-            control_shape=(3,3),
+            control_shape=(8,8),
             init_scale=0.0,
             device=device,
             dtype=torch.float32,
         )
         #self.positions_method = "graphen_shift"
         #self.intensity_classes = "free" # "free", "vacancies", "classes"
+        strain_parameters = self.ws2_displacement.get_tunable_parameters()
+        positions_ = self.initialize_positions_parameters(init_positions)
+        intensities_, occupancies_ = self.initialize_intensities_parameters(init_intensities)
 
-        self.tunable_parameters = TunablePotentialParameters(ws2_displacement=ws2_displacement)
+        self.tunable_parameters = TunablePotentialParameters(ws2_displacement=strain_parameters, positions=positions_,
+                                                             intensities=intensities_, occupancies=occupancies_,)
 
 
-        self._IDX = {"Gr": 0, "S1": 1, "W": 2, "S2": 3}
-        self.N_l = len(init_positions)
 
-        self.initialize_positions_parameters(init_positions)
-        self.initialize_intensities_parameters(init_intensities)
+        self.apply_trainable_selection()
+        #self.zero_grads_for_frozen()
+
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
 
     def get_tunable_parameters(self):
         return self.tunable_parameters
 
 
     def apply_trainable_selection(self):
-            self.intensities_[0].requires_grad = self.train_methods.train_graphen_intensities
-            self.intensities_[1].requires_grad = self.train_methods.train_S1_intensities
-            self.intensities_[2].requires_grad = self.train_methods.train_W_intensities
-            self.intensities_[3].requires_grad = self.train_methods.train_S2_intensities
+            self.tunable_parameters.intensities[0].requires_grad = self.train_methods.train_graphen_intensities
+            self.tunable_parameters.intensities[1].requires_grad = self.train_methods.train_S1_intensities
+            self.tunable_parameters.intensities[2].requires_grad = self.train_methods.train_W_intensities
+            self.tunable_parameters.intensities[3].requires_grad = self.train_methods.train_S2_intensities
 
-            self.occupancies_[0].requires_grad = self.train_methods.train_graphen_occupancies
-            self.occupancies_[1].requires_grad = self.train_methods.train_S1_occupancies
-            self.occupancies_[2].requires_grad = self.train_methods.train_W_occupancies
-            self.occupancies_[3].requires_grad = self.train_methods.train_S2_occupancies
+            self.tunable_parameters.occupancies[0].requires_grad = self.train_methods.train_graphen_occupancies
+            self.tunable_parameters.occupancies[1].requires_grad = self.train_methods.train_S1_occupancies
+            self.tunable_parameters.occupancies[2].requires_grad = self.train_methods.train_W_occupancies
+            self.tunable_parameters.occupancies[3].requires_grad = self.train_methods.train_S2_occupancies
 
-            self.shifts_[0].requires_grad = self.train_methods.graphen_shift
-            self.rotations_[0].requires_grad = self.train_methods.graphen_rotation
-            self.positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
+            self.tunable_parameters.shift_Gr.requires_grad = self.train_methods.graphen_shift
+            self.tunable_parameters.rotation_Gr.requires_grad = self.train_methods.graphen_rotation
+            self.tunable_parameters.positions[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
 
-            self.shifts_[1].requires_grad = self.train_methods.WS2_shift
-            self.rotations_[1].requires_grad = self.train_methods.WS2_rotation
+            self.tunable_parameters.shift_WS2.requires_grad = self.train_methods.WS2_shift
+            self.tunable_parameters.rotation_WS2.requires_grad = self.train_methods.WS2_rotation
             for i in range(self.N_l):
                 if i != self._IDX["Gr"]:
-                    self.positions_[i].requires_grad = self.train_methods.WS2_free_positions
+                    self.tunable_parameters.positions[i].requires_grad = self.train_methods.WS2_free_positions
 
-            self.blur_sigma_.requires_grad = self.train_methods.train_blur
+            self.tunable_parameters.blur_sigma.requires_grad = self.train_methods.train_blur
 
             for p in self.ws2_displacement.parameters():
                 p.requires_grad = getattr(self.train_methods, "WS2_strain_field", False)
@@ -104,49 +114,49 @@ class DifferentiablePotential(nn.Module):
 
     def zero_grads_for_frozen(self):
         if not self.train_methods.train_graphen_intensities:
-            self.intensities_[0].grad = None
+            self.intensities[0].grad = None
         if not self.train_methods.train_S1_intensities:
-            self.intensities_[1].grad = None
+            self.intensities[1].grad = None
         if not self.train_methods.train_W_intensities:
-            self.intensities_[2].grad = None
+            self.intensities[2].grad = None
         if not self.train_methods.train_S2_intensities:
-            self.intensities_[3].grad = None
+            self.intensities[3].grad = None
 
         if not  self.train_methods.train_graphen_occupancies:
-            self.occupancies_[0].grad = None
+            self.occupancies[0].grad = None
         if not self.train_methods.train_S1_occupancies:
-            self.occupancies_[1].grad = None
+            self.occupancies[1].grad = None
         if not self.train_methods.train_W_occupancies:
-            self.occupancies_[2].grad = None
+            self.occupancies[2].grad = None
         if not self.train_methods.train_S2_occupancies:
-            self.occupancies_[3].grad = None
+            self.occupancies[3].grad = None
 
         if not self.train_methods.graphen_shift:
-            self.shifts_[0].grad = None
+            self.tunable_parameters.shift_Gr.grad = None
         if not self.train_methods.graphen_rotation:
-            self.rotations_[0].grad = None
+            self.tunable_parameters.rotation_Gr.grad = None
         if not self.train_methods.graphen_free_positions:
-            self.positions_[self._IDX["Gr"]].grad = None
+            self.positions[self._IDX["Gr"]].grad = None
 
         if not self.train_methods.WS2_shift:
-            self.shifts_[1].grad = None
+            self.tunable_parameters.shift_WS2.grad = None
         if not self.train_methods.WS2_rotation:
-            self.rotations_[1].grad = None
+            self.tunable_parameters.rotation_WS2.grad = None
         for i in range(self.N_l):
             if i != self._IDX["Gr"] and not self.train_methods.WS2_free_positions:
-                self.positions_[i].grad = None
+                self.positions[i].grad = None
 
 
     def initialize_positions_parameters(self, init_positions):
         positions_ = nn.ParameterList(
             [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions])
 
-        self.tunable_parameters.positions_ = positions_
-
-        self.tunable_parameters.positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
+        positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions
         for i in range(self.N_l):
             if i != self._IDX["Gr"]:
-                self.tunable_parameters.positions_[i].requires_grad = self.train_methods.WS2_free_positions
+                positions_[i].requires_grad = self.train_methods.WS2_free_positions
+
+        return positions_
 
 
 
@@ -159,12 +169,8 @@ class DifferentiablePotential(nn.Module):
         occupancies_ = nn.ParameterList(
             [torch.ones(I.shape, dtype=torch.float32, device=self.device)*0.1 for I in init_intensities])
 
-        self.tunable_parameters.intensities_ = intensities_
-        self.tunable_parameters.occupancies_ = occupancies_
 
-
-        self.apply_trainable_selection()
-        self.zero_grads_for_frozen()
+        return intensities_, occupancies_
 
 
         if False:
@@ -290,9 +296,9 @@ class DifferentiablePotential(nn.Module):
 
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_free_positions) or
                     (i != self._IDX["Gr"] and self.train_methods.WS2_free_positions)):
-                positions = self.tunable_parameters.positions_[i]
+                positions = self.tunable_parameters.positions[i]
             else:
-                positions = self.tunable_parameters.positions_[i].detach()
+                positions = self.tunable_parameters.positions[i].detach()
 
 
             shifted_positions = positions - center + shift
@@ -346,12 +352,12 @@ class DifferentiablePotential(nn.Module):
         y0 -= pad
         y1 += pad
         for l in layers:
-            pos = self.positions_[l]
+            pos = self.tunable_parameters.positions[l]
             xs, ys = pos[:,0], pos[:,1]
             for i in range(pos.shape[0]):
                 if (xs[i] >= x0 and xs[i] <= x1) and \
                         (ys[i] >= y0 and ys[i] <= y1):
-                    self.occupancies_[l][i] = -100
+                    self.tunable_parameters.occupancies[l][i] = -100
 
 
     def get_positions_old(self):
@@ -449,7 +455,7 @@ class DifferentiablePotential(nn.Module):
     def get_pos_and_ints(self, pos_idx, filter_by_area=False):
 
         intensities = self.get_intensities_raw()[pos_idx].detach().clone().cpu().numpy()
-        occ = self.occupancies_[pos_idx].sigmoid().detach().cpu().numpy()
+        occ = self.occupancies[pos_idx].sigmoid().detach().cpu().numpy()
         occ_neg_mask = occ < 0.5
         intensities[occ_neg_mask] = None # TODO
         positions = self.get_positions()[pos_idx].cpu().detach().cpu().numpy()
@@ -643,7 +649,7 @@ class DifferentiablePotential(nn.Module):
         sigma: Glättungs-Gauss in nm
         """
 
-        sigma = self.blur_sigma_ * 1.e-3
+        sigma = self.blur_sigma * 1.e-3
 
         e = 1.602e-19
         ny, nx = (self.W, self.H)

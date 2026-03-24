@@ -13,10 +13,12 @@ class TrainState:
 class TrainMethod:
 
     loss_mse: float = 0.0
-    loss_ncc: float = 1.0
-    loss_local_ncc: float = 0.0
+    loss_ncc: float = .05
+    loss_local_ncc_100: float = 0.5
+    loss_local_ncc_50: float = 0.5
+    loss_local_ncc_20: float = 0.5
     loss_ssim: float = 0.0
-    loss_l1: float = 0.0
+    loss_l1: float = 0.1
     loss_fft: float = 0.0
 
     train_blur: bool = False
