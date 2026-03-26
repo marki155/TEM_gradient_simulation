@@ -543,61 +543,57 @@ class DifferentiablePotential(nn.Module):
 
         return potential_list, self.aux_loss()
 
-
-
-
-
-    def create_rho(self, pxpositions, intensities, multiplier=1.0):
-        # pxpositions: (N, 2) Tensor
-        # intensities: (N,) Tensor
-
-        intensities = intensities.unsqueeze(1)  # (N, 1) Tensor
-
+    def create_rho(self, positions_xy, intensities, multiplier=1.0):
+        """
+        positions_xy: Tensor (N, 2), mit [:, 0] = x und [:, 1] = y
+        intensities:  Tensor (N,)
+        """
         pad = 2
 
-        rho = torch.zeros((self.W + pad * 2, self.H + pad * 2), device=self.device)
+        # Bildtensor immer als (H, W)
+        rho = torch.zeros(
+            (self.H + 2 * pad, self.W + 2 * pad),
+            dtype=torch.float32,
+            device=self.device
+        )
 
-        # potential.fill_(self.background)  # Torch-Äquivalent
+        x = positions_xy[:, 0]
+        y = positions_xy[:, 1]
+        inten = intensities.to(torch.float32)
 
-        px, py = pxpositions[:, 0], pxpositions[:, 1] # TODO warum vertauscht
+        # Nur Punkte behalten, bei denen bilineare Verteilung noch im Bild liegt
+        mask = (x >= 0.0) & (x < self.W - 1) & (y >= 0.0) & (y < self.H - 1)
+        x = x[mask]
+        y = y[mask]
+        inten = inten[mask]
 
-        pos_mask = (px >= 0.0) & (px <= self.W) & (py >= 0.0) & (py <= self.H)
-        px = px[pos_mask]
-        py = py[pos_mask]
-        intensities = intensities[pos_mask]
-        # offset = int(self.canvas_size / self.kernelsize)
-        offset = pad
+        if x.numel() == 0:
+            return rho[pad:-pad, pad:-pad]
 
-        # Integer-Anteile
-        # ix = torch.clamp(px.floor().to(torch.int64), min=0, max=self.shape[0] + self.canvas_size - 2)
-        # iy = torch.clamp(py.floor().to(torch.int64), min=0, max=self.shape[1] + self.canvas_size - 2)
+        ix = torch.floor(x).long()
+        iy = torch.floor(y).long()
 
-        ix = px.floor().to(torch.int64)
-        iy = py.floor().to(torch.int64)
+        fx = x - ix.float()
+        fy = y - iy.float()
 
-        # Bruchteile
-        fx = px - ix
-        fy = py - iy
+        # bilineare Gewichte
+        w00 = (1.0 - fx) * (1.0 - fy) * inten * multiplier
+        w10 = fx * (1.0 - fy) * inten * multiplier
+        w01 = (1.0 - fx) * fy * inten * multiplier
+        w11 = fx * fy * inten * multiplier
 
-        # Pixelgewichte
-        w00 = torch.matmul((1 - fx), (1 - fy)) * intensities * multiplier
-        w10 = torch.matmul(fx, (1 - fy)) * intensities* multiplier
-        w11 = torch.matmul(fx, fy) * intensities* multiplier
-        w01 = torch.matmul((1 - fx), fy) * intensities* multiplier
+        # ACHTUNG: Tensorindexierung ist [y, x]
+        row0 = iy + pad
+        row1 = iy + 1 + pad
+        col0 = ix + pad
+        col1 = ix + 1 + pad
 
-        # Indizes für alle vier Nachbarn
-        idx00 = (offset + ix, offset + iy)
-        idx10 = (offset + ix, offset + iy + 1)
-        idx11 = (offset + ix + 1, offset + iy + 1)
-        idx01 = (offset + ix + 1, offset + iy)
+        rho.index_put_((row0, col0), w00, accumulate=True)
+        rho.index_put_((row0, col1), w10, accumulate=True)
+        rho.index_put_((row1, col0), w01, accumulate=True)
+        rho.index_put_((row1, col1), w11, accumulate=True)
 
-        # In-place Akkumulation wie np.add.at
-        rho.index_put_(idx00, w00[:idx00[0].shape[0], 0], accumulate=True)
-        rho.index_put_(idx10, w10[:idx10[0].shape[0], 0], accumulate=True)
-        rho.index_put_(idx11, w11[:idx11[0].shape[0], 0], accumulate=True)
-        rho.index_put_(idx01, w01[:idx01[0].shape[0], 0], accumulate=True)
-
-        return torch.abs(rho[pad:-pad, pad:-pad])  # Entfernen des Pads
+        return rho[pad:-pad, pad:-pad]
 
     def potential_2d_nm(self, rho, sigma=0.1, epsilon0_nm=8.854e-21, device=None):
         """

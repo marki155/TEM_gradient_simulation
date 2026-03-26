@@ -108,7 +108,7 @@ if __name__ == '__main__':
                 (init_positions[:, 0] >= -canvas_shift_WS2[0]) &
                 (init_positions[:, 0] <= canvas_size_ws2[0] - canvas_shift_WS2[0]) &
                 (init_positions[:, 1] >= -canvas_shift_WS2[1]) &
-                (init_positions[:, 1] <= canvas_size_ws2[0] - canvas_shift_WS2[1])
+                (init_positions[:, 1] <= canvas_size_ws2[1] - canvas_shift_WS2[1])
             )
             slices_pos.append(init_positions[selector][:, :2])
             slices_intensities.append(model_atoms.get_atomic_numbers()[selector])

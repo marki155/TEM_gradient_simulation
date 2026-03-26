@@ -1,14 +1,11 @@
-import tifffile as tifffile
-import torch
-import ase
+import copy
 import numpy as np
+import torch
 
-from scipy.ndimage import gaussian_filter
-
-from nn import NN_particles, NN_free_potential
-from testing import show_init_positions
+from nn import NN_particles
 from training_parameter import TrainMethod
 from gui_qt import launch_gui_qt
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_default_device(DEVICE)
@@ -16,127 +13,162 @@ torch.set_default_device(DEVICE)
 VOLTAGE_KV = 80
 
 
-if __name__ == '__main__':
-    image = tifffile.imread('NPL11-1_crop_big_blur-3.tif')
-    image[np.where(image == 0.0)] = np.median(image)
+def make_train_method(image_shape):
+    tm = TrainMethod()
 
-    H, W = image.shape
-    fov = 7.58
-    pixel_size_nm = fov / image.shape[1]
+    H, W = image_shape
 
-    max_rot_graphen = np.deg2rad(10)
-    canvas_H_rot_graphen = np.cos(max_rot_graphen) * H + np.sin(max_rot_graphen) * W
-    canvas_W_rot_graphen = np.cos(max_rot_graphen) * W + np.sin(max_rot_graphen) * H
+    # Wichtig: in deinem Code werden zwei Trainingsbereiche erwartet
+    # Index 0 -> Graphen
+    # Index 1 -> WS2
+    tm.train_small_area_squares = [
+        (0, 0, H, W),
+        (0, 0, H, W),
+    ]
+    tm.only_train_small_area = -1
 
-    max_shift_graphen = 3 * 2.47 * 0.1 / pixel_size_nm
-    canvas_H_shift_graphen = H + 2 * max_shift_graphen
-    canvas_W_shift_graphen = W + 2 * max_shift_graphen
+    # Nur Positionen trainieren
+    tm.graphen_free_positions = True
+    tm.WS2_free_positions = True
 
-    canvas_size_graphen = (
-        int(max(canvas_H_rot_graphen, canvas_H_shift_graphen)),
-        int(max(canvas_W_rot_graphen, canvas_W_shift_graphen))
+    tm.graphen_shift = False
+    tm.graphen_rotation = False
+    tm.graphen_scale = False
+
+    tm.WS2_shift = False
+    tm.WS2_rotation = False
+    tm.WS2_scale = False
+    tm.WS2_strain_field = False
+
+    # Intensitäten/Belegungen fixieren
+    tm.train_graphen_intensities = False
+    tm.train_S1_intensities = False
+    tm.train_W_intensities = False
+    tm.train_S2_intensities = False
+
+    tm.train_graphen_occupancies = False
+    tm.train_S1_occupancies = False
+    tm.train_W_occupancies = False
+    tm.train_S2_occupancies = False
+
+    tm.train_blur = False
+
+    # Robuste einfache Loss-Konfiguration
+    tm.loss_mse = 1.0
+    tm.loss_ncc = 0.0
+    tm.loss_local_ncc_100 = 0.0
+    tm.loss_local_ncc_50 = 0.0
+    tm.loss_local_ncc_20 = 0.0
+    tm.loss_ssim = 0.0
+    tm.loss_l1 = 0.0
+    tm.loss_fft = 0.0
+
+    return tm
+
+
+def make_test_particles():
+    """
+    7 Partikel insgesamt:
+      Gr: 1
+      S1: 2
+      W : 2
+      S2: 2
+    """
+    init_positions = [
+        np.array([[29.5, 29.5],
+            [41.5, 25.5],
+        ], dtype=np.float32),  # Gr
+
+        np.array([[29.5, 29.5],
+            [41.5, 25.5],
+
+        ], dtype=np.float32),  # S1
+
+        np.array([
+            [29.5, 29.5],
+            [41.5, 25.5],
+        ], dtype=np.float32),  # W
+
+        np.array([[29.5, 29.5],
+            [41.5, 25.5],
+
+        ], dtype=np.float32),  # S2
+    ]
+
+    init_intensities = [
+        np.array([0.0,0.0], dtype=np.float32),          # C
+        np.array([0.0,0.0], dtype=np.float32),   # S
+        np.array([74.0, 74.0], dtype=np.float32),   # W
+        np.array([0.0,0.0], dtype=np.float32),   # S
+    ]
+
+    return init_positions, init_intensities
+
+
+@torch.no_grad()
+def create_target_image(image_shape, fov, train_method, init_positions, init_intensities):
+    """
+    Erzeugt mit einem Referenzmodell ein synthetisches Zielbild.
+    """
+    ref_model = NN_particles(
+        image_shape=image_shape,
+        fov=fov,
+        voltage_kV=VOLTAGE_KV,
+        train_method=train_method,
+        device=DEVICE,
+        train_methods=train_method
     )
-    canvas_shift_graphen = (
-        (canvas_size_graphen[0] - H) / 2,
-        (canvas_size_graphen[1] - W) / 2
+
+    ref_model.build_multislice(
+        init_positions=copy.deepcopy(init_positions),
+        init_intensities=copy.deepcopy(init_intensities),
+        dz=0.3,
+        max_shifts=(0.0, 0.0),
+        max_rotations=(0.0, 0.0)
     )
 
-    max_rot_ws2 = np.deg2rad(5)
-    canvas_H_rot_ws2 = np.cos(max_rot_ws2) * H + np.sin(max_rot_ws2) * W
-    canvas_W_rot_ws2 = np.cos(max_rot_ws2) * W + np.sin(max_rot_ws2) * H
+    simulated_image, _ = ref_model.model(None)
 
-    max_shift_ws2 = 3 * 3.18 * 0.1 / pixel_size_nm
-    canvas_H_shift_ws2 = H + 2 * max_shift_ws2
-    canvas_W_shift_ws2 = W + 2 * max_shift_ws2
+    # So normalisieren, dass es zur restlichen Pipeline passt
+    min_val = torch.min(simulated_image)
+    max_val = torch.max(simulated_image)
+    target = (simulated_image - min_val) / (max_val - min_val + 1e-8)
 
-    canvas_size_ws2 = (
-        int(max(canvas_H_rot_ws2, canvas_H_shift_ws2)),
-        int(max(canvas_W_rot_ws2, canvas_W_shift_ws2))
+    return target.detach()
+
+
+@torch.no_grad()
+def perturb_positions(model, sigma_px=1.5):
+    pot_layer = model.model[0]
+    for p in pot_layer.tunable_parameters.positions:
+        p.add_(torch.randn_like(p) * sigma_px)
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    np.random.seed(0)
+
+    image_shape = (64, 64)
+    fov = 4.0
+
+    init_positions, init_intensities = make_test_particles()
+    train_method = make_train_method(image_shape)
+
+    # 1) Synthetisches Zielbild aus idealen Positionen erzeugen
+    target = create_target_image(
+        image_shape=image_shape,
+        fov=fov,
+        train_method=train_method,
+        init_positions=init_positions,
+        init_intensities=init_intensities
     )
-    canvas_shift_WS2 = (
-        (canvas_size_ws2[0] - H) / 2,
-        (canvas_size_ws2[1] - W) / 2
-    )
-
-    single_WS2 = ase.build.mx2(formula='WS2')
-    WS2_H_atoms = int((canvas_size_ws2[0] * pixel_size_nm * 10) / single_WS2.cell.lengths()[0]) * 2
-    WS2_W_atoms = int((canvas_size_ws2[1] * pixel_size_nm * 10) / single_WS2.cell.lengths()[1]) * 2
-
-    single_graphen = ase.build.graphene()
-    graphen_H_atoms = int((canvas_size_graphen[0] * pixel_size_nm * 10) / single_graphen.cell.lengths()[0]) * 2
-    graphen_W_atoms = int((canvas_size_graphen[1] * pixel_size_nm * 10) / single_graphen.cell.lengths()[1]) * 2
-
-    ws2 = ase.build.mx2(formula='WS2', vacuum=1.0) * (WS2_H_atoms, WS2_W_atoms, 1)
-    ws2.translate((20, -90, 0))
-    ws2.rotate(60, 'z')
-
-    graphen = ase.build.graphene(vacuum=1.0) * (graphen_H_atoms, graphen_W_atoms, 1)
-    graphen.rotate(0, 'z')
-    graphen.translate((-10, -18, 0))
-
-    model_atoms = ws2
-
-    slices = True
-    if slices:
-        init_positions = model_atoms.get_positions() / (pixel_size_nm * 10)
-
-        lowS = np.min(init_positions[:, 2])
-        highS = np.max(init_positions[:, 2])
-        middleW = (lowS + highS) / 2
-        slice_thickness = highS - middleW
-
-        init_positions = init_positions - lowS + slice_thickness / 2
-
-        slices_pos = []
-        slices_intensities = []
-
-        graphen_pos = graphen.get_positions() / (pixel_size_nm * 10)
-        selector = (
-            (graphen_pos[:, 0] >= -canvas_shift_graphen[0]) &
-            (graphen_pos[:, 0] <= canvas_size_graphen[0] - canvas_shift_graphen[0]) &
-            (graphen_pos[:, 1] >= -canvas_shift_graphen[1]) &
-            (graphen_pos[:, 1] <= canvas_size_graphen[1] - canvas_shift_graphen[1])
-        )
-        slices_pos.append(graphen_pos[selector][:, :2])
-        slices_intensities.append(graphen.get_atomic_numbers()[selector])
-
-        for i in range(3):
-            selector = (
-                (init_positions[:, 2] > i * slice_thickness) &
-                (init_positions[:, 2] < (i + 1) * slice_thickness) &
-                (init_positions[:, 0] >= -canvas_shift_WS2[0]) &
-                (init_positions[:, 0] <= canvas_size_ws2[0] - canvas_shift_WS2[0]) &
-                (init_positions[:, 1] >= -canvas_shift_WS2[1]) &
-                (init_positions[:, 1] <= canvas_size_ws2[0] - canvas_shift_WS2[1])
-            )
-            slices_pos.append(init_positions[selector][:, :2])
-            slices_intensities.append(model_atoms.get_atomic_numbers()[selector])
-
-        init_positions = slices_pos
-        init_intensities = slices_intensities
-    else:
-        init_positions = model_atoms.get_positions()[:, :2] / (pixel_size_nm * 10)
-        init_positions = np.stack([init_positions], axis=-1)
-        init_intensities = model_atoms.get_atomic_numbers()
-        init_intensities = np.stack([init_intensities], axis=-1)
-        slice_thickness = 1.0
-
-    #show_init_positions(H, W, init_positions, init_intensities, canvas_shift_graphen, canvas_size_graphen,
-    #                    canvas_shift_WS2, canvas_size_ws2)
-
-    target = torch.tensor(image, dtype=torch.float32)
 
     brightness = torch.mean(target)
     contrast = torch.std(target)
 
-    min_target = torch.min(target)
-    max_target = torch.max(target)
-    target = (target - min_target) / (max_target - min_target)
-
-    train_method = TrainMethod()
-
+    # 2) Trainingsmodell mit denselben Partikeln aufbauen
     model = NN_particles(
-        image_shape=image.shape,
+        image_shape=image_shape,
         fov=fov,
         voltage_kV=VOLTAGE_KV,
         train_method=train_method,
@@ -145,20 +177,22 @@ if __name__ == '__main__':
     )
 
     model.build_multislice(
-        init_positions=init_positions,
-        init_intensities=init_intensities,
-        dz=slice_thickness / 10,
-        max_shifts=(max_shift_graphen, max_shift_ws2),
-        max_rotations=(max_rot_graphen, max_rot_ws2)
+        init_positions=copy.deepcopy(init_positions),
+        init_intensities=copy.deepcopy(init_intensities),
+        dz=0.3,
+        max_shifts=(0.0, 0.0),
+        max_rotations=(0.0, 0.0)
     )
+
+    # 3) Partikel leicht verschieben -> das ist der Startzustand fürs Training
+    perturb_positions(model, sigma_px=1.5)
 
     ctf_layer = model.model[2]
     pot_layer = model.model[0]
 
-    pot_layer.occupy_layers_in_area(train_method.train_small_area_squares[0], [1, 2, 3])
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.03)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-
+    # 4) GUI starten: dort sollte man sehen, wie die Partikel zurücklaufen
     launch_gui_qt(
         model=model,
         optimizer=optimizer,
@@ -168,7 +202,7 @@ if __name__ == '__main__':
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,
-        plot_every=20,
-        heavy_every=200,
-        max_steps=2_000_000,
+        plot_every=10,
+        heavy_every=100,
+        max_steps=5000,
     )
