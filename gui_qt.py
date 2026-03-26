@@ -491,6 +491,7 @@ class MplCanvas(FigureCanvasQTAgg):
         positions = pos[mask]
         intensities = ints[mask]
 
+        return (positions[:, 1] - y_min, positions[:, 0] - x_min), intensities
         return (positions[:,0] - x_min, positions[:,1]-y_min), intensities
 
     def update_heavy(self, payload: VizPayload, ctf_layer=None):
