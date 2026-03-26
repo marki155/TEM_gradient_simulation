@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 @dataclass
 class TunableMultisliceParameters:
-    sigma: nn.Parameter = nn.Parameter(torch.tensor(.0177, dtype=torch.float32), requires_grad=True)
+    sigma: nn.Parameter = nn.Parameter(torch.tensor(.07, dtype=torch.float32), requires_grad=True)
 
 # TODO vllt gleich am anfang init von den parametern hier?
 

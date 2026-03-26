@@ -13,10 +13,10 @@ class TrainState:
 class TrainMethod:
 
     loss_mse: float = 0.0
-    loss_ncc: float = .05
-    loss_local_ncc_100: float = 0.5
-    loss_local_ncc_50: float = 0.5
-    loss_local_ncc_20: float = 0.5
+    loss_ncc: float = .5
+    loss_local_ncc_100: float = 0.
+    loss_local_ncc_50: float = 0.
+    loss_local_ncc_20: float = 0.
     loss_ssim: float = 0.0
     loss_l1: float = 0.1
     loss_fft: float = 0.0
@@ -72,4 +72,5 @@ class TrainMethod:
 
     #train_amp_contrast: bool = False # TODO
 
-    train_small_area_squares = [(50, 50, 350, 350), (500, 600, 1000, 1000)]
+    #train_small_area_squares = [(50, 50, 350, 350), (500, 600, 1000, 1000)]
+    train_small_area_squares = [(50, 50, 350, 350), (600, 600, 1000, 1000)]

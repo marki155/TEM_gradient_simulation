@@ -124,13 +124,13 @@ def zernike_phase(alpha, phi, coeffs, device='cpu'):
 
 def make_param_dict(a=None):
     if a is None:
-        a = {"C10": -13.,
-                               'C12': 1.0, "phi12": 0.,
-                               'C23': 2., 'phi23': 0.,
-                               'C21': 2., 'phi21': 0.,
-                               "C30": 4., #um
-                               'C34': .02, 'phi34': 0., #um
-                               'C45': .05, 'phi45': 0.}
+        a = {"C10": -13.17,
+                               'C12': 0.209, "phi12": 0.,
+                               'C23': 0.06, 'phi23': 0.,
+                               'C21': 3.55, 'phi21': 0.,
+                               "C30": 4.04, #um
+                               'C34': -1.19, 'phi34': 0., #um
+                               'C45': 2.05, 'phi45': 0.}
 
     return nn.ParameterDict({
         k: nn.Parameter(torch.tensor(v, dtype=torch.float32))
@@ -139,8 +139,8 @@ def make_param_dict(a=None):
 
 @dataclass
 class TunableCTFParameters:
-    amp_contrast: nn.Parameter = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
-    deltaE: nn.Parameter = nn.Parameter(torch.tensor(0.35, dtype=torch.float32))
+    amp_contrast: nn.Parameter = nn.Parameter(torch.tensor(0.004, dtype=torch.float32))
+    deltaE: nn.Parameter = nn.Parameter(torch.tensor(0.298, dtype=torch.float32))
     Cc_um: nn.Parameter = nn.Parameter(torch.tensor(1.e3, dtype=torch.float32))
     aberrations: nn.ParameterDict = field(default_factory=make_param_dict)#um
 
@@ -174,6 +174,8 @@ class CTFLayer(nn.Module):
             Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], dtype=torch.float32)),
             aberrations = nn.ParameterDict(make_param_dict(aberrations))
         )
+
+        self.tunable_parameters = TunableCTFParameters()
 
 
         # Frequenzen in 1/nm

@@ -491,7 +491,6 @@ class MplCanvas(FigureCanvasQTAgg):
         positions = pos[mask]
         intensities = ints[mask]
 
-        return (positions[:, 1] - y_min, positions[:, 0] - x_min), intensities
         return (positions[:,0] - x_min, positions[:,1]-y_min), intensities
 
     def update_heavy(self, payload: VizPayload, ctf_layer=None):
@@ -514,7 +513,7 @@ class MplCanvas(FigureCanvasQTAgg):
             else:
                 ss = 5
 
-            self.axes_cmap["target"].scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=ss)
+            self.axes_cmap["target"].scatter(pos[0], pos[1], c=ints, cmap="Wistia", s=ss)
             #self.im_tgt_sc.set_offsets(pos)
             #self.im_tgt_sc.set_array(ints)
 

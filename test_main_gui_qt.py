@@ -85,8 +85,8 @@ def make_test_particles():
         ], dtype=np.float32),  # S1
 
         np.array([
-            [29.5, 29.5],
-            [41.5, 25.5],
+            [10,20],
+            [30,40],
         ], dtype=np.float32),  # W
 
         np.array([[29.5, 29.5],

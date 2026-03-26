@@ -146,7 +146,7 @@ if __name__ == '__main__':
     )
 
     model.build_multislice(
-        init_positions=init_positions,
+        init_positions=[arr[:, ::-1].copy() for arr in init_positions],
         init_intensities=init_intensities,
         dz=slice_thickness / 10,
         max_shifts=(max_shift_graphen, max_shift_ws2),
@@ -169,7 +169,7 @@ if __name__ == '__main__':
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,
-        plot_every=20,
-        heavy_every=200,
+        plot_every=5,
+        heavy_every=20,
         max_steps=2_000_000,
     )
