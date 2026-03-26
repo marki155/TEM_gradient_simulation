@@ -11,8 +11,6 @@ from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss, FFT
 from multislice import DifferentiableMultislice_Free, DifferentiableMultislice, TunableMultisliceParameters
 from potential import DifferentiablePotential, TunablePotentialParameters
 from simulation import Simulation
-from torch.autograd import gradcheck
-from abtem.waves import PlaneWave
 
 from ctf import CTFLayer, TunableCTFParameters
 from torch.nn.functional import max_pool2d
