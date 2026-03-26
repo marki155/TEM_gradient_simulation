@@ -179,8 +179,8 @@ class CTFLayer(nn.Module):
 
 
         # Frequenzen in 1/nm
-        fx = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, W, device=device))
-        fy = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, H, device=device))
+        fx = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, H, device=device))
+        fy = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, W, device=device))
         kx, ky = torch.meshgrid(fx, fy, indexing='xy')
 
         k = torch.sqrt(kx ** 2 + ky ** 2)

@@ -513,7 +513,7 @@ class MplCanvas(FigureCanvasQTAgg):
             else:
                 ss = 5
 
-            self.axes_cmap["target"].scatter(pos[0], pos[1], c=ints, cmap="Wistia", s=ss)
+            self.axes_cmap["target"].scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=ss)
             #self.im_tgt_sc.set_offsets(pos)
             #self.im_tgt_sc.set_array(ints)
 

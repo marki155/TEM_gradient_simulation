@@ -22,8 +22,8 @@ class DifferentiableMultislice(nn.Module):
         self.device = device
 
         self.H, self.W = shape
-        fx = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.W, device=device))
-        fy = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.H, device=device))
+        fx = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.H, device=device))
+        fy = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.W, device=device))
 
         kx, ky = torch.meshgrid(fx, fy, indexing='xy')
         H_prop = torch.exp(-1j * torch.pi * self.wavelength_m * self.dz* (kx ** 2 + ky ** 2))
@@ -51,7 +51,7 @@ class DifferentiableMultislice(nn.Module):
             sigma = self.tunable_parameters.sigma.detach()
 
 
-        sigma = torch.clamp(sigma, 0.001, 0.05)  # Begrenzen Sie den Bereich von sigma
+        sigma = torch.clamp(sigma, 0.0001, 0.2)  # Begrenzen Sie den Bereich von sigma
 
         for potential in input[0]:
             wave = wave * torch.exp(1j * sigma * potential ) # Transmission durch Slice

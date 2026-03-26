@@ -23,13 +23,13 @@ class TunablePotentialParameters:
     intensities: nn.ParameterList
     occupancies: nn.ParameterList
 
-    scale_Gr: nn.Parameter = nn.Parameter(torch.tensor([1.14, 1.12], dtype=torch.float32))
-    rotation_Gr: nn.Parameter = nn.Parameter(torch.tensor(-0.025, dtype=torch.float32))
-    shift_Gr: nn.Parameter = nn.Parameter(torch.tensor([-11.0, -9.5], dtype=torch.float32))
+    scale_Gr: nn.Parameter = nn.Parameter(torch.tensor([1.12, 1.14], dtype=torch.float32))
+    rotation_Gr: nn.Parameter = nn.Parameter(torch.tensor(0.025, dtype=torch.float32))
+    shift_Gr: nn.Parameter = nn.Parameter(torch.tensor([-9.5, -11.0], dtype=torch.float32))
 
-    scale_WS2: nn.Parameter = nn.Parameter(torch.tensor([1.09, 1.05], dtype=torch.float32))
+    scale_WS2: nn.Parameter = nn.Parameter(torch.tensor([1.05, 1.09 ], dtype=torch.float32))
     rotation_WS2: nn.Parameter = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
-    shift_WS2: nn.Parameter = nn.Parameter(torch.tensor([-5.0, 15.9], dtype=torch.float32))
+    shift_WS2: nn.Parameter = nn.Parameter(torch.tensor([15.9, -5.0 ], dtype=torch.float32))
 
     blur_sigma: nn.Parameter = nn.Parameter(torch.tensor(0.013797, dtype=torch.float32))
 
@@ -575,11 +575,20 @@ class DifferentiablePotential(nn.Module):
         w01 = ((1 - fx) * fy * intensities[:, 0]) * multiplier
         w11 = (fx * fy * intensities[:, 0]) * multiplier
 
-        # ACHTUNG: Tensorindex ist [y, x]
-        rho.index_put_((iy + pad, ix + pad), w00, accumulate=True)
-        rho.index_put_((iy + pad, ix + pad + 1), w10, accumulate=True)
-        rho.index_put_((iy + pad + 1, ix + pad), w01, accumulate=True)
-        rho.index_put_((iy + pad + 1, ix + pad + 1), w11, accumulate=True)
+
+
+
+
+        idx00 = (pad + ix, pad + iy)
+        idx10 = (pad + ix, pad + iy + 1)
+        idx11 = (pad + ix + 1, pad + iy + 1)
+        idx01 = (pad + ix + 1, pad + iy)
+
+        # In-place Akkumulation wie np.add.at
+        rho.index_put_(idx00, w00, accumulate=True)
+        rho.index_put_(idx10, w10, accumulate=True)
+        rho.index_put_(idx11, w11, accumulate=True)
+        rho.index_put_(idx01, w01, accumulate=True)
 
         return torch.abs(rho[pad:-pad, pad:-pad])
 
