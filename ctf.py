@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict
 
-import abtem
 import torch
 import torch.nn as nn
 import torch.fft as fft
