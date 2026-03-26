@@ -1,6 +1,15 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+@dataclass
+class TunableMultisliceParameters:
+    sigma: nn.Parameter = nn.Parameter(torch.tensor(.0177, dtype=torch.float32), requires_grad=True)
+
+# TODO vllt gleich am anfang init von den parametern hier?
 
 
 class DifferentiableMultislice(nn.Module):
@@ -11,7 +20,6 @@ class DifferentiableMultislice(nn.Module):
         self.pixel_size_m = pixel_size_nm
         self.wavelength_m = wavelength_nm
         self.device = device
-        self.sigma = torch.nn.Parameter(torch.tensor(0.0177, dtype=torch.float32, device=device), requires_grad=True) #0.0177#
 
         self.H, self.W = shape
         fx = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.W, device=device))
@@ -21,7 +29,16 @@ class DifferentiableMultislice(nn.Module):
         H_prop = torch.exp(-1j * torch.pi * self.wavelength_m * self.dz* (kx ** 2 + ky ** 2))
         self.register_buffer("H_prop", H_prop)
 
+        self.tunable_parameters = TunableMultisliceParameters()
+
         self.train_method = train_method
+
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
+
+    def get_tunable_parameters(self):
+        return self.tunable_parameters
 
 
 
@@ -29,9 +46,9 @@ class DifferentiableMultislice(nn.Module):
         wave = torch.ones((self.H, self.W), dtype=torch.complex64, device=self.device)
 
         if self.train_method.train_multislice_sigma:
-            sigma = self.sigma
+            sigma = self.tunable_parameters.sigma
         else:
-            sigma = self.sigma.detach()
+            sigma = self.tunable_parameters.sigma.detach()
 
 
         sigma = torch.clamp(sigma, 0.001, 0.05)  # Begrenzen Sie den Bereich von sigma

@@ -4,10 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+
 
 @dataclass
 class StrainTunableParameters:
-    test: int
+    control: nn.Parameter
 
 class SplineDisplacementField2D(nn.Module):
     """
@@ -38,7 +40,11 @@ class SplineDisplacementField2D(nn.Module):
         if init_scale > 0:
             control = control + init_scale * torch.randn_like(control)
 
-        self.control = nn.Parameter(control)
+        self.tunable_parameters = StrainTunableParameters(control=nn.Parameter(control))
+
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
 
     def normalize_coords(self, coords_xy):
         """
@@ -52,6 +58,9 @@ class SplineDisplacementField2D(nn.Module):
         y_norm = 2.0 * y / max(self.H - 1, 1) - 1.0
 
         return torch.stack([x_norm, y_norm], dim=-1)
+
+    def get_tunable_parameters(self):
+        return self.tunable_parameters
 
     def sample(self, coords_xy):
         """
@@ -120,7 +129,7 @@ class SplineDisplacementField2D(nn.Module):
         """
         Numerische Regularisierung auf dem Kontrollgitter
         """
-        u = self.control
+        u = self.tunable_parameters.control
         dx = u[:, :, :, 1:] - u[:, :, :, :-1]
         dy = u[:, :, 1:, :] - u[:, :, :-1, :]
         return (dx**2).mean() + (dy**2).mean()
@@ -244,9 +253,9 @@ class SplineDisplacementField2D(nn.Module):
                 ux = a * xx
                 uy = b * yy
 
-                self.control.zero_()
-                self.control[0, 0] = ux
-                self.control[0, 1] = uy
+                self.tunable_parameters.control.zero_()
+                self.tunable_parameters.control[0, 0] = ux
+                self.tunable_parameters.control[0, 1] = uy
 
             maps = self.strain_maps(H=H, W=W)
 
@@ -522,9 +531,9 @@ class SplineDisplacementField2D(nn.Module):
                 ys = torch.linspace(0, self.H - 1, Hc, device=self.device, dtype=self.dtype)
                 yy, xx = torch.meshgrid(ys, xs, indexing="ij")
 
-                self.control.zero_()
-                self.control[0, 0] = a * xx
-                self.control[0, 1] = b * yy
+                self.tunable_parameters.control.zero_()
+                self.tunable_parameters.control[0, 0] = a * xx
+                self.tunable_parameters.control[0, 1] = b * yy
 
             fig, ax = plt.subplots(figsize=(8, 8))
             data = self.plot_grid_deformation_test(
