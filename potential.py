@@ -559,7 +559,7 @@ class DifferentiablePotential(nn.Module):
 
         # potential.fill_(self.background)  # Torch-Äquivalent
 
-        py, px = pxpositions[:, 0], pxpositions[:, 1] # TODO warum vertauscht
+        px, py = pxpositions[:, 0], pxpositions[:, 1] # TODO warum vertauscht
 
         pos_mask = (px >= 0.0) & (px <= self.W) & (py >= 0.0) & (py <= self.H)
         px = px[pos_mask]
@@ -586,10 +586,10 @@ class DifferentiablePotential(nn.Module):
         w01 = torch.matmul((1 - fx), fy) * intensities* multiplier
 
         # Indizes für alle vier Nachbarn
-        idx00 = (offset + iy, offset + ix)
-        idx10 = (offset + iy, offset + ix + 1)
-        idx11 = (offset + iy + 1, offset + ix + 1)
-        idx01 = (offset + iy + 1, offset + ix)
+        idx00 = (offset + ix, offset + iy)
+        idx10 = (offset + ix, offset + iy + 1)
+        idx11 = (offset + ix + 1, offset + iy + 1)
+        idx01 = (offset + ix + 1, offset + iy)
 
         # In-place Akkumulation wie np.add.at
         rho.index_put_(idx00, w00[:idx00[0].shape[0], 0], accumulate=True)

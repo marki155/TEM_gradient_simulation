@@ -1,11 +1,8 @@
 import tifffile as tifffile
 import torch
-from ase.io import read, write
 import ase
-import abtem
 import numpy as np
 
-from scipy.ndimage import gaussian_filter
 
 from nn import NN_particles, NN_free_potential
 from testing import show_init_positions

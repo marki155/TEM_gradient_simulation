@@ -1,8 +1,6 @@
 import tifffile as tifffile
 import torch
-from ase.io import read, write
 import ase
-import abtem
 import numpy as np
 
 from scipy.ndimage import gaussian_filter
