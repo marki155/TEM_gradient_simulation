@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 @dataclass
 class TunableMultisliceParameters:
-    sigma: nn.Parameter = nn.Parameter(torch.tensor(.07, dtype=torch.float32), requires_grad=True)
+    sigma: nn.Parameter = nn.Parameter(torch.tensor(.2, dtype=torch.float32), requires_grad=True)
 
 # TODO vllt gleich am anfang init von den parametern hier?
 
@@ -51,7 +51,7 @@ class DifferentiableMultislice(nn.Module):
             sigma = self.tunable_parameters.sigma.detach()
 
 
-        sigma = torch.clamp(sigma, 0.0001, 0.2)  # Begrenzen Sie den Bereich von sigma
+        sigma = torch.clamp(sigma, 0.0001, 1.0)  # Begrenzen Sie den Bereich von sigma
 
         for potential in input[0]:
             wave = wave * torch.exp(1j * sigma * potential ) # Transmission durch Slice
