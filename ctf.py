@@ -129,8 +129,8 @@ def make_param_dict(a=None):
                                'C23': 0.17, 'phi23': 0.,
                                'C21': 3.71, 'phi21': 0.,
                                "C30": 4.16, #um
-                               'C34': -1.03, 'phi34': 0., #um
-                               'C45': 2.25, 'phi45': 0.}
+                               'C34': -0.2, 'phi34': 0., #um
+                               'C45': 0.25, 'phi45': 0.}
 
     return nn.ParameterDict({
         k: nn.Parameter(torch.tensor(v, dtype=torch.float32))

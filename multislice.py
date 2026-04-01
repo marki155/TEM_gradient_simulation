@@ -5,6 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def sigma_electron(wavelength_m):
+    m = 9.10938356e-31      # Elektronenmasse (kg)
+    e = 1.602176634e-19     # Elementarladung (C)
+    h = 6.62607015e-34      # Planck-Konstante (Js)
+
+    sigma = (m * e * wavelength_m) / (h ** 2)
+    print(sigma)
+    return sigma
+
+
 @dataclass
 class TunableMultisliceParameters:
     sigma: nn.Parameter = nn.Parameter(torch.tensor(.2, dtype=torch.float32), requires_grad=True)
@@ -18,7 +28,7 @@ class DifferentiableMultislice(nn.Module):
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
         self.dz = dz
         self.pixel_size_m = pixel_size_nm
-        self.wavelength_m = wavelength_nm
+        self.wavelength_nm = wavelength_nm
         self.device = device
 
         self.H, self.W = shape
@@ -26,7 +36,7 @@ class DifferentiableMultislice(nn.Module):
         fy = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.W, device=device))
 
         kx, ky = torch.meshgrid(fx, fy, indexing='xy')
-        H_prop = torch.exp(-1j * torch.pi * self.wavelength_m * self.dz* (kx ** 2 + ky ** 2))
+        H_prop = torch.exp(-1j * torch.pi * self.wavelength_nm * self.dz* (kx ** 2 + ky ** 2))
         self.register_buffer("H_prop", H_prop)
 
         self.tunable_parameters = TunableMultisliceParameters()
@@ -51,7 +61,8 @@ class DifferentiableMultislice(nn.Module):
             sigma = self.tunable_parameters.sigma.detach()
 
 
-        sigma = torch.clamp(sigma, 0.0001, 1.0)  # Begrenzen Sie den Bereich von sigma
+        #sigma = torch.clamp(sigma, 0.0001, 1.0)  # Begrenzen Sie den Bereich von sigma
+        sigma = sigma_electron(wavelength_m=self.wavelength_nm*1e-9)
 
         for potential in input[0]:
             wave = wave * torch.exp(1j * sigma * potential ) # Transmission durch Slice

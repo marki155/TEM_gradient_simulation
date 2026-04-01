@@ -31,7 +31,7 @@ class TunablePotentialParameters:
     rotation_WS2: nn.Parameter = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
     shift_WS2: nn.Parameter = nn.Parameter(torch.tensor([15.9, -5.0 ], dtype=torch.float32))
 
-    blur_sigma: nn.Parameter = nn.Parameter(torch.tensor(0.013797, dtype=torch.float32))
+    blur_sigma: nn.Parameter = nn.Parameter(torch.tensor(0.017, dtype=torch.float32))
 
 
 
@@ -167,7 +167,10 @@ class DifferentiablePotential(nn.Module):
         intensities_ = nn.ParameterList(
             [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
         occupancies_ = nn.ParameterList(
-            [torch.ones(I.shape, dtype=torch.float32, device=self.device)*0.1 for I in init_intensities])
+            [torch.ones(init_intensities[0].shape, dtype=torch.float32, device=self.device)*-100,
+             torch.ones(init_intensities[1].shape, dtype=torch.float32, device=self.device)*100,
+             torch.ones(init_intensities[2].shape, dtype=torch.float32, device=self.device)*100,
+             torch.ones(init_intensities[3].shape, dtype=torch.float32, device=self.device)*100])
 
 
         return intensities_, occupancies_
@@ -300,22 +303,20 @@ class DifferentiablePotential(nn.Module):
             else:
                 positions = self.tunable_parameters.positions[i].detach()
 
+            centered_positions = positions - center
 
-            shifted_positions = positions - center + shift
-
-            rotated_positions = torch.zeros_like(shifted_positions)
-            rotated_positions[:, 0] = cos_theta * shifted_positions[:, 0] - sin_theta * shifted_positions[:, 1]
-            rotated_positions[:, 1] = sin_theta * shifted_positions[:, 0] + cos_theta * shifted_positions[:, 1]
+            rotated_positions = torch.zeros_like(centered_positions)
+            rotated_positions[:, 0] = cos_theta * centered_positions[:, 0] - sin_theta * centered_positions[:, 1]
+            rotated_positions[:, 1] = sin_theta * centered_positions[:, 0] + cos_theta * centered_positions[:, 1]
 
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_scale) or
                     (i != self._IDX["Gr"] and self.train_methods.WS2_scale)):
-
                 scales = torch.clamp(scales_[idx_s_r], min=0.80, max=1.2)
             else:
                 scales = scales_[idx_s_r].detach()
-            rotated_positions = rotated_positions * scales
 
-            new_positions = rotated_positions + center
+            rotated_positions = rotated_positions * scales
+            new_positions = rotated_positions + center + shift
 
             if i != self._IDX["Gr"]:
                 new_positions = self.ws2_displacement(new_positions)
@@ -538,10 +539,62 @@ class DifferentiablePotential(nn.Module):
             rho_i = self.create_rho(positions[i], intensities[i])
             # rho_i = self.simulation.calc_rho(self.positions[i], torch.abs(self.intensities[i]).unsqueeze(1))
 
-            potential_i = self.potential_2d_fft_nm(rho_i, device=self.device)
+            potential_i = rho_i#self.potential_2d_fft_nm(rho_i, device=self.device)
             potential_list.append(potential_i)
 
         return potential_list, self.aux_loss()
+
+    def create_rho2(self, positions_xy, intensities, multiplier=1.0):
+        """
+        positions_xy: Tensor (N, 2), mit [:, 0] = x und [:, 1] = y
+        intensities:  Tensor (N,)
+        """
+        pad = 2
+
+        # Bildtensor immer als (H, W)
+        rho = torch.zeros(
+            (self.H + 2 * pad, self.W + 2 * pad),
+            dtype=torch.float32,
+            device=self.device
+        )
+
+        y = positions_xy[:, 0]
+        x = positions_xy[:, 1]
+        inten = intensities.to(torch.float32)
+
+        # Nur Punkte behalten, bei denen bilineare Verteilung noch im Bild liegt
+        mask = (x >= 0.0) & (x < self.W - 1) & (y >= 0.0) & (y < self.H - 1)
+        x = x[mask]
+        y = y[mask]
+        intensities = inten[mask]
+
+        if x.numel() == 0:
+            return rho[pad:-pad, pad:-pad]
+
+        ix = torch.floor(x).long()
+        iy = torch.floor(y).long()
+
+        fx = x - ix.float()
+        fy = y - iy.float()
+
+        # bilineare Gewichte
+        w00 = (1.0 - fx) * (1.0 - fy) * intensities[:, 0] * multiplier
+        w10 = fx * (1.0 - fy) * intensities[:, 0] * multiplier
+        w01 = (1.0 - fx) * fy * intensities[:, 0] * multiplier
+        w11 = fx * fy * intensities[:, 0] * multiplier
+
+        # ACHTUNG: Tensorindexierung ist [y, x]
+        row0 = ix + pad
+        row1 = ix + 1 + pad
+        col0 = iy + pad
+        col1 = iy + 1 + pad
+
+        rho.index_put_((row0, col0), w00, accumulate=True)
+        rho.index_put_((row0, col1), w10, accumulate=True)
+        rho.index_put_((row1, col0), w01, accumulate=True)
+        rho.index_put_((row1, col1), w11, accumulate=True)
+
+        return rho[pad:-pad, pad:-pad]
 
     def create_rho(self, positions_xy, intensities, multiplier=1.0):
         """
@@ -551,17 +604,20 @@ class DifferentiablePotential(nn.Module):
         intensities = intensities.unsqueeze(1)
         pad = 2
 
-        # Bildtensor immer als (H, W)
+        # Bildtensor als (H, W)
         rho = torch.zeros((self.H + 2 * pad, self.W + 2 * pad), device=self.device)
 
         x = positions_xy[:, 0]
         y = positions_xy[:, 1]
 
-
-        mask = (x >= 0.0) & (x < self.H - 1) & (y >= 0.0) & (y < self.W - 1)
+        # x gegen W, y gegen H
+        mask = (x >= 0.0) & (x < self.W - 1) & (y >= 0.0) & (y < self.H - 1)
         x = x[mask]
         y = y[mask]
         intensities = intensities[mask]
+
+        if x.numel() == 0:
+            return rho[pad:-pad, pad:-pad]
 
         ix = torch.floor(x).to(torch.int64)
         iy = torch.floor(y).to(torch.int64)
@@ -575,20 +631,16 @@ class DifferentiablePotential(nn.Module):
         w01 = ((1 - fx) * fy * intensities[:, 0]) * multiplier
         w11 = (fx * fy * intensities[:, 0]) * multiplier
 
-
-
-
-
+        # Bildindexierung: [y, x]
         idx00 = (pad + ix, pad + iy)
-        idx10 = (pad + ix, pad + iy + 1)
+        idx01 = (pad + ix, pad + iy + 1)
+        idx10 = (pad + ix + 1, pad + iy)
         idx11 = (pad + ix + 1, pad + iy + 1)
-        idx01 = (pad + ix + 1, pad + iy)
 
-        # In-place Akkumulation wie np.add.at
         rho.index_put_(idx00, w00, accumulate=True)
         rho.index_put_(idx10, w10, accumulate=True)
-        rho.index_put_(idx11, w11, accumulate=True)
         rho.index_put_(idx01, w01, accumulate=True)
+        rho.index_put_(idx11, w11, accumulate=True)
 
         return torch.abs(rho[pad:-pad, pad:-pad])
 
