@@ -84,7 +84,7 @@ def zernike_phase(alpha, phi, coeffs, device='cpu'):
 
     # ---- 2. Ordnung ----
     if "C10" in coeffs:  # Defokus
-        phase += 0.5 * torch.clamp(coeffs["C10"], min=-1000., max=0.) * alpha**2
+        phase += 0.5 * torch.clamp(coeffs["C10"], min=-1000., max=1000.) * alpha**2
     if "C12" in coeffs and "phi12" in coeffs:  # Astigmatismus 2. Ordnung
         phase += 0.5 * coeffs["C12"] * alpha**2 * torch.cos(2 * (phi - coeffs["phi12"]))
 

@@ -11,7 +11,6 @@ from PySide6 import QtCore, QtWidgets
 import matplotlib
 
 from ctf import TunableCTFParameters
-from multislice import TunableMultisliceParameters
 from nn import ParticlesTunableParameters
 from parameter_frame import ParametersFrame
 from potential import TunablePotentialParameters
@@ -25,7 +24,9 @@ from matplotlib import patches
 
 from train_methods_gui_builder_qt import TrainMethodEditor
 
+from scipy.ndimage import gaussian_filter
 
+SHOW_POTENTIAL=True
 
 
 
@@ -54,6 +55,8 @@ class VizPayload:
     strain_maps: Optional[Dict[str, np.ndarray]] = None
 
     status: str = "idle"
+
+    potential_maps: List = None
 
 
 class TrainingWorker(QtCore.QObject):
@@ -222,6 +225,13 @@ class TrainingWorker(QtCore.QObject):
 
         strain_maps = self.pot_layer.ws2_displacement.strain_maps()
 
+        potential_maps, _ = self.pot_layer(None)
+
+        pot_imgs = []
+        for pot_i in potential_maps[:4]:
+            pot_i_blurred = gaussian_filter(pot_i.detach().cpu().numpy(), sigma=5.0)
+            pot_imgs.append(pot_i_blurred)
+
         payload = VizPayload(
             step=step,
             loss=loss_item,
@@ -238,7 +248,8 @@ class TrainingWorker(QtCore.QObject):
             hist_edges=hist_edges,
             status="running",
             train_method=self.train_method,
-            strain_maps=strain_maps
+            strain_maps=strain_maps,
+            potential_maps=pot_imgs
         )
         self._heavy_refresh_running = False
         if self._heavy_refresh_pending:
@@ -380,9 +391,14 @@ class MplCanvas(FigureCanvasQTAgg):
         self.im_uy = self.axes_cmap["uy"].imshow(dummy, cmap="RdBu", origin="lower")
 
         self.pot_scatters = []
-        for i in range(4):
-            sc = self.axes_cmap["pot" + str(i)].scatter([], [], s=2, c=[], cmap="viridis")
-            self.pot_scatters.append(sc)
+        if SHOW_POTENTIAL:
+            for i in range(4):
+                sc = self.axes_cmap["pot" + str(i)].imshow(dummy, cmap="RdBu", origin="lower")
+                self.pot_scatters.append(sc)
+        else:
+            for i in range(4):
+                sc = self.axes_cmap["pot" + str(i)].scatter([], [], s=2, c=[], cmap="viridis")
+                self.pot_scatters.append(sc)
 
         self.im_ctf = self.axes_cmap["ctf"].imshow(
             np.zeros((10, 10), dtype=np.float32),
@@ -539,44 +555,51 @@ class MplCanvas(FigureCanvasQTAgg):
         if payload.ring_mask is not None:
             self.im_ring.set_data(payload.ring_mask)
 
+
         if payload.pot_positions is not None and payload.pot_intensities is not None:
-            for i, sc in enumerate(self.pot_scatters):
-                pos = payload.pot_positions[i]
-                ints = payload.pot_intensities[i]
+            if SHOW_POTENTIAL:
+                for i, sc in enumerate(self.pot_scatters):
+                    pot_map = payload.potential_maps[i]
+                    self._safe_set_image(sc, pot_map)
+            else:
+                for i, sc in enumerate(self.pot_scatters):
+                    pos = payload.pot_positions[i]
+                    ints = payload.pot_intensities[i]
 
-                if pos.size == 0:
-                    sc.set_offsets(np.empty((0, 2), dtype=np.float32))
-                    sc.set_array(np.array([], dtype=np.float32))
-                    continue
+                    if pos.size == 0:
+                        sc.set_offsets(np.empty((0, 2), dtype=np.float32))
+                        sc.set_array(np.array([], dtype=np.float32))
+                        continue
 
-                valid_mask = np.isfinite(ints)
-                pos = pos[valid_mask]
-                ints = ints[valid_mask]
+                    valid_mask = np.isfinite(ints)
+                    pos = pos[valid_mask]
+                    ints = ints[valid_mask]
 
-                if len(pos) == 0:
-                    sc.set_offsets(np.empty((0, 2), dtype=np.float32))
-                    sc.set_array(np.array([], dtype=np.float32))
-                    continue
+                    if len(pos) == 0:
+                        sc.set_offsets(np.empty((0, 2), dtype=np.float32))
+                        sc.set_array(np.array([], dtype=np.float32))
+                        continue
 
-                sc.set_offsets(pos)
-                sc.set_array(ints)
+                    sc.set_offsets(pos)
+                    sc.set_array(ints)
 
-                imin = float(np.nanmin(ints))
-                imax = float(np.nanmax(ints))
-                if imin == imax:
-                    imax = imin + 1e-12
-                sc.set_clim(imin, imax)
+                    imin = float(np.nanmin(ints))
+                    imax = float(np.nanmax(ints))
+                    if imin == imax:
+                        imax = imin + 1e-12
+                    sc.set_clim(imin, imax)
 
-                xmin, ymin = np.min(pos[:, 0]), np.min(pos[:, 1])
-                xmax, ymax = np.max(pos[:, 0]), np.max(pos[:, 1])
+                    xmin, ymin = np.min(pos[:, 0]), np.min(pos[:, 1])
+                    xmax, ymax = np.max(pos[:, 0]), np.max(pos[:, 1])
 
-                if xmin == xmax:
-                    xmax = xmin + 1e-6
-                if ymin == ymax:
-                    ymax = ymin + 1e-6
+                    if xmin == xmax:
+                        xmax = xmin + 1e-6
+                    if ymin == ymax:
+                        ymax = ymin + 1e-6
 
-                self.axes_cmap["pot" + str(i)].set_xlim(xmin, xmax)
-                self.axes_cmap["pot" + str(i)].set_ylim(ymin, ymax)
+                    self.axes_cmap["pot" + str(i)].set_xlim(xmin, xmax)
+                    self.axes_cmap["pot" + str(i)].set_ylim(ymin, ymax)
+
 
         if payload.hist_counts is not None and payload.hist_edges is not None:
             centers = 0.5 * (payload.hist_edges[:-1] + payload.hist_edges[1:])

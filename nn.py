@@ -8,12 +8,16 @@ import math
 
 
 from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss, FFTBraggLoss
-from multislice import DifferentiableMultislice_Free, DifferentiableMultislice, TunableMultisliceParameters
+from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
 from simulation import Simulation
 
 from ctf import CTFLayer, TunableCTFParameters
 from torch.nn.functional import max_pool2d
+
+
+
+
 
 
 
@@ -158,7 +162,7 @@ class NN_free_potential(nn.Module):
 class ParticlesTunableParameters:
     potential_parameters: TunablePotentialParameters
     ctf_parameters: TunableCTFParameters
-    multislice_parameters: TunableMultisliceParameters
+    normalisation_parameters: nn.Parameter
 
 class NN_particles(nn.Module):
     def __init__(self, image_shape, fov, voltage_kV, train_method, device='cpu', train_methods=None):
@@ -171,6 +175,9 @@ class NN_particles(nn.Module):
         self.train_method = train_method
         self.wavelength_nm = relativistic_wavelength_nm(voltage_kV)
         self.train_methods = train_methods
+
+
+
 
 
     def build_multislice(self, init_positions, init_intensities, dz, max_shifts=None, max_rotations=None):
@@ -188,7 +195,8 @@ class NN_particles(nn.Module):
             pixel_size_nm=self.pixel_size_nm,
             wavelength_nm=self.wavelength_nm,
             device=self.device,
-            train_method=self.train_method
+            train_method=self.train_method,
+            voltage_kV=self.voltage_kV
         )
 
         aberrations = {'C10': -57., 'C12': 1.0, 'C23': 3.0e3,
@@ -233,8 +241,12 @@ class NN_particles(nn.Module):
         self.tunable_parameters = ParticlesTunableParameters(
             potential_parameters=self.model[0].get_tunable_parameters(),
             ctf_parameters=self.model[2].get_tunable_parameters(),
-            multislice_parameters=self.model[1].get_tunable_parameters()
+            normalisation_parameters = nn.Parameter(torch.tensor([0.0,0.0]), requires_grad=True)
         )
+
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
 
     def get_tunable_parameters(self):
         return self.tunable_parameters
@@ -379,17 +391,17 @@ class NN_particles(nn.Module):
         tgt_ref = target_image[x_min:x_max, y_min:y_max]
 
         if method == "z":
-            sim_mean = torch.mean(sim_ref)
-            sim_std = torch.std(sim_ref)
+            sim_mean = self.tunable_parameters.normalisation_parameters[0] + torch.mean(sim_ref)
+            sim_std = self.tunable_parameters.normalisation_parameters[1] + torch.std(sim_ref)
             tgt_mean = torch.mean(tgt_ref)
             tgt_std = torch.std(tgt_ref)
-
+            print(tgt_mean, tgt_std)
             simulated_image = (simulated_image - sim_mean) / (sim_std + eps)
             target_image = (target_image - tgt_mean) / (tgt_std + eps)
 
         elif method == "minmax":
-            sim_min = torch.min(sim_ref)
-            sim_max = torch.max(sim_ref)
+            sim_min = self.tunable_parameters.normalisation_parameters[0]#torch.min(sim_ref)
+            sim_max = self.tunable_parameters.normalisation_parameters[1]#torch.max(sim_ref)
             tgt_min = torch.min(tgt_ref)
             tgt_max = torch.max(tgt_ref)
 

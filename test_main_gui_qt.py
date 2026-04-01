@@ -85,10 +85,10 @@ def make_test_particles():
         ], dtype=np.float32),  # S1
 
         np.array([
-            [10,20],
-            [30,40],
-            [30, 10],
-            [20,10]
+            [100,200],
+            [300,400],
+            [300, 100],
+            [200,100]
         ], dtype=np.float32),  # W
 
         np.array([[29.5, 29.5],
@@ -150,8 +150,8 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     np.random.seed(0)
 
-    image_shape = (64, 64)
-    fov = 4.0
+    image_shape = (1000,1000)
+    fov = 7.58
 
     init_positions, init_intensities = make_test_particles()
     train_method = make_train_method(image_shape)
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     model.build_multislice(
         init_positions=copy.deepcopy(init_positions),
         init_intensities=copy.deepcopy(init_intensities),
-        dz=0.3,
+        dz=0.5,
         max_shifts=(0.0, 0.0),
         max_rotations=(0.0, 0.0)
     )
@@ -205,6 +205,6 @@ if __name__ == "__main__":
         ctf_layer=ctf_layer,
         train_method=train_method,
         plot_every=10,
-        heavy_every=50,
+        heavy_every=100,
         max_steps=5000,
     )
