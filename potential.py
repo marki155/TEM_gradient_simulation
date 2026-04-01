@@ -57,7 +57,7 @@ class DifferentiablePotential(nn.Module):
 
         self.ws2_displacement = SplineDisplacementField2D(
             image_shape=shape,
-            control_shape=(8,8),
+            control_shape=(2,2),
             init_scale=0.0,
             device=device,
             dtype=torch.float32,
