@@ -87,6 +87,8 @@ def make_test_particles():
         np.array([
             [10,20],
             [30,40],
+            [30, 10],
+            [20,10]
         ], dtype=np.float32),  # W
 
         np.array([[29.5, 29.5],
@@ -98,7 +100,7 @@ def make_test_particles():
     init_intensities = [
         np.array([0.0,0.0], dtype=np.float32),          # C
         np.array([0.0,0.0], dtype=np.float32),   # S
-        np.array([74.0, 74.0], dtype=np.float32),   # W
+        np.array([74.0, 74.0,74,74], dtype=np.float32),   # W
         np.array([0.0,0.0], dtype=np.float32),   # S
     ]
 
@@ -203,6 +205,6 @@ if __name__ == "__main__":
         ctf_layer=ctf_layer,
         train_method=train_method,
         plot_every=10,
-        heavy_every=100,
+        heavy_every=50,
         max_steps=5000,
     )
