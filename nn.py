@@ -1,4 +1,4 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields, is_dataclass
 
 import torch
 import torch.nn as nn
@@ -8,7 +8,8 @@ import math
 import json
 
 
-from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss, FFTBraggLoss
+from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss, FFTBraggLoss, \
+    LocalDifferenceVarianceLoss
 from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
 from simulation import Simulation
@@ -17,7 +18,109 @@ from ctf import CTFLayer, TunableCTFParameters
 from torch.nn.functional import max_pool2d
 
 
+@dataclass
+class ParticlesTunableParameters:
+    potential_parameters: TunablePotentialParameters
+    ctf_parameters: TunableCTFParameters
+    normalisation_parameters: nn.Parameter
 
+
+
+def is_train_param_instance(value) -> bool:
+    return is_dataclass(value) and hasattr(value, "enabled") and hasattr(value, "lr")
+
+def _flatten_params(obj):
+    out = []
+
+    if obj is None:
+        return out
+
+    if isinstance(obj, nn.Parameter):
+        return [obj]
+
+    if isinstance(obj, nn.ParameterList):
+        for p in obj:
+            out.extend(_flatten_params(p))
+        return out
+
+    if isinstance(obj, nn.ParameterDict):
+        for p in obj.values():
+            out.extend(_flatten_params(p))
+        return out
+
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            out.extend(_flatten_params(item))
+        return out
+
+    if is_dataclass(obj):
+        for f in fields(obj):
+            out.extend(_flatten_params(getattr(obj, f.name)))
+        return out
+
+    return out
+
+
+def _safe_index_paramlist(param_list, idx: int):
+    if param_list is None:
+        return []
+    if idx < 0 or idx >= len(param_list):
+        return []
+    return _flatten_params(param_list[idx])
+
+
+def _safe_paramlist_slice(param_list, start: int, stop=None):
+    if param_list is None:
+        return []
+    items = list(param_list)[start:stop]
+    return _flatten_params(items)
+
+
+def _collect_ws2_strain_params(ws2_displacement):
+    return _flatten_params(ws2_displacement)
+
+def get_trainmethod_param_registry(params: ParticlesTunableParameters):
+    pot = params.potential_parameters
+    ctf = params.ctf_parameters
+
+    registry = {
+        # Graphen geometry
+        "graphen_shift": lambda: [pot.shift_Gr],
+        "graphen_rotation": lambda: [pot.rotation_Gr],
+        "graphen_scale": lambda: [pot.scale_Gr],
+
+        # WS2 geometry
+        "WS2_shift": lambda: [pot.shift_WS2],
+        "WS2_rotation": lambda: [pot.rotation_WS2],
+        "WS2_scale": lambda: [pot.scale_WS2],
+
+        # Strain / free positions
+        "WS2_strain_field": lambda: _collect_ws2_strain_params(pot.ws2_displacement),
+        "graphen_free_positions": lambda: pot.positions[0],
+        "WS2_free_positions": lambda: pot.positions[1:],
+
+        # Intensities
+        "train_graphen_intensities": lambda: _safe_index_paramlist(pot.intensities, 0),
+        "train_S1_intensities": lambda: _safe_index_paramlist(pot.intensities, 1),
+        "train_W_intensities": lambda: _safe_index_paramlist(pot.intensities, 2),
+        "train_S2_intensities": lambda: _safe_index_paramlist(pot.intensities, 3),
+
+        # Occupancies
+        "train_graphen_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 0),
+        "train_S1_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 1),
+        "train_W_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 2),
+        "train_S2_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 3),
+
+        # CTF
+        "train_amplitude_contrast": lambda: [ctf.amp_contrast],
+        "train_ctf_aberrations": lambda: list(ctf.aberrations.values()),
+        "train_env_parameters": lambda: [ctf.deltaE, ctf.Cc_um],
+
+        # Normalisation
+        "train_normalisation_parameters": lambda: [params.normalisation_parameters],
+    }
+
+    return registry
 
 
 
@@ -159,11 +262,7 @@ class NN_free_potential(nn.Module):
         return simulated_image, F.mse_loss(simulated_image, target_image)
 
 
-@dataclass
-class ParticlesTunableParameters:
-    potential_parameters: TunablePotentialParameters
-    ctf_parameters: TunableCTFParameters
-    normalisation_parameters: nn.Parameter
+
 
 class NN_particles(nn.Module):
     def __init__(self, image_shape, fov, voltage_kV, train_method, device='cpu', train_methods=None):
@@ -176,6 +275,52 @@ class NN_particles(nn.Module):
         self.train_method = train_method
         self.wavelength_nm = relativistic_wavelength_nm(voltage_kV)
         self.train_methods = train_methods
+
+    def build_optimizer(self,
+            optimizer_cls=torch.optim.Adam,
+            **optimizer_kwargs,
+    ):
+        registry = get_trainmethod_param_registry(self.tunable_parameters)
+
+        param_groups = []
+        seen = set()
+
+        for f in fields(self.train_method):
+            name = f.name
+            value = getattr(self.train_method, name)
+
+            if not is_train_param_instance(value):
+                continue
+
+
+
+            if name not in registry:
+                raise KeyError(f"Kein Registry-Eintrag für TrainMethod-Feld '{name}' gefunden.")
+
+            params = registry[name]()
+            #params = [p for p in params if p is not None and getattr(p, "requires_grad", True)]
+
+            #unique_params = []
+            #for p in params:
+            #    pid = id(p)
+            #    if pid in seen:
+            #        continue
+            #    seen.add(pid)
+            #    unique_params.append(p)#
+
+            #if not unique_params:
+            #    continue
+
+            param_groups.append({
+                "name": name,
+                "params": params,
+                "lr": float(value.lr),
+            })
+
+        if not param_groups:
+            raise ValueError("Keine aktiven Parametergruppen aus TrainMethod gefunden.")
+
+        return optimizer_cls(param_groups, **optimizer_kwargs)
 
 
 
@@ -326,6 +471,7 @@ class NN_particles(nn.Module):
         error = torch.sum((torch.mean(simulation) - simulation) * (torch.mean(image) - image)) / \
                      (torch.std(simulation) * torch.std(image) * (imageHeight * imageWidth - 1))
 
+        loss_var = LocalDifferenceVarianceLoss(win_size=100, reduction="mean")
         loss_fft = FFTBraggLoss()
         #loss, P_diff = loss_fn(simulation.unsqueeze(0).unsqueeze(0),  # → (1, 1, H, W)
         #               image.unsqueeze(0).unsqueeze(0))
@@ -342,6 +488,7 @@ class NN_particles(nn.Module):
         loss_MSE = nn.MSELoss()
         tt = image.unsqueeze(0).unsqueeze(0)
         sim = simulation.unsqueeze(0).unsqueeze(0)
+        a_var = float(self.train_methods.loss_var)
         a_mse = float(self.train_method.loss_mse)
         a_ncc = float(self.train_method.loss_ncc)
         a_local_ncc_100 = float(self.train_method.loss_local_ncc_100)
@@ -370,6 +517,8 @@ class NN_particles(nn.Module):
         if a_fft > 0:
             _loss_fft, P_diff = loss_fft(sim, tt)
             total_loss += a_fft * _loss_fft
+        if a_var > 0:
+             total_loss += a_var * loss_var(sim, tt)
         return  total_loss, P_diff
 
     def normalize_images(

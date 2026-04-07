@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtWidgets
 import matplotlib
 
 from ctf import TunableCTFParameters
-from nn import ParticlesTunableParameters
+from nn import ParticlesTunableParameters, is_train_param_instance
 from parameter_frame import ParametersFrame
 from potential import TunablePotentialParameters
 from training_parameter import TrainMethod
@@ -119,6 +119,16 @@ class TrainingWorker(QtCore.QObject):
                 pg["lr"] = lr
         elif hasattr(self.optimizer, "learning_rate"):
             self.optimizer.learning_rate = lr
+
+    def sync_optimizer_lrs_from_train_method(self):
+        for pg in self.optimizer.param_groups:
+            name = pg.get("name")
+            if not name or not hasattr(self.train_method, name):
+                continue
+
+            tp = getattr(self.train_method, name)
+            if is_train_param_instance(tp):
+                pg["lr"] = float(tp.lr)
 
     #spin_values_changed = QtCore.Signal(float, float, float, float, float, float, float,n  bool)  # scale, rot, shift_x, shift_y
     parameter_update = QtCore.Signal(ParticlesTunableParameters)
@@ -273,7 +283,8 @@ class TrainingWorker(QtCore.QObject):
                 break
 
             self.optimizer.zero_grad(set_to_none=True)
-            self._set_optimizer_lr()
+            self.sync_optimizer_lrs_from_train_method()
+            #self._set_optimizer_lrs()
 
             simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
                 self.target, self.brightness, self.contrast
@@ -650,7 +661,6 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
         model,
-        optimizer,
         target,
         brightness,
         contrast,
@@ -666,7 +676,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Live Training Qt")
 
         self.model = model
-        self.optimizer = optimizer
+        self.optimizer = model.build_optimizer()
         self.target = target
         self.brightness = brightness
         self.contrast = contrast
@@ -1042,7 +1052,6 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
 def launch_gui_qt(
     model,
-    optimizer,
     target,
     brightness,
     contrast,
@@ -1060,7 +1069,6 @@ def launch_gui_qt(
 
     window = LiveTrainWindow(
         model=model,
-        optimizer=optimizer,
         target=target,
         brightness=brightness,
         contrast=contrast,

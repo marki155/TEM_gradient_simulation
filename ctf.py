@@ -229,7 +229,7 @@ class CTFLayer(nn.Module):
 
         aberrations = {}
         for k, v in self.tunable_parameters.aberrations.items():
-            if self.train_method is not None and self.train_method.train_ctf_aberrations:
+            if self.train_method is not None and self.train_method.train_ctf_aberrations.enabled:
                 if k in self.train_method.train_aberrations and self.train_method.train_aberrations[k]:
                     aberrations[k] = v
                 else:

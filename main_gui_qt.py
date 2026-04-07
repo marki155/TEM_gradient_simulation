@@ -158,11 +158,10 @@ if __name__ == '__main__':
 
     pot_layer.occupy_layers_in_area(train_method.train_small_area_squares[0], [1, 2, 3])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    #optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
     launch_gui_qt(
         model=model,
-        optimizer=optimizer,
         target=target,
         brightness=brightness,
         contrast=contrast,

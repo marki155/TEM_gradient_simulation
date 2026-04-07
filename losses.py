@@ -2,6 +2,82 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class LocalDifferenceVarianceLoss(nn.Module):
+    def __init__(self, win_size=8, reduction="mean", minimize=True):
+        """
+        Varianz der Differenz zweier Bilder auf nicht überlappenden Patches.
+
+        Args:
+            win_size: Patchgröße (win_size x win_size)
+            reduction: "mean", "sum" oder "none"
+            minimize:
+                True  -> kleine Varianz belohnen
+                False -> große Varianz belohnen
+        """
+        super().__init__()
+        self.win_size = win_size
+        self.reduction = reduction
+        self.minimize = minimize
+
+    def forward(self, x1, x2):
+        """
+        Args:
+            x1, x2: Tensoren mit Shape (B, C, H, W)
+
+        Returns:
+            Loss-Skalar oder Tensor mit Patch-Varianzen
+        """
+        if x1.shape != x2.shape:
+            raise ValueError(
+                f"x1 und x2 müssen dieselbe Shape haben, bekommen: "
+                f"{x1.shape} vs {x2.shape}"
+            )
+
+        if x1.dim() != 4:
+            raise ValueError(
+                f"Erwartet Tensoren der Form (B, C, H, W), bekommen dim={x1.dim()}"
+            )
+
+        b, c, h, w = x1.shape
+        ws = self.win_size
+
+        if h < ws or w < ws:
+            raise ValueError(
+                f"Bild ist kleiner als win_size: Bild=({h}, {w}), win_size={ws}"
+            )
+
+        # Rand abschneiden, falls H oder W nicht durch win_size teilbar
+        h_crop = (h // ws) * ws
+        w_crop = (w // ws) * ws
+
+        x1 = x1[:, :, :h_crop, :w_crop]
+        x2 = x2[:, :, :h_crop, :w_crop]
+
+        diff = x1 - x2
+
+        # In nicht überlappende Patches zerlegen:
+        # (B, C, H, W) -> (B, C, nH, ws, nW, ws)
+        diff = diff.view(b, c, h_crop // ws, ws, w_crop // ws, ws)
+
+        # Patchdimensionen zusammenfassen:
+        # (B, C, nH, nW, ws*ws)
+        diff = diff.permute(0, 1, 2, 4, 3, 5).contiguous()
+        diff = diff.view(b, c, h_crop // ws, w_crop // ws, ws * ws)
+
+        # Varianz innerhalb jedes Patches
+        patch_var = diff.var(dim=-1, unbiased=False)
+
+        if self.reduction == "mean":
+            loss = patch_var.mean()
+        elif self.reduction == "sum":
+            loss = patch_var.sum()
+        elif self.reduction == "none":
+            loss = patch_var
+        else:
+            raise ValueError(f"Unbekannte reduction: {self.reduction}")
+
+        return loss if self.minimize else -loss
+
 
 class RadialPowerSpectrumLoss(nn.Module):
     """
