@@ -133,7 +133,6 @@ class TunablePotentialParameters:
     rotation_WS2: nn.Parameter = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
     shift_WS2: nn.Parameter = nn.Parameter(torch.tensor([15.9, -5.0 ], dtype=torch.float32))
 
-    blur_sigma: nn.Parameter = nn.Parameter(torch.tensor(0.017, dtype=torch.float32))
 
 
 
@@ -208,7 +207,7 @@ class DifferentiablePotential(nn.Module):
                 if i != self._IDX["Gr"]:
                     self.tunable_parameters.positions[i].requires_grad = self.train_methods.WS2_free_positions
 
-            self.tunable_parameters.blur_sigma.requires_grad = self.train_methods.train_blur
+
 
             for p in self.ws2_displacement.parameters():
                 p.requires_grad = getattr(self.train_methods, "WS2_strain_field", False)
@@ -270,7 +269,7 @@ class DifferentiablePotential(nn.Module):
         intensities_ = nn.ParameterList(
             [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
         occupancies_ = nn.ParameterList(
-            [torch.ones(init_intensities[0].shape, dtype=torch.float32, device=self.device)*-100,
+            [torch.ones(init_intensities[0].shape, dtype=torch.float32, device=self.device)*100,
              torch.ones(init_intensities[1].shape, dtype=torch.float32, device=self.device)*2,
              torch.ones(init_intensities[2].shape, dtype=torch.float32, device=self.device)*2,
              torch.ones(init_intensities[3].shape, dtype=torch.float32, device=self.device)*2])
@@ -637,7 +636,7 @@ class DifferentiablePotential(nn.Module):
         potential_list = []
         positions = self.get_positions()
         intensities = self.get_intensities()
-        occupancies = self.tunable_parameters.occupancies
+        #occupancies = self.tunable_parameters.occupancies
 
         for i in range(self.N_l):
             #rho_i = self.create_rho(positions[i], intensities[i])

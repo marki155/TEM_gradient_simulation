@@ -21,7 +21,6 @@ class TrainMethod:
     loss_l1: float = 0.1
     loss_fft: float = 0.0
 
-    train_blur: bool = False
     train_amplitude_contrast: bool = False
 
     learning_rate: float = 0.00001
@@ -65,12 +64,11 @@ class TrainMethod:
         'instab_defocus_nm': False
     }
 
-    train_multislice_sigma: bool = False
+    train_normalisation_parameters: bool = True
 
     only_train_small_area: int = 1 # TODO
 
 
-    #train_amp_contrast: bool = False # TODO
 
     #train_small_area_squares = [(50, 50, 350, 350), (500, 600, 1000, 1000)]
     train_small_area_squares = [(50, 50, 350, 350), (600, 600, 1000, 1000)]

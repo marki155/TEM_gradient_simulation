@@ -1,10 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import torch
 import torch.nn as nn
 import torch.fft as fft
 import torch.nn.functional as F
 import math
+import json
 
 
 from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss, FFTBraggLoss
@@ -178,7 +179,19 @@ class NN_particles(nn.Module):
 
 
 
+    def save_parameters(self):
+        # Speichern
+        p = self.tunable_parameters
 
+        with open("parameters.json", "w") as f:
+            json.dump(asdict(p), f)
+
+    def load_parameters(self):
+        with open("parameters.json", "r") as f:
+            data = json.load(f)
+
+        p_loaded = ParticlesTunableParameters(**data)
+        print(p_loaded)
 
     def build_multislice(self, init_positions, init_intensities, dz, max_shifts=None, max_rotations=None):
         H = self.shape[0]
@@ -390,9 +403,15 @@ class NN_particles(nn.Module):
         sim_ref = simulated_image[x_min:x_max, y_min:y_max]
         tgt_ref = target_image[x_min:x_max, y_min:y_max]
 
+        if self.train_methods.train_normalisation_parameters:
+            norm_params = self.tunable_parameters.normalisation_parameters
+        else:
+            norm_params = self.tunable_parameters.normalisation_parameters.detach()
+
+
         if method == "z":
-            sim_mean = self.tunable_parameters.normalisation_parameters[0] + torch.mean(sim_ref)
-            sim_std = self.tunable_parameters.normalisation_parameters[1] + torch.std(sim_ref)
+            sim_mean = norm_params[0] + torch.mean(sim_ref)
+            sim_std = norm_params[1] + torch.std(sim_ref)
             tgt_mean = torch.mean(tgt_ref)
             tgt_std = torch.std(tgt_ref)
             print(tgt_mean, tgt_std)
@@ -400,8 +419,8 @@ class NN_particles(nn.Module):
             target_image = (target_image - tgt_mean) / (tgt_std + eps)
 
         elif method == "minmax":
-            sim_min = self.tunable_parameters.normalisation_parameters[0]#torch.min(sim_ref)
-            sim_max = self.tunable_parameters.normalisation_parameters[1]#torch.max(sim_ref)
+            sim_min = norm_params[0]#torch.min(sim_ref)
+            sim_max = norm_params[1]#torch.max(sim_ref)
             tgt_min = torch.min(tgt_ref)
             tgt_max = torch.max(tgt_ref)
 

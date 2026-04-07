@@ -104,9 +104,6 @@ class PhysicalPhaseObjectLayer(nn.Module):
                 positions = np.argwhere(mask_outside)
                 print(positions)
 
-            print("sigma =", self.sigma)
-            print("V_slice min/max =", V_slice.min().item(), V_slice.max().item())
-            print("sigma * V_slice min/max =", (self.sigma * V_slice).min().item(), (self.sigma * V_slice).max().item())
 
             T = torch.exp(1j * phase)
             wave = wave * T
@@ -164,6 +161,7 @@ class DifferentiableMultislice(nn.Module):
             potential_slices=potential_list,
             z_positions_nm=self.z_positions_nm,
         )
+        print(pot_aux_loss)
 
         return exit_wave, pot_aux_loss
 

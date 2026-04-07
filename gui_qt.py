@@ -796,7 +796,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def on_parameter_update(self, params: ParticlesTunableParameters):
-        self.parameter_frame.refresh_from_params()
+        self.parameter_frame.refresh_from_params(len(self.worker.losses), self.worker.losses[-1])
 
 
 

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
+import json
+from dataclasses import fields, is_dataclass, asdict
 from functools import partial
-from typing import Any
+from typing import Any, Type, T
+
+from nn import ParticlesTunableParameters
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+from PySide6.QtWidgets import QFileDialog
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -182,7 +187,112 @@ class TensorEditor(QFrame):
 
         self._building = False
 
+def serialize(obj):
+    # --- Tensor ---
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().tolist()
 
+    # --- Parameter ---
+    elif isinstance(obj, torch.nn.Parameter):
+        return obj.detach().cpu().tolist()
+
+    # --- ParameterList ---
+    elif isinstance(obj, torch.nn.ParameterList):
+        return [serialize(p) for p in obj]
+
+    # --- ParameterDict ---
+    elif isinstance(obj, torch.nn.ParameterDict):
+        return {k: serialize(v) for k, v in obj.items()}
+
+    # --- Module (optional, falls enthalten) ---
+    elif isinstance(obj, torch.nn.Module):
+        return {k: serialize(v) for k, v in obj.state_dict().items()}
+
+    # --- Dataclass ---
+    elif is_dataclass(obj):
+        return serialize(asdict(obj))
+
+    # --- Standard Container ---
+    elif isinstance(obj, dict):
+        return {k: serialize(v) for k, v in obj.items()}
+
+    elif isinstance(obj, list):
+        return [serialize(v) for v in obj]
+
+    elif isinstance(obj, tuple):
+        return tuple(serialize(v) for v in obj)
+
+    # --- Fallback ---
+    else:
+        return obj
+
+
+from dataclasses import fields, is_dataclass
+from typing import Any
+import torch
+import torch.nn as nn
+
+
+def update_from_serialized(target: Any, source: Any):
+    # Dataclass rekursiv durchlaufen
+    if is_dataclass(target):
+        if not isinstance(source, dict):
+            raise TypeError(f"Für Dataclass {type(target).__name__} wurde dict erwartet, bekam {type(source).__name__}")
+        for f in fields(target):
+            name = f.name
+            if name not in source:
+                continue
+            update_from_serialized(getattr(target, name), source[name])
+        return
+
+    # Einzelner Parameter
+    if isinstance(target, nn.Parameter):
+        tensor = torch.tensor(source, dtype=target.dtype, device=target.device)
+        with torch.no_grad():
+            target.copy_(tensor)
+        return
+
+    # Normaler Tensor
+    if isinstance(target, torch.Tensor):
+        tensor = torch.tensor(source, dtype=target.dtype, device=target.device)
+        with torch.no_grad():
+            target.copy_(tensor)
+        return
+
+    # ParameterList
+    if isinstance(target, nn.ParameterList):
+        if len(target) != len(source):
+            raise ValueError(f"ParameterList-Länge passt nicht: {len(target)} != {len(source)}")
+        for t, s in zip(target, source):
+            update_from_serialized(t, s)
+        return
+
+    # ParameterDict
+    if isinstance(target, nn.ParameterDict):
+        for key, value in source.items():
+            if key not in target:
+                raise KeyError(f"Key {key!r} fehlt in ParameterDict")
+            update_from_serialized(target[key], value)
+        return
+
+    # list
+    if isinstance(target, list):
+        if len(target) != len(source):
+            raise ValueError(f"Listenlänge passt nicht: {len(target)} != {len(source)}")
+        for t, s in zip(target, source):
+            update_from_serialized(t, s)
+        return
+
+    # dict
+    if isinstance(target, dict):
+        for key, value in source.items():
+            if key not in target:
+                raise KeyError(f"Key {key!r} fehlt im dict")
+            update_from_serialized(target[key], value)
+        return
+
+    # Fallback für einfache skalare Attribute:
+    # hier kann nicht "in place" aktualisiert werden, also ignorieren oder separat behandeln
 # -----------------------------
 # Dynamisch generiertes Root-Frame
 # -----------------------------
@@ -221,6 +331,18 @@ class ParametersFrame(QFrame):
         self.main_layout.setContentsMargins(8, 8, 8, 8)
         self.main_layout.setSpacing(8)
 
+        self.button_save_parameters = QPushButton("Parameter speichern")
+        self.button_load_parameters = QPushButton("Parameter laden...")
+
+        self.button_save_parameters.clicked.connect(self.save_parameters)
+        self.button_load_parameters.clicked.connect(self.load_parameters)
+
+        self.main_layout.addWidget(self.button_save_parameters)
+        self.main_layout.addWidget(self.button_load_parameters)
+
+        self.step = 0
+        self.loss = 10000
+
         scroll.setWidget(container)
 
         root_section = CollapsibleSection(type(params_root).__name__, expanded=True)
@@ -229,10 +351,59 @@ class ParametersFrame(QFrame):
         self._build_dataclass_into_layout(root_section.content_layout, params_root, path=type(params_root).__name__)
         self.main_layout.addStretch()
 
+    def save_parameters(self):
+        # Speichern
+        p = self.params_root
+
+        with open("parameters_step="+str(self.step)+"_loss="+str(self.loss)+".json", "w") as f:
+            param_dict = serialize(p)
+            json.dump(param_dict, f)
+
+
+    def load_parameters_no_dialog(self):
+        with open("parameters.json", "r") as f:
+            data = json.load(f)
+
+        update_from_serialized(self.params_root, data)
+        print("parameters loaded:", f.name)
+        self.refresh_from_params()
+
+    def load_dataclass_json(self, path: str, cls: Type[T]) -> T:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return update_from_serialized(self.params_root, data)
+
+    def load_parameters(self, selected_fields: list[str] | None = None):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Parameter laden",
+            "",
+            "JSON-Dateien (*.json)"
+        )
+
+        if not file_path:
+            return
+
+        loaded = self.load_dataclass_json(file_path, type(self.params_root))
+        self.params_root = loaded
+        return
+
+        if selected_fields is None:
+            self.params_root = loaded
+            return
+
+        for field_name in selected_fields:
+            if hasattr(loaded, field_name) and hasattr(self.params_root, field_name):
+                setattr(self.params_root, field_name, getattr(loaded, field_name))
+
     # -------------------------
     # Public API
     # -------------------------
-    def refresh_from_params(self):
+    def refresh_from_params(self, step=None, loss=None):
+        if step is not None:
+            self.step = step
+        if loss is not None:
+            self.loss = loss
         for editor in self._tensor_editors:
             editor.refresh_from_tensor()
 
