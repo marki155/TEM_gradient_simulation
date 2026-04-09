@@ -168,7 +168,7 @@ if __name__ == '__main__':
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,
-        plot_every=5,
-        heavy_every=10,
+        plot_every=50,
+        heavy_every=200,
         max_steps=2_000_000,
     )

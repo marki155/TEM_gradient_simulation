@@ -128,9 +128,9 @@ class DifferentiableMultislice(nn.Module):
 
         self.z_positions_nm = [
             0.00,  # Graphen
-            0.55,  # S1
-            0.70,  # W
-            0.85,  # S2
+            0.33,  # S1
+            0.488,  # W
+            0.646,  # S2
         ]
         # TODO self.z_positions_nm = z_positions_nm
 

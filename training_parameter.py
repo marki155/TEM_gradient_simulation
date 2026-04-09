@@ -20,6 +20,8 @@ class TrainMethodOLD:
     loss_l1: float = 0.1
     loss_fft: float = 0.0
 
+
+
     train_amplitude_contrast: bool = False
 
     learning_rate: float = 0.00001
@@ -91,6 +93,8 @@ class TrainMethod:
     loss_ssim: float = 0.0
     loss_l1: float = 0.1
     loss_fft: float = 0.0
+
+    occ_entropy_a: float = 1.0
 
     train_amplitude_contrast: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
 

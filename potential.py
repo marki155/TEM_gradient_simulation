@@ -11,6 +11,8 @@ from displacement_field import SplineDisplacementField2D, StrainTunableParameter
 
 from torch.nn.utils.rnn import pad_sequence
 
+from kirkland import KirklandPrecalcPotential
+from lobato_potential import projected_atomic_potential_kernel_lobato
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_default_device(DEVICE)
@@ -159,7 +161,7 @@ class DifferentiablePotential(nn.Module):
 
         self.ws2_displacement = SplineDisplacementField2D(
             image_shape=shape,
-            control_shape=(2,2),
+            control_shape=(10,10),
             init_scale=0.0,
             device=device,
             dtype=torch.float32,
@@ -172,6 +174,8 @@ class DifferentiablePotential(nn.Module):
 
         self.tunable_parameters = TunablePotentialParameters(ws2_displacement=strain_parameters, positions=positions_,
                                                              intensities=intensities_, occupancies=occupancies_,)
+
+        self.kirkland_precalc_pot = KirklandPrecalcPotential(self.H, self.W, self.pixel_size_nm, self.device)
 
 
 
@@ -609,7 +613,7 @@ class DifferentiablePotential(nn.Module):
             entropies.append(entropy)
         entropy = torch.mean(torch.stack(entropies))
 
-        return entropy
+        return self.train_methods.occ_entropy_a * entropy
         if self.train_methods.intensity_classes == "classes":
             weights = F.softmax(self.intensities_, dim=1)
             entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()
@@ -635,379 +639,27 @@ class DifferentiablePotential(nn.Module):
 
         potential_list = []
         positions = self.get_positions()
-        intensities = self.get_intensities()
-        #occupancies = self.tunable_parameters.occupancies
+        occupancies = self.tunable_parameters.occupancies
 
         for i in range(self.N_l):
-            #rho_i = self.create_rho(positions[i], intensities[i])
-            #rho_i = self.create_rho_doyle_turner(positions[i], intensities[i])
 
-            rho_i = self.rasterize_atoms_bilinear(positions[i], intensities[i])
-            # rho_i = self.simulation.calc_rho(self.positions[i], torch.abs(self.intensities[i]).unsqueeze(1))
-            potential_i = self.projected_slice_potential(rho_i, atom_type=self.atom_names_by_layer[i])
-            #potential_i = self.potential_2d_fft_doyle_turner(rho_i, atom_type=self.atom_names_by_layer[i])
+
+            #potential_i = self.projected_slice_potential_lobato(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
+            potential_i = self.projected_slice_potential_kirkland(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
             potential_list.append(potential_i)
 
         return potential_list, self.aux_loss()
 
-    def create_rho2(self, positions_xy, intensities, multiplier=1.0):
-        """
-        positions_xy: Tensor (N, 2), mit [:, 0] = x und [:, 1] = y
-        intensities:  Tensor (N,)
-        """
-        pad = 2
 
-        # Bildtensor immer als (H, W)
-        rho = torch.zeros(
-            (self.H + 2 * pad, self.W + 2 * pad),
-            dtype=torch.float32,
-            device=self.device
-        )
 
-        y = positions_xy[:, 0]
-        x = positions_xy[:, 1]
-        inten = intensities.to(torch.float32)
 
-        # Nur Punkte behalten, bei denen bilineare Verteilung noch im Bild liegt
-        mask = (x >= 0.0) & (x < self.W - 1) & (y >= 0.0) & (y < self.H - 1)
-        x = x[mask]
-        y = y[mask]
-        intensities = inten[mask]
-
-        if x.numel() == 0:
-            return rho[pad:-pad, pad:-pad]
-
-        ix = torch.floor(x).long()
-        iy = torch.floor(y).long()
-
-        fx = x - ix.float()
-        fy = y - iy.float()
-
-        # bilineare Gewichte
-        w00 = (1.0 - fx) * (1.0 - fy) * intensities[:, 0] * multiplier
-        w10 = fx * (1.0 - fy) * intensities[:, 0] * multiplier
-        w01 = (1.0 - fx) * fy * intensities[:, 0] * multiplier
-        w11 = fx * fy * intensities[:, 0] * multiplier
-
-        # ACHTUNG: Tensorindexierung ist [y, x]
-        row0 = ix + pad
-        row1 = ix + 1 + pad
-        col0 = iy + pad
-        col1 = iy + 1 + pad
-
-        rho.index_put_((row0, col0), w00, accumulate=True)
-        rho.index_put_((row0, col1), w10, accumulate=True)
-        rho.index_put_((row1, col0), w01, accumulate=True)
-        rho.index_put_((row1, col1), w11, accumulate=True)
-
-        return rho[pad:-pad, pad:-pad]
-
-    def create_rho(self, positions_xy, intensities, multiplier=1.0):
-        """
-        positions_xy: (N, 2) mit [:,0]=x und [:,1]=y
-        intensities:  (N,)
-        """
-        intensities = intensities.unsqueeze(1)
-        pad = 2
-
-        # Bildtensor als (H, W)
-        rho = torch.zeros((self.H + 2 * pad, self.W + 2 * pad), device=self.device)
+    def rasterize_atoms_bilinear(self, H, W, positions_xy, weights):
+        rho = torch.zeros((H, W), dtype=torch.float32, device=self.device)
 
         x = positions_xy[:, 0]
         y = positions_xy[:, 1]
 
-        # x gegen W, y gegen H
-        mask = (x >= 0.0) & (x < self.W - 1) & (y >= 0.0) & (y < self.H - 1)
-        x = x[mask]
-        y = y[mask]
-        intensities = intensities[mask]
-
-        if x.numel() == 0:
-            return rho[pad:-pad, pad:-pad]
-
-        ix = torch.floor(x).to(torch.int64)
-        iy = torch.floor(y).to(torch.int64)
-
-        fx = x - ix
-        fy = y - iy
-
-        # bilineare Gewichte
-        w00 = ((1 - fx) * (1 - fy) * intensities[:, 0]) * multiplier
-        w10 = (fx * (1 - fy) * intensities[:, 0]) * multiplier
-        w01 = ((1 - fx) * fy * intensities[:, 0]) * multiplier
-        w11 = (fx * fy * intensities[:, 0]) * multiplier
-
-        # Bildindexierung: [y, x]
-        idx00 = (pad + ix, pad + iy)
-        idx01 = (pad + ix, pad + iy + 1)
-        idx10 = (pad + ix + 1, pad + iy)
-        idx11 = (pad + ix + 1, pad + iy + 1)
-
-        rho.index_put_(idx00, w00, accumulate=True)
-        rho.index_put_(idx10, w10, accumulate=True)
-        rho.index_put_(idx01, w01, accumulate=True)
-        rho.index_put_(idx11, w11, accumulate=True)
-
-        return torch.abs(rho[pad:-pad, pad:-pad])
-
-
-    def create_rho_old(self, pxpositions, intensities, multiplier=1.0):
-        # pxpositions: (N, 2) Tensor
-        # intensities: (N,) Tensor
-
-        intensities = intensities.unsqueeze(1)  # (N, 1) Tensor
-
-        pad = 2
-
-        rho = torch.zeros((self.H + pad * 2, self.W + pad * 2), device=self.device)
-
-        # potential.fill_(self.background)  # Torch-Äquivalent
-
-        px, py = pxpositions[:, 0], pxpositions[:, 1] # TODO warum vertauscht
-
-        pos_mask = (px >= 0.0) & (px <= self.H) & (py >= 0.0) & (py <= self.W)
-        px = px[pos_mask]
-        py = py[pos_mask]
-        intensities = intensities[pos_mask]
-        # offset = int(self.canvas_size / self.kernelsize)
-        offset = pad
-
-        # Integer-Anteile
-        # ix = torch.clamp(px.floor().to(torch.int64), min=0, max=self.shape[0] + self.canvas_size - 2)
-        # iy = torch.clamp(py.floor().to(torch.int64), min=0, max=self.shape[1] + self.canvas_size - 2)
-
-        ix = px.floor().to(torch.int64)
-        iy = py.floor().to(torch.int64)
-
-        # Bruchteile
-        fx = px - ix
-        fy = py - iy
-
-        # Pixelgewichte
-        w00 = torch.matmul((1 - fx), (1 - fy)) * intensities * multiplier
-        w10 = torch.matmul(fx, (1 - fy)) * intensities* multiplier
-        w11 = torch.matmul(fx, fy) * intensities* multiplier
-        w01 = torch.matmul((1 - fx), fy) * intensities* multiplier
-
-        # Indizes für alle vier Nachbarn
-        idx00 = (offset + ix, offset + iy)
-        idx10 = (offset + ix, offset + iy + 1)
-        idx11 = (offset + ix + 1, offset + iy + 1)
-        idx01 = (offset + ix + 1, offset + iy)
-
-        # In-place Akkumulation wie np.add.at
-        rho.index_put_(idx00, w00[:idx00[0].shape[0], 0], accumulate=True)
-        rho.index_put_(idx10, w10[:idx10[0].shape[0], 0], accumulate=True)
-        rho.index_put_(idx11, w11[:idx11[0].shape[0], 0], accumulate=True)
-        rho.index_put_(idx01, w01[:idx01[0].shape[0], 0], accumulate=True)
-
-        return torch.abs(rho[pad:-pad, pad:-pad])  # Entfernen des Pads
-
-    def potential_2d_nm(self, rho, sigma=0.1, epsilon0_nm=8.854e-21, device=None):
-        """
-        Berechnet geglättetes 2D-Potential aus Delta-Peaks (nm-Einheiten)
-
-        rho: 2D-Tensor [ny,nx] in Vielfachen von e
-        spacing: Pixelgröße in nm
-        sigma: Glättungs-Gauss in nm
-        epsilon0_nm: Permittivität in F/nm
-        """
-        e = 1.602e-19
-        rho = rho.to(device, dtype=torch.float32)
-        ny, nx = (self.W, self.H)
-        spacing = self.pixel_size_nm
-
-        # Gaussian-Kernel
-        s_pix = max(1, int(6 * sigma / spacing))
-        if s_pix % 2 == 0: s_pix += 1
-        coords = torch.arange(s_pix, device=device) - s_pix // 2
-        Y, X = torch.meshgrid(coords, coords, indexing='ij')
-        R2 = (X * spacing) ** 2 + (Y * spacing) ** 2
-        G_kernel = torch.exp(-R2 / (2 * sigma ** 2))
-        G_kernel /= G_kernel.sum()
-
-        # Faltung
-        rho_input = rho.unsqueeze(0).unsqueeze(0)
-        kernel = G_kernel.unsqueeze(0).unsqueeze(0)
-        V = F.conv2d(rho_input, kernel, padding=s_pix // 2)
-        V = V[0, 0] / (4 * torch.pi * epsilon0_nm)  # Volt
-
-        return V
-
-    def solve_potential(self,iterations=100):
-        V = torch.zeros_like(self.potential)  # initial guess
-        for _ in range(iterations):
-            V = 0.25 * (F.pad(V, (1, 1, 1, 1), mode='replicate')[:, :-2, 1:-1] +
-                        F.pad(V, (1, 1, 1, 1), mode='replicate')[:, 2:, 1:-1] +
-                        F.pad(V, (1, 1, 1, 1), mode='replicate')[:, 1:-1, :-2] +
-                        F.pad(V, (1, 1, 1, 1), mode='replicate')[:, 1:-1, 2:] +
-                        self.potential)  # simple Jacobi iteration
-        return V
-
-    def potential_2d_fft_nm(self, rho, epsilon0_nm=8.854e-21, device=None):
-        """
-        Berechnet 2D Potential mit FFT-Faltung (viel schneller für große Raster)
-
-        rho: 2D-Tensor [ny,nx] in Vielfachen von e
-        spacing: Pixelgröße in nm
-        sigma: Glättungs-Gauss in nm
-        """
-
-        sigma = self.blur_sigma * 1.e-3
-
-        e = 1.602e-19
-        ny, nx = (self.W, self.H)
-        spacing = self.pixel_size_nm
-
-        # Frequenzraum-Koordinaten
-        y = torch.fft.fftfreq(ny, d=spacing, device=device)
-        x = torch.fft.fftfreq(nx, d=spacing, device=device)
-        Y, X = torch.meshgrid(y, x, indexing='ij')
-        R2 = X ** 2 + Y ** 2
-
-        # FFT von 1/sqrt(r^2 + sigma^2) in Fourierraum:
-        # Für Gaussian-Kernel einfacher: F(G) = exp(-2 pi^2 sigma^2 (fx^2 + fy^2))
-        G_fft = torch.exp(-2 * torch.pi ** 2 * sigma ** 2 * R2)
-
-        # FFT des Rasters
-        rho_fft = torch.fft.fft2(rho * e)
-
-        # Faltung im Fourierraum
-        V_fft = rho_fft * G_fft
-        V = torch.fft.ifft2(V_fft).real / (4 * torch.pi * epsilon0_nm)
-
-        return V
-
-    def create_rho_doyle_turner(self, positions_xy, occupancies, multiplier=1.0):
-        """
-        Raster mit Atompositionen erstellen.
-        positions_xy: (N,2) Tensor mit x,y in Pixeln
-        multiplier: optionaler Faktor für Atomstärke (z.B. Anzahl Elektronen)
-        """
-        pad = 2
-        rho = torch.zeros((self.H + 2 * pad, self.W + 2 * pad), device=self.device)
-
-        x = positions_xy[:, 0]
-        y = positions_xy[:, 1]
-
-        mask = (x >= 0.0) & (x < self.H - 1) & (y >= 0.0) & (y < self.W - 1)
-        x = x[mask]
-        y = y[mask]
-
-        if x.numel() == 0:
-            return rho[pad:-pad, pad:-pad]
-
-        ix = torch.floor(x).to(torch.int64)
-        iy = torch.floor(y).to(torch.int64)
-        fx = x - ix
-        fy = y - iy
-
-        occ = occupancies[mask]
-        ones = torch.ones_like(occ)
-
-        w00a = ((1 - fx) * (1 - fy)) * occ
-        w10a = (fx * (1 - fy)) * occ
-        w01a = ((1 - fx) * fy) * occ
-        w11a = (fx * fy) * occ
-
-        idx00 = (pad + ix, pad + iy)
-        idx01 = (pad + ix, pad + iy + 1)
-        idx10 = (pad + ix + 1, pad + iy)
-        idx11 = (pad + ix + 1, pad + iy + 1)
-
-        rho.index_put_(idx00, w00a, accumulate=True)
-        rho.index_put_(idx10, w10a, accumulate=True)
-        rho.index_put_(idx01, w01a, accumulate=True)
-        rho.index_put_(idx11, w11a, accumulate=True)
-
-        return rho[pad:-pad, pad:-pad]
-
-    def potential_2d_fft_doyle_turner2(self, rho, atom_type, epsilon0_nm=8.854e-21):
-        """
-        Physikalisches 2D Potential (V) mit Doyle-Turner FFT-Faltung.
-        Gibt auch sigma für TEM Phasenfaktor zurück.
-        rho: Raster mit 1 pro Atom
-        atom_types: Liste der Atomsorten in positions_xy-Reihenfolge
-        voltage_kV: Beschleunigungsspannung
-        """
-        e = 1.602e-19
-        ny, nx = rho.shape
-        spacing = self.pixel_size_nm
-        device = rho.device
-
-        # Frequenzraum-Koordinaten
-        y = torch.fft.fftfreq(ny, d=spacing, device=device)
-        x = torch.fft.fftfreq(nx, d=spacing, device=device)
-        Y, X = torch.meshgrid(y, x, indexing='ij')
-        R2 = X**2 + Y**2
-
-        # Kernel initialisieren
-        G_fft = torch.zeros_like(R2, device=device)
-
-        # Summe über alle Atomtypen
-
-        params = DOYLE_TURNER_PARAMS.get(atom_type, [(1.0,1.0)])
-        for A, B in params:
-            if B > 0:
-                G_fft += A * torch.pi / B * torch.exp(-torch.pi**2 * R2 / B)
-
-        # FFT des Rasters
-        rho_fft = torch.fft.fft2(rho * e)
-
-        # Faltung
-        V_fft = rho_fft * G_fft
-        V = torch.fft.ifft2(V_fft).real * (spacing**2) / (4 * torch.pi * epsilon0_nm)
-
-
-
-        return V
-
-    def potential_2d_fft_doyle_turner(self, rho, atom_type, epsilon0_nm=8.854e-21):
-        """
-        2D-Potential aus diskretem Atomraster rho per FFT-Faltung.
-
-        Erwartet:
-          - rho: 2D-Tensor, typischerweise Belegung / Gewicht pro Atomposition
-          - atom_type: "C", "W", "S"
-          - DOYLE_TURNER_PARAMS in der Form:
-                A * pi / B * exp(-pi^2 * k^2 / B)
-            mit k in cycles / nm, passend zu torch.fft.fftfreq(..., d=spacing)
-
-        Rückgabe:
-          - V: 2D-Potential
-        """
-        e = 1.602e-19
-        ny, nx = rho.shape
-        spacing = self.pixel_size_nm
-        device = rho.device
-
-        fy = torch.fft.fftfreq(ny, d=spacing, device=device)
-        fx = torch.fft.fftfreq(nx, d=spacing, device=device)
-        Y, X = torch.meshgrid(fy, fx, indexing="ij")
-        k2 = X**2 + Y**2
-
-        G_fft = torch.zeros_like(k2, dtype=torch.float32, device=device)
-
-        params = DOYLE_TURNER_PARAMS.get(atom_type)
-        if params is None:
-            raise ValueError(f"Unbekannter atom_type: {atom_type}")
-
-        for A, B in params:
-            G_fft = G_fft + A * torch.pi / B * torch.exp(-(torch.pi**2) * k2 / B)
-
-        rho_fft = torch.fft.fft2(rho.to(torch.float32) * e)
-        V_fft = rho_fft * G_fft
-        V = torch.fft.ifft2(V_fft).real * (spacing**2) / (4.0 * torch.pi * epsilon0_nm)
-
-        return V
-
-    def rasterize_atoms_bilinear(self, positions_xy, weights):
-        rho = torch.zeros((self.H, self.W), dtype=torch.float32, device=self.device)
-
-        x = positions_xy[:, 0]
-        y = positions_xy[:, 1]
-
-        mask = (x >= 0.0) & (x < self.W - 1) & (y >= 0.0) & (y < self.H - 1)
+        mask = (x >= 0.0) & (x < H - 1) & (y >= 0.0) & (y < W - 1)
         x = x[mask]
         y = y[mask]
         w = weights[mask]
@@ -1033,43 +685,55 @@ class DifferentiablePotential(nn.Module):
 
         return rho
 
-    def projected_atomic_potential_kernel_old(self, params):
-        H, W = self.H, self.W
-        device = self.device
-
-        y = (torch.arange(H, device=device) - H // 2) * self.pixel_size_nm
-        x = (torch.arange(W, device=device) - W // 2) * self.pixel_size_nm
-        Y, X = torch.meshgrid(y, x, indexing="ij")
-        R2 = X ** 2 + Y ** 2
-
-        V = torch.zeros((H, W), dtype=torch.float32, device=device)
-        for amp, width_nm in params:
-            V += amp * torch.exp(-R2 / (2.0 * width_nm ** 2))
-        return torch.fft.ifftshift(V)
-
-    def projected_atomic_potential_kernel(self, params):
-        H, W = self.H, self.W
-        device = self.device
-
-        y = (torch.arange(H, device=device) - H // 2) * self.pixel_size_nm
-        x = (torch.arange(W, device=device) - W // 2) * self.pixel_size_nm
-        Y, X = torch.meshgrid(y, x, indexing="ij")
-        R2 = X ** 2 + Y ** 2
-
-        V = torch.zeros((H, W), dtype=torch.float32, device=device)
-        for amp, width_nm in params:
-            V += amp * torch.exp(-R2 / (2.0 * width_nm ** 2)) / (2.0 * torch.pi * width_nm ** 2)
-
-        return torch.fft.ifftshift(V)
 
 
-    def projected_slice_potential(self, rho, atom_type):
 
-        kernel = self.projected_atomic_potential_kernel(
-            params=PROJECTED_POTENTIAL_PARAMS[atom_type]
+    def projected_slice_potential_lobato(self, positions_xy, occupancies, atom_type):
+        pad = max(self.H // 2, self.W // 2)
+        Hp = self.H + 2 * pad
+        Wp = self.W + 2 * pad
+
+        positions_pad = positions_xy + torch.tensor([pad, pad], device=self.device, dtype=positions_xy.dtype)
+
+        rho = self.rasterize_atoms_bilinear(
+            H=Hp,
+            W=Wp,
+            positions_xy=positions_pad,
+            weights=occupancies
         )
 
-        V = torch.fft.ifft2(torch.fft.fft2(rho) * torch.fft.fft2(kernel)).real
+        kernel = projected_atomic_potential_kernel_lobato(
+            H=Hp,
+            W=Wp,
+            pixel_size_nm=self.pixel_size_nm,
+            atom_type=atom_type,
+            device=self.device,
+        )
+
+        Vp = torch.fft.ifft2(torch.fft.fft2(rho) * torch.fft.fft2(kernel)).real
+        V = Vp[pad:pad + self.H, pad:pad + self.W]
+
+        # globaler Offset ist für TEM-Intensität nicht relevant
         V = V - V.median()
-        return V  # V*nm, also projected potential des Slices
+        return V
+
+    def projected_slice_potential_kirkland(self, positions_xy, occupancies, atom_type):
+        pad = 0#max(self.H // 2, self.W // 2)
+        Hp = self.H + 2 * pad
+        Wp = self.W + 2 * pad
+
+        positions_pad = positions_xy + torch.tensor([pad, pad], device=self.device, dtype=positions_xy.dtype)
+
+        rho = self.rasterize_atoms_bilinear(
+            H=Hp,
+            W=Wp,
+            positions_xy=positions_pad,
+            weights=occupancies
+        )
+
+        Vp = self.kirkland_precalc_pot.projected_slice_potential_kirkland(rho, atom_type, self.pixel_size_nm, self.device)
+        V = Vp[pad:pad + self.H, pad:pad + self.W]
+        #V = V - V.median()
+
+        return V
 
