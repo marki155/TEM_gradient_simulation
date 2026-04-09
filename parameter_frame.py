@@ -333,11 +333,14 @@ class ParametersFrame(QFrame):
 
         self.button_save_parameters = QPushButton("Parameter speichern")
         self.button_load_parameters = QPushButton("Parameter laden...")
+        self.button_save_as_parameters = QPushButton("Parameter speichern unter...")
 
         self.button_save_parameters.clicked.connect(self.save_parameters)
+        self.button_save_as_parameters.clicked.connect(self.save_as_parameters)
         self.button_load_parameters.clicked.connect(self.load_parameters)
 
         self.main_layout.addWidget(self.button_save_parameters)
+        self.main_layout.addWidget(self.button_save_as_parameters)
         self.main_layout.addWidget(self.button_load_parameters)
 
         self.step = 0
@@ -354,8 +357,26 @@ class ParametersFrame(QFrame):
     def save_parameters(self):
         # Speichern
         p = self.params_root
+        save_path = f"parameters/parameters_step={self.step}_loss={self.loss:.4f}.json"
+        with open(save_path, "w") as f:
+            param_dict = serialize(p)
+            json.dump(param_dict, f)
 
-        with open("parameters_step="+str(self.step)+"_loss="+str(self.loss)+".json", "w") as f:
+    def save_as_parameters(self):
+        save_path = f"parameters/parameters_step={self.step}_loss={self.loss:.4f}.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Parameter speichern unter",
+            save_path,
+            "JSON-Dateien (*.json)"
+        )
+
+        if not file_path:
+            return
+
+        p = self.params_root
+
+        with open(file_path, "w") as f:
             param_dict = serialize(p)
             json.dump(param_dict, f)
 
@@ -377,7 +398,7 @@ class ParametersFrame(QFrame):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Parameter laden",
-            "",
+            "parameters",
             "JSON-Dateien (*.json)"
         )
 
@@ -404,6 +425,8 @@ class ParametersFrame(QFrame):
             self.step = step
         if loss is not None:
             self.loss = loss
+        save_path = "Parameter speichern " + f"parameters_step={self.step}_loss={self.loss:.4f}.json"
+        self.button_save_parameters.setText(save_path)
         for editor in self._tensor_editors:
             editor.refresh_from_tensor()
 
