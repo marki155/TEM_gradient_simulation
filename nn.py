@@ -518,21 +518,21 @@ class NN_particles(nn.Module):
         P_diff = None
         total_loss = 0.0
         if a_mse > 0:
-             total_loss += a_mse * loss_MSE(sim, tt)
+             total_loss += a_mse * loss_MSE(sim, tt, mask)
         if a_ncc > 0:
              total_loss += a_ncc * ncc_loss(sim, tt, mask)
         if a_local_ncc_100 > 0:
-             total_loss += a_local_ncc_100 * local_ncc_loss_100(sim, tt)
+             total_loss += a_local_ncc_100 * local_ncc_loss_100(sim, tt, mask)
         if a_local_ncc_50 > 0:
-             total_loss += a_local_ncc_50 * local_ncc_loss_50(sim, tt)
+             total_loss += a_local_ncc_50 * local_ncc_loss_50(sim, tt, mask)
         if a_local_ncc_20 > 0:
-             total_loss += a_local_ncc_20 * local_ncc_loss_20(sim, tt)
+             total_loss += a_local_ncc_20 * local_ncc_loss_20(sim, tt, mask)
         if a_ssim > 0:
-             total_loss += a_ssim * ssim_loss(sim, tt)
+             total_loss += a_ssim * ssim_loss(sim, tt, mask)
         if a_l1 > 0:
-             total_loss += a_l1 * loss_l1(sim, tt)
+             total_loss += a_l1 * loss_l1(sim, tt, mask)
         if a_fft > 0:
-            _loss_fft, P_diff = loss_fft(sim, tt)
+            _loss_fft, P_diff = loss_fft(sim, tt, mask)
             total_loss += a_fft * _loss_fft
         if a_var > 0:
              total_loss += a_var * loss_var(sim, tt, mask)
