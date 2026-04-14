@@ -147,41 +147,35 @@ class TunableCTFParameters:
 
 
 class CTFLayer(nn.Module):
-    def __init__(self, H, W, pixel_size_nm, voltage_kV, lam,
-                 amp_contrast=0.5, device=None,
-                 envelope_params=None,
-                 aberrations=None,
-                 semiangle_cutoff_mrad=None,
-                 train_method=None):
+    def __init__(self, config, train_method=None,device=None):
         super().__init__()
-        self.H = H
-        self.W = W
-        self.pixel_size_nm = pixel_size_nm
-        self.voltage_kV = voltage_kV
+        self.H, self.W = config.shape
+        self.pixel_size_nm = config.pixel_size_nm
+        self.voltage_kV = config.voltage_kV
         #self.amp_contrast = nn.Parameter(torch.tensor(amp_contrast, device=device))
-        self.envelope_params = envelope_params
+        self.envelope_params = config.init_ctf_env_params
         #self.deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], device=device))
         #self.Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], device=device))
-        self.lam = lam
-        self.semiangle_cutoff_mrad = semiangle_cutoff_mrad
-        self.alpha_max_mrad = 50.
+        self.lam = config.wavelength_nm
+        self.semiangle_cutoff_mrad = None
+        self.alpha_max_mrad = config.ctf_alpha_max_mrad
         self.device = device
         self.train_method = train_method
 
         self.tunable_parameters = TunableCTFParameters(
-            amp_contrast=nn.Parameter(torch.tensor(amp_contrast, dtype=torch.float32)),
-            deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], dtype=torch.float32)),
-            Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], dtype=torch.float32)),
-            aberrations = nn.ParameterDict(make_param_dict(aberrations))
+            amp_contrast=nn.Parameter(torch.tensor(config.init_amp_contrast, dtype=torch.float32)),
+            deltaE = nn.Parameter(torch.tensor(self.envelope_params["deltaE"], dtype=torch.float32)),
+            Cc_um = nn.Parameter(torch.tensor(self.envelope_params["Cc_um"], dtype=torch.float32)),
+            aberrations = nn.ParameterDict(make_param_dict(config.init_aberrations))
         )
 
         self.tunable_parameters = TunableCTFParameters()
 
 
         # Frequenzen in 1/nm
-        fx = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, H, device=device))
-        fy = torch.fft.fftshift(torch.linspace(-.5/pixel_size_nm, .5/pixel_size_nm, W, device=device))
-        kx, ky = torch.meshgrid(fx, fy, indexing='xy')
+        fx = torch.fft.fftshift(torch.linspace(-.5/config.pixel_size_nm, .5/config.pixel_size_nm, self.H, device=device))
+        fy = torch.fft.fftshift(torch.linspace(-.5/config.pixel_size_nm, .5/config.pixel_size_nm, self.W, device=device))
+        kx, ky = torch.meshgrid(fx, fy, indexing='ij')
 
         k = torch.sqrt(kx ** 2 + ky ** 2)
 

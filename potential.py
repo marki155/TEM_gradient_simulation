@@ -121,9 +121,9 @@ DOYLE_TURNER_PARAMS = {
 
 @dataclass
 class TunablePotentialParameters:
-    ws2_displacement: StrainTunableParameters
+    strain_fields: List[StrainTunableParameters]
 
-    positions: nn.ParameterList
+    position_shifts: nn.ParameterList
     intensities: nn.ParameterList
     occupancies: nn.ParameterList
 
@@ -139,40 +139,41 @@ class TunablePotentialParameters:
 
 
 
+
+
 class DifferentiablePotential(nn.Module):
-    def __init__(self, train_methods, init_positions, init_intensities, shape,
-                 pixel_size_nm, wavelength_nm, device, init_blur_sigma=1.0,
+    def __init__(self, config, train_methods, device,
                  max_shifts=None, max_rotations=None):
         super().__init__()
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
-        self.pixel_size_nm = pixel_size_nm
-        self.wavelength_nm = wavelength_nm
+        self.pixel_size_nm = config.pixel_size_nm
+        self.wavelength_nm = config.wavelength_nm
         self.device = device
         self.max_shifts = max_shifts
         self.max_rotations = max_rotations
 
-        self.H, self.W = shape
+        self.H, self.W = config.shape
 
         self._IDX = {"Gr": 0, "S1": 1, "W": 2, "S2": 3}
         self.atom_names_by_layer = ["C", "S", "W", "S"]
-        self.N_l = len(init_positions)
+        self.N_l = len(config.init_positions)
 
         self.train_methods = train_methods
+        self.config = config
 
-        self.ws2_displacement = SplineDisplacementField2D(
-            image_shape=shape,
-            control_shape=(10,10),
-            init_scale=0.0,
-            device=device,
-            dtype=torch.float32,
-        )
+        self.strain_fields = [SplineDisplacementField2D(image_shape=config.shape, control_shape=(2,2),
+                                                         device=device, dtype=torch.float32, init_scale=0.0),
+                         SplineDisplacementField2D(image_shape=config.shape, control_shape=(10,10),
+                                                         device=device, dtype=torch.float32, init_scale=0.0)]
+
+
         #self.positions_method = "graphen_shift"
         #self.intensity_classes = "free" # "free", "vacancies", "classes"
-        strain_parameters = self.ws2_displacement.get_tunable_parameters()
-        positions_ = self.initialize_positions_parameters(init_positions)
-        intensities_, occupancies_ = self.initialize_intensities_parameters(init_intensities)
+        strain_parameters = [field.get_tunable_parameters() for field in self.strain_fields]
+        position_shifts_ = self.initialize_position_shifts_parameters(config.init_positions)
+        intensities_, occupancies_ = self.initialize_intensities_parameters(config.init_intensities)
 
-        self.tunable_parameters = TunablePotentialParameters(ws2_displacement=strain_parameters, positions=positions_,
+        self.tunable_parameters = TunablePotentialParameters(strain_fields=strain_parameters, position_shifts=position_shifts_,
                                                              intensities=intensities_, occupancies=occupancies_,)
 
         self.kirkland_precalc_pot = KirklandPrecalcPotential(self.H, self.W, self.pixel_size_nm, self.device)
@@ -203,17 +204,20 @@ class DifferentiablePotential(nn.Module):
 
             self.tunable_parameters.shift_Gr.requires_grad = self.train_methods.graphen_shift.enabled
             self.tunable_parameters.rotation_Gr.requires_grad = self.train_methods.graphen_rotation.enabled
-            self.tunable_parameters.positions[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions.enabled
+            self.tunable_parameters.position_shifts[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions.enabled
 
             self.tunable_parameters.shift_WS2.requires_grad = self.train_methods.WS2_shift.enabled
             self.tunable_parameters.rotation_WS2.requires_grad = self.train_methods.WS2_rotation.enabled
             for i in range(self.N_l):
                 if i != self._IDX["Gr"]:
-                    self.tunable_parameters.positions[i].requires_grad = self.train_methods.WS2_free_positions.enabled
+                    self.tunable_parameters.position_shifts[i].requires_grad = self.train_methods.WS2_free_positions.enabled
 
 
 
-            for p in self.ws2_displacement.parameters():
+            for p in self.strain_fields[0].parameters():
+                p.requires_grad = self.train_methods.Gr_strain_field.enabled
+
+            for p in self.strain_fields[1].parameters():
                 p.requires_grad = self.train_methods.WS2_strain_field.enabled
 
 
@@ -242,7 +246,7 @@ class DifferentiablePotential(nn.Module):
         if not self.train_methods.graphen_rotation.enabled:
             self.tunable_parameters.rotation_Gr.grad = None
         if not self.train_methods.graphen_free_positions.enabled:
-            self.positions[self._IDX["Gr"]].grad = None
+            self.position_shifts[self._IDX["Gr"]].grad = None
 
         if not self.train_methods.WS2_shift.enabled:
             self.tunable_parameters.shift_WS2.grad = None
@@ -250,19 +254,26 @@ class DifferentiablePotential(nn.Module):
             self.tunable_parameters.rotation_WS2.grad = None
         for i in range(self.N_l):
             if i != self._IDX["Gr"] and not self.train_methods.WS2_free_positions.enabled:
-                self.positions[i].grad = None
+                self.position_shifts[i].grad = None
+
+    def get_init_positions(self, i):
+        return getattr(self, f"init_positions_{i}")
 
 
-    def initialize_positions_parameters(self, init_positions):
-        positions_ = nn.ParameterList(
-            [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions])
+    def initialize_position_shifts_parameters(self, init_positions):
+        positions_ = [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions]
+        for i, t in enumerate(positions_):
+            self.register_buffer(f"init_positions_{i}", t)
 
-        positions_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions.enabled
+        position_shifts_ = nn.ParameterList(
+            [torch.tensor(pos*0.0, dtype=torch.float32, device=self.device) for pos in init_positions])
+
+        position_shifts_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions.enabled
         for i in range(self.N_l):
             if i != self._IDX["Gr"]:
-                positions_[i].requires_grad = self.train_methods.WS2_free_positions.enabled
+                position_shifts_[i].requires_grad = self.train_methods.WS2_free_positions.enabled
 
-        return positions_
+        return position_shifts_
 
 
 
@@ -405,10 +416,11 @@ class DifferentiablePotential(nn.Module):
 
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_free_positions.enabled) or
                     (i != self._IDX["Gr"] and self.train_methods.WS2_free_positions.enabled)):
-                positions = self.tunable_parameters.positions[i]
+                position_shifts = self.tunable_parameters.position_shifts[i]
             else:
-                positions = self.tunable_parameters.positions[i].detach()
+                position_shifts = self.tunable_parameters.position_shifts[i].detach()
 
+            positions = self.get_init_positions(i) + position_shifts
             centered_positions = positions - center
 
             rotated_positions = torch.zeros_like(centered_positions)
@@ -424,8 +436,10 @@ class DifferentiablePotential(nn.Module):
             rotated_positions = rotated_positions * scales
             new_positions = rotated_positions + center + shift
 
-            if i != self._IDX["Gr"]:
-                new_positions = self.ws2_displacement(new_positions)
+            if i == self._IDX["Gr"]:
+                new_positions = self.strain_fields[0](new_positions)
+            else:
+                new_positions = self.strain_fields[1](new_positions)
 
             ret_positions.append(new_positions)
         return ret_positions
@@ -459,7 +473,7 @@ class DifferentiablePotential(nn.Module):
         y0 -= pad
         y1 += pad
         for l in layers:
-            pos = self.tunable_parameters.positions[l]
+            pos = self.get_positions()[l]#self.tunable_parameters.positions[l]
             xs, ys = pos[:,0], pos[:,1]
             for i in range(pos.shape[0]):
                 if (xs[i] >= x0 and xs[i] <= x1) and \
@@ -613,7 +627,27 @@ class DifferentiablePotential(nn.Module):
             entropies.append(entropy)
         entropy = torch.mean(torch.stack(entropies))
 
-        return self.train_methods.occ_entropy_a * entropy
+        if self.train_methods.position_shifts_regularization_a > 0.0:
+            pos_shift_reg_stack = []
+            for i in range(self.N_l):
+                if (i == self._IDX["Gr"] and self.train_methods.graphen_free_positions.enabled) or \
+                        (i != self._IDX["Gr"] and self.train_methods.WS2_free_positions.enabled):
+                    pos_shift_reg_stack.append(torch.abs(self.tunable_parameters.position_shifts[i]).mean())
+            if len(pos_shift_reg_stack) > 0:
+                pos_shift_reg = torch.mean(torch.stack(pos_shift_reg_stack))
+            else:
+                pos_shift_reg = 0.0
+        else:
+            pos_shift_reg = 0.0
+
+        if self.train_methods.strain_energy_a > 0.0 and self.train_methods.WS2_strain_field.enabled:
+            strain_energy = self.ws2_elastic_loss(lambda_=self.train_methods.strain_energy_lambda, mu=self.train_methods.strain_energy_mu)
+        else:
+            strain_energy = 0.0
+
+        return (self.train_methods.occ_entropy_a * entropy +
+                self.train_methods.position_shifts_regularization_a * pos_shift_reg +
+                self.train_methods.strain_energy_a * strain_energy)
         if self.train_methods.intensity_classes == "classes":
             weights = F.softmax(self.intensities_, dim=1)
             entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()
@@ -677,6 +711,11 @@ class DifferentiablePotential(nn.Module):
         w10 = fx * (1 - fy) * w
         w01 = (1 - fx) * fy * w
         w11 = fx * fy * w
+
+        #rho.index_put_((iy, ix), w00, accumulate=True)
+        #rho.index_put_((iy + 1, ix), w01, accumulate=True)
+        #rho.index_put_((iy, ix + 1), w10, accumulate=True)
+        #rho.index_put_((iy + 1, ix + 1), w11, accumulate=True)
 
         rho.index_put_((ix, iy), w00, accumulate=True)
         rho.index_put_((ix, iy + 1), w01, accumulate=True)

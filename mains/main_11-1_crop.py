@@ -18,7 +18,7 @@ VOLTAGE_KV = 80
 
 
 if __name__ == '__main__':
-    image = tifffile.imread('NPL11-1_crop_big_blur-3.tif')
+    image = tifffile.imread('../NPL11-1_crop_big_blur-3.tif')
     image[np.where(image == 0.0)] = np.median(image)
 
     H, W = image.shape
@@ -138,7 +138,7 @@ if __name__ == '__main__':
 
     model = NN_particles(
         image_shape=image.shape,
-        fov=fov,
+        pixel_size_nm=pixel_size_nm,
         voltage_kV=VOLTAGE_KV,
         train_method=train_method,
         device=DEVICE,
@@ -168,7 +168,7 @@ if __name__ == '__main__':
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,
-        plot_every=10,
-        heavy_every=20,
+        plot_every=50,
+        heavy_every=200,
         max_steps=2_000_000,
     )

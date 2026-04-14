@@ -121,24 +121,19 @@ class PhysicalPhaseObjectLayer(nn.Module):
 
 
 class DifferentiableMultislice(nn.Module):
-    def __init__(self, dz, shape, pixel_size_nm, wavelength_nm, device, train_method, voltage_kV):
+    def __init__(self, config, train_method, device):
         super().__init__()
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
         #self.dz = dz
 
-        self.z_positions_nm = [
-            0.00,  # Graphen
-            0.33,  # S1
-            0.488,  # W
-            0.646,  # S2
-        ]
+        self.z_positions_nm = config.z_positions_nm
         # TODO self.z_positions_nm = z_positions_nm
 
-        self.pixel_size_nm = pixel_size_nm
-        self.wavelength_nm = wavelength_nm
+        self.pixel_size_nm = config.pixel_size_nm
+        self.wavelength_nm = config.wavelength_nm
         self.device = device
 
-        self.H, self.W = shape
+        self.H, self.W = config.shape
         #fx = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.H, device=device))
         #fy = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.W, device=device))
 
@@ -149,7 +144,7 @@ class DifferentiableMultislice(nn.Module):
 
         self.train_method = train_method
 
-        self.phase_object_layer = PhysicalPhaseObjectLayer(self.H, self.W, pixel_size_nm, voltage_kV, device)
+        self.phase_object_layer = PhysicalPhaseObjectLayer(self.H, self.W, config.pixel_size_nm, config.voltage_kV, device)
 
 
 

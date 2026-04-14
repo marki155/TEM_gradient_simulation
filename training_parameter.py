@@ -95,6 +95,8 @@ class TrainMethod:
     loss_fft: float = 0.0
 
     occ_entropy_a: float = 1.0
+    position_shifts_regularization_a: float = 1.0
+    strain_energy_a: float = 0.0
 
     train_amplitude_contrast: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
 
@@ -108,7 +110,8 @@ class TrainMethod:
     train_W_occupancies: TrainParam = field(default_factory=lambda: TrainParam(False, .1))
     train_S2_occupancies: TrainParam = field(default_factory=lambda: TrainParam(False, .1))
 
-    WS2_strain_field: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
+    Gr_strain_field: TrainParam = field(default_factory=lambda: TrainParam(False, .1))
+    WS2_strain_field: TrainParam = field(default_factory=lambda: TrainParam(False, .1))
 
     graphen_shift: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-9))
     graphen_rotation: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-9))

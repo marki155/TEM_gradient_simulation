@@ -233,7 +233,10 @@ class TrainingWorker(QtCore.QObject):
         if p_diff is not None:
             p_diff_np = p_diff.detach().cpu().numpy()
 
-        strain_maps = self.pot_layer.ws2_displacement.strain_maps()
+        show_strain_map_idx = self.train_method.only_train_small_area
+        if self.train_method.only_train_small_area < 0:
+            show_strain_map_idx = 1
+        strain_maps = self.pot_layer.strain_fields[show_strain_map_idx].strain_maps()
 
         potential_maps, _ = self.pot_layer(None)
 
@@ -495,8 +498,8 @@ class MplCanvas(FigureCanvasQTAgg):
         else:
             x_min = 0
             y_min = 0
-            x_max = payload.target_img.shape[1]
-            y_max = payload.target_img.shape[0]
+            x_max = payload.target_img.shape[0]
+            y_max = payload.target_img.shape[1]
 
 
         if _idx == 0:

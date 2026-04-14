@@ -1,5 +1,7 @@
 from dataclasses import dataclass, asdict, fields, is_dataclass
+from typing import List
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.fft as fft
@@ -23,6 +25,14 @@ class ParticlesTunableParameters:
     potential_parameters: TunablePotentialParameters
     ctf_parameters: TunableCTFParameters
     normalisation_parameters: nn.Parameter
+
+@dataclass
+class ParticlesConfig:
+    init_positions: List[np.ndarray]
+    init_intensities: List[np.ndarray]
+    shape: tuple
+    pixel_size_nm: float
+    wavelength_nm: float
 
 
 
@@ -76,8 +86,8 @@ def _safe_paramlist_slice(param_list, start: int, stop=None):
     return _flatten_params(items)
 
 
-def _collect_ws2_strain_params(ws2_displacement):
-    return _flatten_params(ws2_displacement)
+def _collect_strain_params(displacement):
+    return _flatten_params(displacement)
 
 def get_trainmethod_param_registry(params: ParticlesTunableParameters):
     pot = params.potential_parameters
@@ -95,9 +105,10 @@ def get_trainmethod_param_registry(params: ParticlesTunableParameters):
         "WS2_scale": lambda: [pot.scale_WS2],
 
         # Strain / free positions
-        "WS2_strain_field": lambda: _collect_ws2_strain_params(pot.ws2_displacement),
-        "graphen_free_positions": lambda: pot.positions[0],
-        "WS2_free_positions": lambda: pot.positions[1:],
+        "Gr_strain_field": lambda: _collect_strain_params(pot.strain_fields[0]),
+        "WS2_strain_field": lambda: _collect_strain_params(pot.strain_fields[1]),
+        "graphen_free_positions": lambda: pot.position_shifts[0],
+        "WS2_free_positions": lambda: pot.position_shifts[1:],
 
         # Intensities
         "train_graphen_intensities": lambda: _safe_index_paramlist(pot.intensities, 0),
@@ -261,15 +272,27 @@ class NN_free_potential(nn.Module):
                                                 target_image.shape[1])
         return simulated_image, F.mse_loss(simulated_image, target_image)
 
-
+@dataclass
+class ParticlesConfig:
+    init_positions: List[np.ndarray]
+    init_intensities: List[np.ndarray]
+    z_positions_nm: List[float]
+    shape: tuple
+    pixel_size_nm: float
+    wavelength_nm: float
+    dz: float
+    voltage_kV: float
+    init_aberrations: dict
+    init_ctf_env_params: dict
+    init_amp_contrast: float
+    ctf_alpha_max_mrad: float
 
 
 class NN_particles(nn.Module):
-    def __init__(self, image_shape, fov, voltage_kV, train_method, device='cpu', train_methods=None):
+    def __init__(self, image_shape, pixel_size_nm, voltage_kV, train_method, device='cpu', train_methods=None):
         super().__init__()
         self.shape = image_shape
-        self.fov = fov
-        self.pixel_size_nm = fov / image_shape[0]
+        self.pixel_size_nm = pixel_size_nm
         self.voltage_kV = voltage_kV
         self.device = device
         self.train_method = train_method
@@ -339,26 +362,6 @@ class NN_particles(nn.Module):
         print(p_loaded)
 
     def build_multislice(self, init_positions, init_intensities, dz, max_shifts=None, max_rotations=None):
-        H = self.shape[0]
-        W = self.shape[1]
-
-        potential_layer = DifferentiablePotential(self.train_method, init_positions, init_intensities,self.shape, self.pixel_size_nm,
-                                                  self.wavelength_nm, device=self.device,
-                                                  max_shifts=max_shifts, max_rotations=max_rotations)
-
-
-        multislice = DifferentiableMultislice(
-            dz=dz,
-            shape=self.shape,
-            pixel_size_nm=self.pixel_size_nm,
-            wavelength_nm=self.wavelength_nm,
-            device=self.device,
-            train_method=self.train_method,
-            voltage_kV=self.voltage_kV
-        )
-
-        aberrations = {'C10': -57., 'C12': 1.0, 'C23': 3.0e3,
-                       'C21': 50.0e3, 'C30': 5.0e3, 'C34': 20.0e3, 'C32': 50.0e3}
 
 
 
@@ -366,28 +369,45 @@ class NN_particles(nn.Module):
                        'C12': 1.0, "phi12": 0.,
                        'C23': 2., 'phi23': 0.,
                        'C21': 2., 'phi21': 0.,
-                       "C30": 4., #um
-                       'C34': .02, 'phi34': 0., #um
-                       'C45': .05, 'phi45': 0.} #um
-
-        #aberrations = {'C10': -7., 'C30': 5.}
-        #aberrations = {'C10': -13., 'C30': 2.}
-
-
+                       "C30": 4.,  # um
+                       'C34': .02, 'phi34': 0.,  # um
+                       'C45': .05, 'phi45': 0.}  # um
 
         env_params = {
             'source_size': 0.1e-3,  # rad
-            'Cc_um': 1.e3 ,  # um
-            'deltaE': .35 ,  # eV
+            'Cc_um': 1.e3,  # um
+            'deltaE': .35,  # eV
             'instab_defocus_nm': .01,  # nm
             'use_detector': False,
         }
 
         amp_contrast = .1
-        ctf_layer = CTFLayer(H, W, self.pixel_size_nm, self.voltage_kV, self.wavelength_nm,
-                            amp_contrast,
-                             aberrations=aberrations,
-                             envelope_params=env_params,
+
+        z_positions_nm = [
+            0.00,  # Graphen
+            0.33,  # S1
+            0.488,  # W
+            0.646,  # S2
+        ]
+
+        config = ParticlesConfig(init_positions=init_positions, init_intensities=init_intensities,
+                                           shape=self.shape, pixel_size_nm=self.pixel_size_nm,
+                                            z_positions_nm=z_positions_nm,
+                                           wavelength_nm=self.wavelength_nm, dz=dz, voltage_kV=self.voltage_kV,
+                                           init_aberrations=aberrations, init_ctf_env_params=env_params,
+                                           init_amp_contrast=amp_contrast, ctf_alpha_max_mrad=50.)
+        potential_layer = DifferentiablePotential(config, self.train_method, device=self.device,
+                                                  max_shifts=max_shifts, max_rotations=max_rotations)
+
+
+        multislice = DifferentiableMultislice(
+            config,
+            train_method=self.train_method,
+            device=self.device)
+
+
+
+        ctf_layer = CTFLayer(config,
                              device=self.device,
                              train_method=self.train_method)
 
