@@ -4,20 +4,17 @@ from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.fft as fft
 import torch.nn.functional as F
 import math
 import json
 
 
-from losses import RadialPowerSpectrumLoss, NCCLoss, SSIMLoss, LocalNCCLoss, FFTBraggLoss, \
+from losses import NCCLoss, SSIMLoss, LocalNCCLoss, FFTBraggLoss, \
     LocalDifferenceVarianceLoss
 from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
-from simulation import Simulation
 
 from ctf import CTFLayer, TunableCTFParameters
-from torch.nn.functional import max_pool2d
 
 
 @dataclass
@@ -487,17 +484,17 @@ class NN_particles(nn.Module):
 
         return energy
 
-    def calc_error(self, simulation, image, imageHeight, imageWidth):
-        error = torch.sum((torch.mean(simulation) - simulation) * (torch.mean(image) - image)) / \
-                     (torch.std(simulation) * torch.std(image) * (imageHeight * imageWidth - 1))
+    def calc_error(self, simulation, image, mask=None):
+        #error = torch.sum((torch.mean(simulation) - simulation) * (torch.mean(image) - image)) / \
+        #             (torch.std(simulation) * torch.std(image) * (imageHeight * imageWidth - 1))
 
         loss_var = LocalDifferenceVarianceLoss(win_size=100, reduction="mean")
         loss_fft = FFTBraggLoss()
         #loss, P_diff = loss_fn(simulation.unsqueeze(0).unsqueeze(0),  # → (1, 1, H, W)
         #               image.unsqueeze(0).unsqueeze(0))
 
-        error = torch.corrcoef(torch.stack([simulation.flatten(), image.flatten()]))[0, 1]
-        diff_image = (simulation - image)
+        #error = torch.corrcoef(torch.stack([simulation.flatten(), image.flatten()]))[0, 1]
+        #diff_image = (simulation - image)
 
         ncc_loss = NCCLoss()
         ssim_loss = SSIMLoss(data_range=1.0)
@@ -523,7 +520,7 @@ class NN_particles(nn.Module):
         if a_mse > 0:
              total_loss += a_mse * loss_MSE(sim, tt)
         if a_ncc > 0:
-             total_loss += a_ncc * ncc_loss(sim, tt)
+             total_loss += a_ncc * ncc_loss(sim, tt, mask)
         if a_local_ncc_100 > 0:
              total_loss += a_local_ncc_100 * local_ncc_loss_100(sim, tt)
         if a_local_ncc_50 > 0:
@@ -538,7 +535,7 @@ class NN_particles(nn.Module):
             _loss_fft, P_diff = loss_fft(sim, tt)
             total_loss += a_fft * _loss_fft
         if a_var > 0:
-             total_loss += a_var * loss_var(sim, tt)
+             total_loss += a_var * loss_var(sim, tt, mask)
         return  total_loss, P_diff
 
     def normalize_images(
@@ -566,11 +563,13 @@ class NN_particles(nn.Module):
         else:
             ref_idx = 0
 
-        x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[ref_idx]
-
+        #x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[ref_idx]
+        mask_img = self.train_methods.area_masks[ref_idx]
         # Referenzbereiche nur für Statistik
-        sim_ref = simulated_image[x_min:x_max, y_min:y_max]
-        tgt_ref = target_image[x_min:x_max, y_min:y_max]
+        #sim_ref = simulated_image[x_min:x_max, y_min:y_max]
+        #tgt_ref = target_image[x_min:x_max, y_min:y_max]
+        sim_ref = simulated_image[mask_img > 0]
+        tgt_ref = target_image[mask_img > 0]
 
         if self.train_methods.train_normalisation_parameters:
             norm_params = self.tunable_parameters.normalisation_parameters
@@ -601,7 +600,7 @@ class NN_particles(nn.Module):
 
         return simulated_image, target_image
 
-    def loss_multislice(self, target_image, brightness=None, contrast=None):
+    def loss_multislice(self, target_image):
         """Berechnet den Unterschied zwischen Simulation und Zielbild."""
         #intensities = torch.pow(self.intensities, self.contrast)
 
@@ -613,11 +612,19 @@ class NN_particles(nn.Module):
 
         if train_area_idx >= 0:
             # train_small_area_square = [(500, 600), (1000, 1000)]
-            x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[train_area_idx]
-            simulated_image = simulated_image[x_min:x_max,y_min:y_max]
-            target_image = target_image[x_min:x_max, y_min:y_max]
+            #x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[train_area_idx]
+            #simulated_image = simulated_image[x_min:x_max,y_min:y_max]
+            #target_image = target_image[x_min:x_max, y_min:y_max]
+            mask_img = self.train_methods.area_masks[train_area_idx]
+            simulated_image_masked = simulated_image * mask_img
+            target_image_masked = target_image * mask_img
+            #simulated_image[mask_img == 0] = float("nan")
+            #target_image[mask_img == 0] = float("nan")
+        else:
+            mask_img = None
+            simulated_image_masked = simulated_image
+            target_image_masked = target_image
 
+        rec_error, P_diff = self.calc_error(simulated_image, target_image, mask=mask_img)
 
-        rec_error, P_diff = self.calc_error(simulated_image, target_image, target_image.shape[0], target_image.shape[1])
-
-        return simulated_image, target_image, P_diff, rec_error + aux_loss
+        return simulated_image_masked, target_image_masked, P_diff, rec_error + aux_loss

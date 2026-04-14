@@ -391,8 +391,9 @@ class DifferentiablePotential(nn.Module):
             # Rotation um den Mittelpunkt der Graphen-Positionen
 
             #center = torch.tensor((self.H/2, self.W/2), device=self.device)
-            x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[idx_s_r]
-            center = torch.tensor([(x_min + x_max) / 2, (y_min + y_max) / 2], device=self.device)
+            area_mask = self.train_methods.area_masks[idx_s_r]
+            #center = torch.tensor([(x_min + x_max) / 2, (y_min + y_max) / 2], device=self.device)
+            center = torch.tensor((self.H/2, self.W/2), device=self.device)
 
 
             if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation.enabled) or
@@ -465,20 +466,16 @@ class DifferentiablePotential(nn.Module):
         return W.mean()
 
 
-    def occupy_layers_in_area(self, area, layers):
-        x0, y0, x1, y1 = area
+    def occupy_layers_in_area(self, mask, layers):
         pad = 100
-        x0 -= pad
-        x1 += pad
-        y0 -= pad
-        y1 += pad
         for l in layers:
             pos = self.get_positions()[l]#self.tunable_parameters.positions[l]
             xs, ys = pos[:,0], pos[:,1]
             for i in range(pos.shape[0]):
-                if (xs[i] >= x0 and xs[i] <= x1) and \
-                        (ys[i] >= y0 and ys[i] <= y1):
-                    self.tunable_parameters.occupancies[l][i] = -100
+                x, y = int(xs[i]), int(ys[i])
+                if x >= 0 and x < self.H and y >= 0 and y < self.W:
+                    if mask[x, y]:
+                        self.tunable_parameters.occupancies[l][i] = -100
 
 
     def get_positions_old(self):
@@ -582,9 +579,11 @@ class DifferentiablePotential(nn.Module):
         positions = self.get_positions()[pos_idx].cpu().detach().cpu().numpy()
         if filter_by_area:
             idx = self.train_method.only_train_small_area
-            x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[idx]
-            mask = ((positions[:, 0] >= x_min) & (positions[:, 0] <= x_max) &
-                    (positions[:, 1] >= y_min) & (positions[:, 1] <= y_max))
+            #x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[idx]
+            #mask = ((positions[:, 0] >= x_min) & (positions[:, 0] <= x_max) &
+            #        (positions[:, 1] >= y_min) & (positions[:, 1] <= y_max))
+            mask_img = self.train_methods.area_masks[idx]
+            mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)]
             positions = positions[mask]
             intensities = intensities[mask]
             #pos_idx = mask.nonzero(as_tuple=True)[0]

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class LocalDifferenceVarianceLoss(nn.Module):
-    def __init__(self, win_size=8, reduction="mean", minimize=True):
+    def __init__(self, win_size=8, reduction="mean", minimize=True, eps=1e-8):
         """
         Varianz der Differenz zweier Bilder auf nicht überlappenden Patches.
 
@@ -13,16 +13,49 @@ class LocalDifferenceVarianceLoss(nn.Module):
             minimize:
                 True  -> kleine Varianz belohnen
                 False -> große Varianz belohnen
+            eps: numerische Stabilität
         """
         super().__init__()
         self.win_size = win_size
         self.reduction = reduction
         self.minimize = minimize
+        self.eps = eps
 
-    def forward(self, x1, x2):
+    def _prepare_mask(self, mask: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        Bringt mask auf Shape [B, C, H, W] und castet zu x.dtype.
+        Erlaubte Eingaben:
+          - [H, W]
+          - [1, 1, H, W]
+          - [B, 1, H, W]
+          - [B, C, H, W]
+        """
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0).unsqueeze(0)
+        elif mask.ndim != 4:
+            raise ValueError(f"mask must have ndim 2 or 4, got {mask.ndim}")
+
+        if mask.shape[-2:] != x.shape[-2:]:
+            raise ValueError(
+                f"mask spatial shape must match x1/x2. Got mask {mask.shape}, x {x.shape}"
+            )
+
+        mask = mask.to(device=x.device, dtype=x.dtype)
+
+        try:
+            mask = torch.broadcast_to(mask, x.shape)
+        except RuntimeError as e:
+            raise ValueError(
+                f"mask with shape {mask.shape} is not broadcastable to x shape {x.shape}"
+            ) from e
+
+        return mask
+
+    def forward(self, x1, x2, mask: torch.Tensor = None):
         """
         Args:
             x1, x2: Tensoren mit Shape (B, C, H, W)
+            mask: gültige Pixel, 1=True/verwenden, 0=False/ignorieren
 
         Returns:
             Loss-Skalar oder Tensor mit Patch-Varianzen
@@ -55,24 +88,79 @@ class LocalDifferenceVarianceLoss(nn.Module):
 
         diff = x1 - x2
 
-        # In nicht überlappende Patches zerlegen:
-        # (B, C, H, W) -> (B, C, nH, ws, nW, ws)
-        diff = diff.view(b, c, h_crop // ws, ws, w_crop // ws, ws)
+        if mask is None:
+            # Originalverhalten
+            diff = diff.view(b, c, h_crop // ws, ws, w_crop // ws, ws)
+            diff = diff.permute(0, 1, 2, 4, 3, 5).contiguous()
+            diff = diff.view(b, c, h_crop // ws, w_crop // ws, ws * ws)
 
-        # Patchdimensionen zusammenfassen:
-        # (B, C, nH, nW, ws*ws)
-        diff = diff.permute(0, 1, 2, 4, 3, 5).contiguous()
-        diff = diff.view(b, c, h_crop // ws, w_crop // ws, ws * ws)
+            patch_var = diff.var(dim=-1, unbiased=False)
+        else:
+            # erst auf Original-Shape vorbereiten oder direkt passend croppen
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(0).unsqueeze(0)
+            elif mask.ndim != 4:
+                raise ValueError(f"mask must have ndim 2 or 4, got {mask.ndim}")
 
-        # Varianz innerhalb jedes Patches
-        patch_var = diff.var(dim=-1, unbiased=False)
+            # zuerst nur prüfen, dass die Original-Spatial-Dims passen
+            if mask.shape[-2:] != (h, w):
+                raise ValueError(
+                    f"mask spatial shape must match original x1/x2 shape. "
+                    f"Got mask {mask.shape}, expected (*, *, {h}, {w})"
+                )
+
+            mask = mask.to(device=x1.device, dtype=x1.dtype)
+
+            # dann genauso croppen wie x1/x2
+            mask = mask[:, :, :h_crop, :w_crop]
+
+            # jetzt broadcast auf die gecroppte x1-Shape
+            try:
+                mask = torch.broadcast_to(mask, x1.shape)
+            except RuntimeError as e:
+                raise ValueError(
+                    f"mask with shape {mask.shape} is not broadcastable to cropped x shape {x1.shape}"
+                ) from e
+
+            # In nicht überlappende Patches zerlegen
+            diff = diff.view(b, c, h_crop // ws, ws, w_crop // ws, ws)
+            diff = diff.permute(0, 1, 2, 4, 3, 5).contiguous()
+            diff = diff.view(b, c, h_crop // ws, w_crop // ws, ws * ws)
+
+            m = mask.view(b, c, h_crop // ws, ws, w_crop // ws, ws)
+            m = m.permute(0, 1, 2, 4, 3, 5).contiguous()
+            m = m.view(b, c, h_crop // ws, w_crop // ws, ws * ws)
+
+            valid_count = m.sum(dim=-1)  # [B, C, nH, nW]
+            valid_count_safe = valid_count.clamp_min(1.0)
+
+            mean = (diff * m).sum(dim=-1) / valid_count_safe
+            mean = mean.unsqueeze(-1)
+
+            sq_dev = ((diff - mean) ** 2) * m
+            patch_var = sq_dev.sum(dim=-1) / valid_count_safe
+
+            # Leere Patches auf 0 setzen
+            patch_var = torch.where(valid_count > 0, patch_var, torch.zeros_like(patch_var))
 
         if self.reduction == "mean":
-            loss = patch_var.mean()
+            if mask is None:
+                loss = patch_var.mean()
+            else:
+                # nur nicht-leere Patches mitteln
+                valid_patch_mask = (valid_count > 0).to(patch_var.dtype)
+                denom = valid_patch_mask.sum().clamp_min(1.0)
+                loss = (patch_var * valid_patch_mask).sum() / denom
+
         elif self.reduction == "sum":
-            loss = patch_var.sum()
+            if mask is None:
+                loss = patch_var.sum()
+            else:
+                loss = patch_var.sum()
+
         elif self.reduction == "none":
             loss = patch_var
+
         else:
             raise ValueError(f"Unbekannte reduction: {self.reduction}")
 
@@ -201,9 +289,41 @@ class NCC(nn.Module):
         self.eps = eps
         self.size_average = size_average
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor):
+    def _prepare_mask(self, mask: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        Bringt mask auf Shape [B, C, H, W] und castet zu x.dtype.
+        Erlaubte Eingaben:
+          - [H, W]
+          - [1, 1, H, W]
+          - [B, 1, H, W]
+          - [B, C, H, W]
+        """
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+        elif mask.ndim != 4:
+            raise ValueError(f"mask must have ndim 2 or 4, got {mask.ndim}")
+
+        if mask.shape[-2:] != x.shape[-2:]:
+            raise ValueError(
+                f"mask spatial shape must match x/y. Got mask {mask.shape}, x {x.shape}"
+            )
+
+        mask = mask.to(device=x.device, dtype=x.dtype)
+
+        # Broadcast auf [B, C, H, W]
+        try:
+            mask = torch.broadcast_to(mask, x.shape)
+        except RuntimeError as e:
+            raise ValueError(
+                f"mask with shape {mask.shape} is not broadcastable to x shape {x.shape}"
+            ) from e
+
+        return mask
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor = None):
         """
         x, y: [B, C, H, W]
+        mask: gültige Pixel, 1=True/verwenden, 0=False/ignorieren
         returns normalized cross-correlation in [-1, 1]
         """
         if x.shape != y.shape:
@@ -211,21 +331,50 @@ class NCC(nn.Module):
         if x.ndim != 4:
             raise ValueError(f"Expected 4D tensors [B,C,H,W], got ndim={x.ndim}")
 
-        x_flat = x.flatten(start_dim=1)
-        y_flat = y.flatten(start_dim=1)
+        if mask is None:
+            x_flat = x.flatten(start_dim=1)
+            y_flat = y.flatten(start_dim=1)
 
-        x_mean = x_flat.mean(dim=1, keepdim=True)
-        y_mean = y_flat.mean(dim=1, keepdim=True)
+            x_mean = x_flat.mean(dim=1, keepdim=True)
+            y_mean = y_flat.mean(dim=1, keepdim=True)
 
-        x_centered = x_flat - x_mean
-        y_centered = y_flat - y_mean
+            x_centered = x_flat - x_mean
+            y_centered = y_flat - y_mean
 
-        numerator = (x_centered * y_centered).sum(dim=1)
-        denominator = torch.sqrt(
-            (x_centered ** 2).sum(dim=1) * (y_centered ** 2).sum(dim=1)
-        ) + self.eps
+            numerator = (x_centered * y_centered).sum(dim=1)
+            denominator = torch.sqrt(
+                (x_centered ** 2).sum(dim=1) * (y_centered ** 2).sum(dim=1)
+            ) + self.eps
 
-        ncc = numerator / denominator
+            ncc = numerator / denominator
+        else:
+            mask = self._prepare_mask(mask, x)
+
+            x_flat = x.flatten(start_dim=1)          # [B, N]
+            y_flat = y.flatten(start_dim=1)          # [B, N]
+            m_flat = mask.flatten(start_dim=1)       # [B, N]
+
+            valid_count = m_flat.sum(dim=1, keepdim=True)  # [B, 1]
+
+            # Schutz gegen leere Masken
+            valid_count_safe = valid_count.clamp_min(1.0)
+
+            x_mean = (x_flat * m_flat).sum(dim=1, keepdim=True) / valid_count_safe
+            y_mean = (y_flat * m_flat).sum(dim=1, keepdim=True) / valid_count_safe
+
+            x_centered = (x_flat - x_mean) * m_flat
+            y_centered = (y_flat - y_mean) * m_flat
+
+            numerator = (x_centered * y_centered).sum(dim=1)
+            denominator = torch.sqrt(
+                (x_centered ** 2).sum(dim=1) * (y_centered ** 2).sum(dim=1)
+            ) + self.eps
+
+            ncc = numerator / denominator
+
+            # Falls ein Sample gar keine gültigen Pixel hat -> NCC = 0
+            has_valid = (valid_count.squeeze(1) > 0)
+            ncc = torch.where(has_valid, ncc, torch.zeros_like(ncc))
 
         if self.size_average:
             return ncc.mean()
@@ -237,9 +386,9 @@ class NCCLoss(nn.Module):
         super().__init__()
         self.ncc = NCC(eps=eps, size_average=size_average)
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor):
+    def forward(self, x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor = None):
         # Maximieren von NCC = Minimieren von 1 - NCC
-        return 1.0 - self.ncc(x, y)
+        return 1.0 - self.ncc(x, y, mask)
 
 
 import torch

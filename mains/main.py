@@ -30,6 +30,13 @@ if __name__ == '__main__':
     image = tifffile.imread(os.path.join(path, "target.tif"))
     image[np.where(image == 0.0)] = np.median(image)
 
+    gr_mask = tifffile.imread(os.path.join(path, "gr_mask.tif"))
+    gr_mask = gr_mask > 0
+    gr_mask = torch.tensor(gr_mask)
+    ws2_mask = tifffile.imread(os.path.join(path, "ws2_mask.tif"))
+    ws2_mask = ws2_mask > 0
+    ws2_mask = torch.tensor(ws2_mask)
+
     H, W = image.shape
 
     max_rot_graphen = np.deg2rad(10)
@@ -142,7 +149,7 @@ if __name__ == '__main__':
     max_target = torch.max(target)
     target = (target - min_target) / (max_target - min_target)
 
-    train_method = TrainMethod()
+    train_method = TrainMethod(area_masks=[gr_mask, ws2_mask])
 
     model = NN_particles(
         image_shape=image.shape,
@@ -164,7 +171,7 @@ if __name__ == '__main__':
     ctf_layer = model.model[2]
     pot_layer = model.model[0]
 
-    pot_layer.occupy_layers_in_area(train_method.train_small_area_squares[0], [1, 2, 3])
+    pot_layer.occupy_layers_in_area(gr_mask, [1, 2, 3])
 
     #optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 

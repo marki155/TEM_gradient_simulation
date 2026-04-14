@@ -1,4 +1,8 @@
 from dataclasses import dataclass, field
+from typing import List
+
+import numpy as np
+import torch
 
 
 @dataclass
@@ -84,6 +88,9 @@ class TrainParam:
 
 @dataclass
 class TrainMethod:
+    area_masks: List[torch.tensor]
+
+
     loss_var: float = 0.5
     loss_mse: float = 0.0
     loss_ncc: float = 0.5
@@ -141,4 +148,4 @@ class TrainMethod:
     train_normalisation_parameters: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-5))
 
     only_train_small_area: int = 1
-    train_small_area_squares = [(50, 50, 350, 350), (600, 600, 1000, 1000)]
+    #train_small_area_squares = [(50, 50, 350, 350), (600, 600, 1000, 1000)]

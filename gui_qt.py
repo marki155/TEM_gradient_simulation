@@ -289,9 +289,7 @@ class TrainingWorker(QtCore.QObject):
             self.sync_optimizer_lrs_from_train_method()
             #self._set_optimizer_lrs()
 
-            simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
-                self.target, self.brightness, self.contrast
-            )
+            simulated_image, target_image, p_diff, loss = self.model.loss_multislice(self.target)
             try:
                 loss.backward()
             except:
@@ -347,11 +345,12 @@ class TrainingWorker(QtCore.QObject):
 
 
 class MplCanvas(FigureCanvasQTAgg):
-    def __init__(self, target_tensor=None, parent=None):
+    def __init__(self, target_tensor=None, parent=None, train_method=None):
         self.fig = Figure(figsize=(12, 8), dpi=100, constrained_layout=True)
         self.axes = [self.fig.add_subplot(3, 5, i + 1) for i in range(15)]
         super().__init__(self.fig)
         self.setParent(parent)
+        self.train_method = train_method
 
         for ax in self.axes:
             ax.set_xticks([])
@@ -493,13 +492,11 @@ class MplCanvas(FigureCanvasQTAgg):
 
 
         _idx = idx if idx >= 0 else 1
-        if idx >= 0:
-            x_min, y_min, x_max, y_max = payload.train_method.train_small_area_squares[_idx]
-        else:
-            x_min = 0
-            y_min = 0
-            x_max = payload.target_img.shape[0]
-            y_max = payload.target_img.shape[1]
+
+        x_min = 0
+        y_min = 0
+        x_max = payload.target_img.shape[0]
+        y_max = payload.target_img.shape[1]
 
 
         if _idx == 0:
@@ -516,10 +513,16 @@ class MplCanvas(FigureCanvasQTAgg):
             pos = np.concatenate(poses, axis=0)
             ints = np.concatenate(intss, axis=0)
 
-        mask = ((pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) &
+        mask_borders = ((pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) &
                 (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max))
-        positions = pos[mask]
-        intensities = ints[mask]
+        positions = pos[mask_borders]
+        intensities = ints[mask_borders]
+
+        mask_img = self.train_method.area_masks[_idx].cpu().numpy()
+        mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)]
+
+        positions = positions[mask]
+        intensities = intensities[mask]
 
         return (positions[:,0] - x_min, positions[:,1]-y_min), intensities
 
@@ -537,11 +540,8 @@ class MplCanvas(FigureCanvasQTAgg):
             self.axes_cmap["target"].set_title("Target")
             pos, ints = self.get_pos_and_ints(payload)
 
-            idx = payload.train_method.only_train_small_area
-            if idx < 0:
-                ss = 1
-            else:
-                ss = 5
+
+            ss = 0.5
 
             self.axes_cmap["target"].scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=ss)
             #self.im_tgt_sc.set_offsets(pos)
@@ -724,7 +724,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.parameter_frame.parameter_tuned.connect(self._trigger_heavy_refresh)
         left.addWidget(self.parameter_frame, stretch=0)
 
-        self.canvas = MplCanvas(target_tensor=self.target)
+        self.canvas = MplCanvas(target_tensor=self.target, train_method=self.train_method)
         left.addWidget(self.canvas, stretch=1)
 
 
