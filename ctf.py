@@ -171,10 +171,13 @@ class CTFLayer(nn.Module):
 
         self.tunable_parameters = TunableCTFParameters()
 
+        pad = config.padding
+        self.pad = pad
+
 
         # Frequenzen in 1/nm
-        fx = torch.fft.fftshift(torch.linspace(-.5/config.pixel_size_nm, .5/config.pixel_size_nm, self.H, device=device))
-        fy = torch.fft.fftshift(torch.linspace(-.5/config.pixel_size_nm, .5/config.pixel_size_nm, self.W, device=device))
+        fx = torch.fft.fftshift(torch.linspace(-.5/config.pixel_size_nm, .5/config.pixel_size_nm, self.H + 2*pad, device=device))
+        fy = torch.fft.fftshift(torch.linspace(-.5/config.pixel_size_nm, .5/config.pixel_size_nm, self.W + 2*pad, device=device))
         kx, ky = torch.meshgrid(fx, fy, indexing='ij')
 
         k = torch.sqrt(kx ** 2 + ky ** 2)
@@ -278,7 +281,8 @@ class CTFLayer(nn.Module):
 
 
         wave_out = torch.fft.ifft2(wave_out_ft)
-        return wave_out.abs(), input[1]
+        pad = self.pad
+        return wave_out.abs()[pad:self.H+pad, pad:self.W+pad], input[1]
 
     def to_diffraction_patterns(self, max_angle_mrad=None, gpts=None):
         """

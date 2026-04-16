@@ -39,6 +39,7 @@ class VizPayload:
     sim_img: Optional[np.ndarray] = None
     diff_img: Optional[np.ndarray] = None
     target_img: Optional[np.ndarray] = None
+    mask_img: Optional[np.ndarray] = None
 
     ctf_phase: Optional[np.ndarray] = None
     ring_mask: Optional[np.ndarray] = None
@@ -70,8 +71,6 @@ class TrainingWorker(QtCore.QObject):
         model,
         optimizer,
         target,
-        brightness,
-        contrast,
         pot_layer,
         ctf_layer,
         train_method,
@@ -85,8 +84,6 @@ class TrainingWorker(QtCore.QObject):
         self.model = model
         self.optimizer = optimizer
         self.target = target
-        self.brightness = brightness
-        self.contrast = contrast
         self.pot_layer = pot_layer
         self.ctf_layer = ctf_layer
         self.train_method = train_method
@@ -101,8 +98,6 @@ class TrainingWorker(QtCore.QObject):
         self._pause = False
         self.losses = []
 
-        self._heavy_refresh_running = False
-        self._heavy_refresh_pending = False
 
     def _set_optimizer_lr(self):
         lr = None
@@ -186,12 +181,9 @@ class TrainingWorker(QtCore.QObject):
         self.parameter_update.emit(self.model.get_tunable_parameters())
 
     def build_heavy_payload(self, step: int, loss_item: float, simulated_image, target_image, p_diff):
-        if self._heavy_refresh_running:
-            self._heavy_refresh_pending = True
-            return
-
-        self._heavy_refresh_running = True
-
+        target_image, mask_img = self.model.get_current_target_and_mask_img(target_image)
+        if mask_img is not None:
+            mask_img = mask_img.detach().cpu().numpy()
         sim_img = simulated_image.detach().cpu().numpy()
         tgt_img = target_image.detach().cpu().numpy()
         diff_img = sim_img - tgt_img
@@ -245,6 +237,8 @@ class TrainingWorker(QtCore.QObject):
             pot_i_blurred = gaussian_filter(pot_i.detach().cpu().numpy(), sigma=5.0)
             pot_imgs.append(pot_i_blurred)
 
+
+
         payload = VizPayload(
             step=step,
             loss=loss_item,
@@ -252,6 +246,7 @@ class TrainingWorker(QtCore.QObject):
             sim_img=sim_img,
             diff_img=diff_img,
             target_img=tgt_img,
+            mask_img=mask_img,
             ctf_phase=ctf_phase,
             ring_mask=ring,
             p_diff=p_diff_np,
@@ -264,9 +259,6 @@ class TrainingWorker(QtCore.QObject):
             strain_maps=strain_maps,
             potential_maps=pot_imgs
         )
-        self._heavy_refresh_running = False
-        if self._heavy_refresh_pending:
-            self._heavy_refresh_pending = False
         return payload
 
     @QtCore.Slot()
@@ -352,15 +344,65 @@ class MplCanvas(FigureCanvasQTAgg):
         self.setParent(parent)
         self.train_method = train_method
 
+        self.target_tensor = target_tensor
+
+        self.full_canvas_target_mode = False
+        self.full_target_ax = None
+        self.full_target_im = None
+        self.full_target_scatter = None
+
+        self.show_positions_on_target = True
+
+        self._rebuild_layout()
+
+    def set_full_canvas_target_mode(self, enabled: bool):
+        if self.full_canvas_target_mode == enabled:
+            return
+
+        self.full_canvas_target_mode = enabled
+        self._rebuild_layout()
+        self.draw_idle()
+        #self.parent._trigger_heavy_refresh()
+
+
+    def _rebuild_layout(self):
+        self.fig.clear()
+
+        if self.full_canvas_target_mode:
+            ax_target = self.fig.add_subplot(1, 2, 2)
+            ax_loss = self.fig.add_subplot(1, 2 ,1)
+            ax_target.set_xticks([])
+            ax_target.set_yticks([])
+            ax_target.set_title("Target")
+
+            self.full_target_ax = ax_target
+            self.full_target_im = ax_target.imshow(
+                np.zeros((64, 64), dtype=np.float32),
+                cmap="viridis",
+                origin="lower"
+            )
+            self.full_target_scatter = ax_target.scatter([], [], c="red", s=1)
+
+
+            self.axes_cmap = {"loss": ax_loss, "target_full": ax_target}
+            self.loss_line, = self.axes_cmap["loss"].plot([], [])
+            self.axes_cmap["loss"].set_xlabel("Step")
+            self.axes_cmap["loss"].set_ylabel("Loss")
+            return
+
+        # ---------- Normalmodus ----------
+        self.axes = [self.fig.add_subplot(3, 5, i + 1) for i in range(15)]
         for ax in self.axes:
             ax.set_xticks([])
             ax.set_yticks([])
 
-
-        self.axes_cmap = {"loss": self.axes[0], "sim": self.axes[1], "diff": self.axes[2], "target": self.axes[3], "ctf": self.axes[4],
-                         "pot0": self.axes[5], "pot1": self.axes[6], "pot2": self.axes[7], "pot3": self.axes[8],
-                         "hist": self.axes[9], "ux": self.axes[10], "uy": self.axes[11],
-                         "eps_xx": self.axes[12], "eps_yy": self.axes[13], "eps_xy": self.axes[14]}
+        self.axes_cmap = {
+            "loss": self.axes[0], "sim": self.axes[1], "diff": self.axes[2], "target": self.axes[3],
+            "ctf": self.axes[4],
+            "pot0": self.axes[5], "pot1": self.axes[6], "pot2": self.axes[7], "pot3": self.axes[8],
+            "hist": self.axes[9], "ux": self.axes[10], "uy": self.axes[11],
+            "eps_xx": self.axes[12], "eps_yy": self.axes[13], "eps_xy": self.axes[14]
+        }
 
         self.axes_cmap["loss"].set_title("Loss")
         self.axes_cmap["sim"].set_title("Simulated")
@@ -377,13 +419,8 @@ class MplCanvas(FigureCanvasQTAgg):
         self.axes_cmap["ux"].set_title("ux")
         self.axes_cmap["uy"].set_title("uy")
 
-
-
-
-
-
-        if target_tensor is not None:
-            target_np = target_tensor.detach().cpu().numpy()
+        if self.target_tensor is not None:
+            target_np = self.target_tensor.detach().cpu().numpy()
             dummy = np.zeros_like(target_np, dtype=np.float32)
         else:
             dummy = np.zeros((64, 64), dtype=np.float32)
@@ -434,9 +471,6 @@ class MplCanvas(FigureCanvasQTAgg):
             self.hist_lines.append(line)
         self.axes_cmap["hist"].legend()
 
-
-        self.show_positions_on_target = True
-
     def set_target_rectangles(self, rectangles):
         if rectangles is None:
             return
@@ -465,14 +499,15 @@ class MplCanvas(FigureCanvasQTAgg):
 
     def update_light(self, step: int, loss: float, losses: np.ndarray):
         if len(losses) > 1:
+            loss_ax = self.axes_cmap["loss"]
             xs = np.arange(len(losses), dtype=np.int32)
             self.loss_line.set_data(xs, losses)
-            self.axes[0].relim()
-            self.axes[0].autoscale_view()
+            loss_ax.relim()
+            loss_ax.autoscale_view()
 
-        self.axes[1].set_title(f"Simulated (Step {step})")
-        self.axes[2].set_title(f"Diff (Step {step})")
-        self.axes[3].set_title(f"Target (Step {step})")
+        #self.axes[1].set_title(f"Simulated (Step {step})")
+        #self.axes[2].set_title(f"Diff (Step {step})")
+        #self.axes[3].set_title(f"Target (Step {step})")
 
     def get_only_area_pos(self):
         idx = self.train_method.only_train_small_area
@@ -518,15 +553,31 @@ class MplCanvas(FigureCanvasQTAgg):
         positions = pos[mask_borders]
         intensities = ints[mask_borders]
 
-        mask_img = self.train_method.area_masks[_idx].cpu().numpy()
-        mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)]
+        #mask_img = self.train_method.area_masks[_idx].cpu().numpy()
+        mask_img = payload.mask_img
+        if mask_img is not None:
+            mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)]
 
-        positions = positions[mask]
-        intensities = intensities[mask]
+            positions = positions[mask]
+            intensities = intensities[mask]
 
         return (positions[:,0] - x_min, positions[:,1]-y_min), intensities
 
     def update_heavy(self, payload: VizPayload, ctf_layer=None):
+        if self.full_canvas_target_mode:
+            if payload.target_img is not None:
+                self.full_target_ax.clear()
+                self.full_target_ax.imshow(payload.target_img, cmap="viridis", origin="lower")
+                self.full_target_ax.set_title(f"Target (Step {payload.step})")
+                self.full_target_ax.set_xticks([])
+                self.full_target_ax.set_yticks([])
+
+                pos, ints = self.get_pos_and_ints(payload)
+                if len(ints) > 0:
+                    self.full_target_ax.scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=0.5)
+            return
+
+
         if payload.sim_img is not None:
             self._safe_set_image(self.im_sim, payload.sim_img)
 
@@ -665,8 +716,6 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self,
         model,
         target,
-        brightness,
-        contrast,
         pot_layer,
         ctf_layer,
         train_method,
@@ -676,13 +725,12 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         parent=None,
     ):
         super().__init__(parent)
+        self.updating_gui = False
         self.setWindowTitle("Live Training Qt")
 
         self.model = model
         self.optimizer = model.build_optimizer()
         self.target = target
-        self.brightness = brightness
-        self.contrast = contrast
         self.pot_layer = pot_layer
         self.ctf_layer = ctf_layer
         self.train_method = train_method
@@ -750,6 +798,9 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.resume_btn = QtWidgets.QPushButton("Resume")
         self.stop_btn = QtWidgets.QPushButton("Stop")
 
+        self.full_target_checkbox = QtWidgets.QCheckBox("Target fullscreen")
+
+
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
@@ -758,6 +809,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(self.pause_btn)
         control_layout.addWidget(self.resume_btn)
         control_layout.addWidget(self.stop_btn)
+        control_layout.addWidget(self.full_target_checkbox)
 
         right.addWidget(control_box)
 
@@ -781,16 +833,6 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.editor.graphen_training()
         self._apply_trainable_selection()
-
-        #self._on_scale_x_changed(self.scale_spin_x.value())
-        #self._on_scale_y_changed(self.scale_spin_y.value())
-        #s#elf._on_shift_x_changed(self.shift_spin_x.value())
-        #s#elf._on_shift_y_changed(self.shift_spin_y.value())
-        #s#elf._on_rotation_changed(self.rotation_spin.value())
-
-    def _update_parameters_from_current_params(self):
-        pass
-
 
 
 
@@ -825,6 +867,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.editor.changed.connect(self._apply_trainable_selection)
 
+        self.full_target_checkbox.toggled.connect(self.canvas.set_full_canvas_target_mode)
+
         #self.scale_spin_x.valueChanged.connect(self._on_scale_x_changed)
         #self.scale_spin_y.valueChanged.connect(self._on_scale_y_changed)
         #self.shift_spin_x.valueChanged.connect(self._on_shift_x_changed)
@@ -841,17 +885,14 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     def _graphen_training(self):
         self.editor.graphen_training()
         self._apply_trainable_selection()
-        self._update_parameters_from_current_params()
 
     def _ws2_training(self):
         self.editor.WS2_training()
         self._apply_trainable_selection()
-        self._update_parameters_from_current_params()
 
     def _main_training(self):
         self.editor.main_training()
         self._apply_trainable_selection()
-        self._update_parameters_from_current_params()
 
     def start_training(self):
         if self.thread is not None and self.thread.isRunning():
@@ -862,8 +903,6 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             model=self.model,
             optimizer=self.optimizer,
             target=self.target,
-            brightness=self.brightness,
-            contrast=self.contrast,
             pot_layer=self.pot_layer,
             ctf_layer=self.ctf_layer,
             train_method=self.train_method,
@@ -904,7 +943,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         print("do local refresh")
         try:
             simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
-                self.target, self.brightness, self.contrast
+                self.target
             )
             loss_item = float(loss.detach().cpu().item())
             print("BEFORE on_progress_heavy")
@@ -967,7 +1006,17 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         p_diff_np = None if p_diff is None else p_diff.detach().cpu().numpy()
 
-        strain_maps = self.pot_layer.ws2_displacement.strain_maps()
+        show_strain_map_idx = self.train_method.only_train_small_area
+        if self.train_method.only_train_small_area < 0:
+            show_strain_map_idx = 1
+        strain_maps = self.pot_layer.strain_fields[show_strain_map_idx].strain_maps()
+
+        potential_maps, _ = self.pot_layer(None)
+
+        pot_imgs = []
+        for pot_i in potential_maps[:4]:
+            pot_i_blurred = gaussian_filter(pot_i.detach().cpu().numpy(), sigma=5.0)
+            pot_imgs.append(pot_i_blurred)
 
         return VizPayload(
             step=step,
@@ -985,7 +1034,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             hist_edges=hist_edges,
             status="preview",
             train_method=self.train_method,
-            strain_maps=strain_maps
+            strain_maps=strain_maps,
+            potential_maps=pot_imgs
         )
 
     def _trigger_heavy_refresh(self):
@@ -1021,19 +1071,33 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(int, float, object)
     def on_progress_light(self, step, loss, losses):
+        # if self.updating_gui:
+        #     print("Skipping light update because GUI is busy")
+        #     return
+        #
+        # self.updating_gui = True
+
+
         self.step_label.setText(f"step: {step}")
         self.loss_label.setText(f"loss: {loss:.6g}")
         self.canvas.update_light(step, loss, losses)
         self.canvas.draw()
         self.canvas.flush_events()
+        # self.updating_gui = False
 
     @QtCore.Slot(object)
     def on_progress_heavy(self, payload: VizPayload):
+        if self.updating_gui:
+            print("Skipping heavy update because GUI is busy")
+            return
+
+        self.updating_gui = True
         self.step_label.setText(f"step: {payload.step}")
         self.loss_label.setText(f"loss: {payload.loss:.6g}")
         self.canvas.update_heavy(payload, ctf_layer=self.ctf_layer)
         self.canvas.draw()
         self.canvas.flush_events()
+        self.updating_gui = False
 
     @QtCore.Slot(str)
     def on_status_changed(self, status):
@@ -1056,8 +1120,6 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 def launch_gui_qt(
     model,
     target,
-    brightness,
-    contrast,
     pot_layer,
     ctf_layer,
     train_method,
@@ -1073,8 +1135,6 @@ def launch_gui_qt(
     window = LiveTrainWindow(
         model=model,
         target=target,
-        brightness=brightness,
-        contrast=contrast,
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,

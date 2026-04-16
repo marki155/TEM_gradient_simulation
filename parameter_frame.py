@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import fields, is_dataclass, asdict
 from functools import partial
-from typing import Any, Type, T
+from typing import Any, Type
 
 from nn import ParticlesTunableParameters
 
@@ -354,6 +354,9 @@ class ParametersFrame(QFrame):
         self._build_dataclass_into_layout(root_section.content_layout, params_root, path=type(params_root).__name__)
         self.main_layout.addStretch()
 
+    def trigger_parameter_changed(self):
+        self.parameter_tuned.emit()
+
     def save_parameters(self):
         # Speichern
         p = self.params_root
@@ -452,7 +455,7 @@ class ParametersFrame(QFrame):
         # Einzelner Parameter
         if isinstance(value, nn.Parameter):
             editor = TensorEditor(name, value)
-            editor.value_changed.connect(self.parameter_tuned)
+            editor.value_changed.connect(self.trigger_parameter_changed)
             self._tensor_editors.append(editor)
             layout.addWidget(editor)
             return
@@ -466,7 +469,7 @@ class ParametersFrame(QFrame):
                 if not isinstance(param, nn.Parameter):
                     continue
                 editor = TensorEditor(f"{name}[{i}]", param)
-                editor.value_changed.connect(self.parameter_tuned)
+                editor.value_changed.connect(self.trigger_parameter_changed)
                 self._tensor_editors.append(editor)
                 section.content_layout.addWidget(editor)
             return
@@ -480,7 +483,7 @@ class ParametersFrame(QFrame):
                 if not isinstance(param, nn.Parameter):
                     continue
                 editor = TensorEditor(str(key), param)
-                editor.value_changed.connect(self.parameter_tuned)
+                editor.value_changed.connect(self.trigger_parameter_changed)
                 self._tensor_editors.append(editor)
                 section.content_layout.addWidget(editor)
             return

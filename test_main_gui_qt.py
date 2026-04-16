@@ -4,7 +4,7 @@ import torch
 
 from nn import NN_particles
 from training_parameter import TrainMethod
-from gui_qt import launch_gui_qt
+from archive.gui_qt_no_target_zoom import launch_gui_qt
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

@@ -1,13 +1,10 @@
 import tifffile as tifffile
 import torch
-from ase.io import read, write
-import ase
 import ase.build
 import numpy as np
 
 
-from nn import NN_particles, NN_free_potential
-from testing import show_init_positions
+from nn import NN_particles
 from training_parameter import TrainMethod
 from gui_qt import launch_gui_qt
 

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -88,18 +90,16 @@ class TrainParam:
 
 @dataclass
 class TrainMethod:
-    area_masks: List[torch.tensor]
-
+    area_masks: List
+    target_gr: Optional[torch.Tensor] | None
 
     loss_var: float = 0.5
+    loss_local_var_100: float = 0.0
     loss_mse: float = 0.0
     loss_ncc: float = 0.5
     loss_local_ncc_100: float = 0.0
-    loss_local_ncc_50: float = 0.0
-    loss_local_ncc_20: float = 0.0
     loss_ssim: float = 0.0
     loss_l1: float = 0.1
-    loss_fft: float = 0.0
 
     occ_entropy_a: float = 1.0
     position_shifts_regularization_a: float = 1.0
@@ -120,10 +120,10 @@ class TrainMethod:
     Gr_strain_field: TrainParam = field(default_factory=lambda: TrainParam(False, .1))
     WS2_strain_field: TrainParam = field(default_factory=lambda: TrainParam(False, .1))
 
-    graphen_shift: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-9))
-    graphen_rotation: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-9))
-    graphen_free_positions: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-6))
-    graphen_scale: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-9))
+    graphen_shift: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-5))
+    graphen_rotation: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-5))
+    graphen_free_positions: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-4))
+    graphen_scale: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-5))
 
     WS2_shift: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
     WS2_rotation: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))

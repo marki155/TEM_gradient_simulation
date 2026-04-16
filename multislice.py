@@ -26,7 +26,6 @@ def sigma_electron(wavelength_m):
     h = 6.62607015e-34      # Planck-Konstante (Js)
 
     sigma = (m * e * wavelength_m) / (h ** 2)
-    print(sigma)
     return sigma
 
 def interaction_parameter_rad_per_Vnm(voltage_kV):
@@ -143,8 +142,8 @@ class DifferentiableMultislice(nn.Module):
 
 
         self.train_method = train_method
-
-        self.phase_object_layer = PhysicalPhaseObjectLayer(self.H, self.W, config.pixel_size_nm, config.voltage_kV, device)
+        pad = config.padding
+        self.phase_object_layer = PhysicalPhaseObjectLayer(self.H + 2*pad, self.W + 2*pad, config.pixel_size_nm, config.voltage_kV, device)
 
 
 
@@ -156,7 +155,6 @@ class DifferentiableMultislice(nn.Module):
             potential_slices=potential_list,
             z_positions_nm=self.z_positions_nm,
         )
-        print(pot_aux_loss)
 
         return exit_wave, pot_aux_loss
 

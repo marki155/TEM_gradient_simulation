@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+from matplotlib import pyplot as plt
 
 from displacement_field import SplineDisplacementField2D, StrainTunableParameters
 
@@ -161,7 +162,7 @@ class DifferentiablePotential(nn.Module):
         self.train_methods = train_methods
         self.config = config
 
-        self.strain_fields = [SplineDisplacementField2D(image_shape=config.shape, control_shape=(2,2),
+        self.strain_fields = [SplineDisplacementField2D(image_shape=config.shape, control_shape=(4,4),
                                                          device=device, dtype=torch.float32, init_scale=0.0),
                          SplineDisplacementField2D(image_shape=config.shape, control_shape=(10,10),
                                                          device=device, dtype=torch.float32, init_scale=0.0)]
@@ -176,7 +177,10 @@ class DifferentiablePotential(nn.Module):
         self.tunable_parameters = TunablePotentialParameters(strain_fields=strain_parameters, position_shifts=position_shifts_,
                                                              intensities=intensities_, occupancies=occupancies_,)
 
-        self.kirkland_precalc_pot = KirklandPrecalcPotential(self.H, self.W, self.pixel_size_nm, self.device)
+        self.potential_pad = config.padding
+        self.kirkland_precalc_pot = KirklandPrecalcPotential(self.H + 2 * self.potential_pad,
+                                                             self.W + 2 * self.potential_pad,
+                                                             self.pixel_size_nm, self.device)
 
 
 
@@ -675,10 +679,11 @@ class DifferentiablePotential(nn.Module):
         occupancies = self.tunable_parameters.occupancies
 
         for i in range(self.N_l):
-
-
-            #potential_i = self.projected_slice_potential_lobato(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
-            potential_i = self.projected_slice_potential_kirkland(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
+            if int(self.train_methods.only_train_small_area) == 0 and i > 0:
+                potential_i = torch.zeros((self.H+self.potential_pad*2, self.W+self.potential_pad*2), dtype=torch.float32, device=self.device)
+            else:
+                #potential_i = self.projected_slice_potential_lobato(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
+                potential_i = self.projected_slice_potential_kirkland(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
             potential_list.append(potential_i)
 
         return potential_list, self.aux_loss()
@@ -751,12 +756,13 @@ class DifferentiablePotential(nn.Module):
         Vp = torch.fft.ifft2(torch.fft.fft2(rho) * torch.fft.fft2(kernel)).real
         V = Vp[pad:pad + self.H, pad:pad + self.W]
 
+
         # globaler Offset ist für TEM-Intensität nicht relevant
         V = V - V.median()
         return V
 
     def projected_slice_potential_kirkland(self, positions_xy, occupancies, atom_type):
-        pad = 0#max(self.H // 2, self.W // 2)
+        pad = self.potential_pad#max(self.H // 2, self.W // 2)
         Hp = self.H + 2 * pad
         Wp = self.W + 2 * pad
 
@@ -770,8 +776,8 @@ class DifferentiablePotential(nn.Module):
         )
 
         Vp = self.kirkland_precalc_pot.projected_slice_potential_kirkland(rho, atom_type, self.pixel_size_nm, self.device)
-        V = Vp[pad:pad + self.H, pad:pad + self.W]
-        #V = V - V.median()
+        V = Vp#[pad:pad + self.H, pad:pad + self.W]
+        V = V - V.median()
 
         return V
 

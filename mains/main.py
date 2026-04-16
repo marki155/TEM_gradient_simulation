@@ -1,13 +1,13 @@
 import tifffile as tifffile
 import torch
-from ase.io import read, write
-import ase
 import ase.build
 import numpy as np
 import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
+from matplotlib import pyplot as plt
 
-from nn import NN_particles, NN_free_potential
+from nn import NN_particles
 from testing import show_init_positions
 from training_parameter import TrainMethod
 from gui_qt import launch_gui_qt
@@ -24,11 +24,16 @@ length_of_10_unity_cells_WS2 =  612 #px
 pixel_size_nm = 3.18 / length_of_10_unity_cells_WS2
 
 DEBUG = False
+SELECTOR = True
 
 
 if __name__ == '__main__':
-    image = tifffile.imread(os.path.join(path, "target.tif"))
+    image = tifffile.imread(os.path.join(path, "target_div-b.tif"))
     image[np.where(image == 0.0)] = np.median(image)
+
+    image_gr = tifffile.imread(os.path.join(path, "target_gr_only.tif"))
+    image_gr[np.where(image_gr == 0.0)] = np.median(image_gr)
+    target_gr = torch.tensor(image_gr, dtype=torch.float32)
 
     gr_mask = tifffile.imread(os.path.join(path, "gr_mask.tif"))
     gr_mask = gr_mask > 0
@@ -39,13 +44,13 @@ if __name__ == '__main__':
 
     H, W = image.shape
 
-    max_rot_graphen = np.deg2rad(10)
+    max_rot_graphen = np.deg2rad(20)
     canvas_H_rot_graphen = np.cos(max_rot_graphen) * H + np.sin(max_rot_graphen) * W
     canvas_W_rot_graphen = np.cos(max_rot_graphen) * W + np.sin(max_rot_graphen) * H
 
     max_shift_graphen = 3 * 2.47 * 0.1 / pixel_size_nm
-    canvas_H_shift_graphen = H + 2 * max_shift_graphen
-    canvas_W_shift_graphen = W + 2 * max_shift_graphen
+    canvas_H_shift_graphen = H + 5 * max_shift_graphen
+    canvas_W_shift_graphen = W + 5 * max_shift_graphen
 
     canvas_size_graphen = (
         int(max(canvas_H_rot_graphen, canvas_H_shift_graphen)),
@@ -83,10 +88,13 @@ if __name__ == '__main__':
 
     ws2 = ase.build.mx2(formula='WS2', vacuum=1.0) * (WS2_H_atoms, WS2_W_atoms, 1)
     ws2.translate((20, -90, 0))
-    ws2.rotate(60, 'z')
+    ws2.rotate(30, 'z')
 
     graphen = ase.build.graphene(vacuum=1.0) * (graphen_H_atoms, graphen_W_atoms, 1)
-    graphen.rotate(0, 'z')
+    #graphen.translate((H/2 * pixel_size_nm * 10, W/2 * pixel_size_nm * 10, 0))
+    graphen.rotate(90, 'z')
+    graphen.translate((H * 1.5 * pixel_size_nm * 10,0, 0))
+    #graphen.translate((-H / 2, -W / 2, 0))
     graphen.translate((-10, -18, 0))
 
     model_atoms = ws2
@@ -112,8 +120,12 @@ if __name__ == '__main__':
             (graphen_pos[:, 1] >= -canvas_shift_graphen[1]) &
             (graphen_pos[:, 1] <= canvas_size_graphen[1] - canvas_shift_graphen[1])
         )
-        slices_pos.append(graphen_pos[selector][:, :2])
-        slices_intensities.append(graphen.get_atomic_numbers()[selector])
+        if SELECTOR:
+            slices_pos.append(graphen_pos[selector][:, :2])
+            slices_intensities.append(graphen.get_atomic_numbers()[selector])
+        else:
+            slices_pos.append(graphen_pos[:, :2])
+            slices_intensities.append(graphen.get_atomic_numbers())
 
         for i in range(3):
             selector = (
@@ -149,7 +161,23 @@ if __name__ == '__main__':
     max_target = torch.max(target)
     target = (target - min_target) / (max_target - min_target)
 
-    train_method = TrainMethod(area_masks=[gr_mask, ws2_mask])
+    if DEBUG:
+        fig, ax = plt.subplots()
+        ax.imshow(target.cpu(), cmap='gray')
+        ax.set_title("Target Image")
+        ax.scatter(init_positions[0][:, 1], init_positions[0][:, 0], s=0.5, c='red', label='Graphene')
+        plt.show()
+
+        fig, ax = plt.subplots()
+        ax.imshow(target.cpu(), cmap='gray')
+        ax.set_title("Target Image")
+        labels = ["Gr", "S", "W", "S"]
+        for i in range(1, 4):
+            ax.scatter(init_positions[i][:, 1], init_positions[i][:, 0], s=0.5, label=labels[i])
+        ax.legend()
+        plt.show()
+
+    train_method = TrainMethod(area_masks=[gr_mask, ws2_mask], target_gr=target_gr)
 
     model = NN_particles(
         image_shape=image.shape,
@@ -171,19 +199,17 @@ if __name__ == '__main__':
     ctf_layer = model.model[2]
     pot_layer = model.model[0]
 
-    pot_layer.occupy_layers_in_area(gr_mask, [1, 2, 3])
+    #pot_layer.occupy_layers_in_area(gr_mask, [1, 2, 3])
 
     #optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
     launch_gui_qt(
         model=model,
         target=target,
-        brightness=brightness,
-        contrast=contrast,
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,
-        plot_every=50,
-        heavy_every=200,
+        plot_every=25,
+        heavy_every=50,
         max_steps=2_000_000,
     )

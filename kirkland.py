@@ -56,16 +56,23 @@ def projected_atomic_potential_kernel_kirkland(H, W, atom_type: str, pixel_size_
     # scipy.special.k0 läuft auf CPU/NumPy; Kernel ist fest, daher okay
     R_cpu = R_safe.detach().cpu().numpy()  # nm -> Å für K0-Input
 
+
+
     V = np.zeros((H, W), dtype=np.float64)
 
     for j in range(3):
         V += 2.0 * a[j] * k0(b[j] * R_cpu)
         V += math.sqrt(math.pi / d[j]) * c[j] * np.exp(-d[j] * R_cpu**2)
 
-    V = torch.tensor(V, dtype=torch.float32, device=device) * 0.1  # Å -> nm für Ausgabe
 
-    # Zentrum nach (0,0) für FFT-Faltung
-    return torch.fft.ifftshift(V)
+
+    V = torch.tensor(V, dtype=torch.float32, device=device) * 0.1  # Å -> nm für Ausgabe
+    V = torch.fft.ifftshift(V)
+
+    #R_cut = 300
+    #V = V * (torch.tensor(R_cpu) <= R_cut)
+
+    return V
 
 class KirklandPrecalcPotential:
     def __init__(self, H, W, pixel_size_nm, device):
@@ -76,6 +83,7 @@ class KirklandPrecalcPotential:
 
     def projected_slice_potential_kirkland(self, rho, atom_type: str, pixel_size_nm, device):
         kernel = self.kernels[atom_type]
+        #kernel = kernel - kernel.mean()
         V = torch.fft.ifft2(torch.fft.fft2(rho) * torch.fft.fft2(kernel)).real
 
         return V
