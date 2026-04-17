@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
-
+from physics_helper import relativistic_wavelength_nm
 
 
 def electron_wavelength_nm(voltage_kV):
@@ -42,8 +42,9 @@ def interaction_parameter_rad_per_Vnm(voltage_kV):
     lam_m = h / p
     gamma = 1.0 + E / E0
 
-    sigma_SI = 2 * math.pi * gamma * m0 * e * lam_m / (h * h)  # rad / (V*m)
-    return sigma_SI * 1e-9  # rad / (V*nm)
+    sigma_SI_rad_Vm = 2 * math.pi * gamma * m0 * e * lam_m / (h * h)  # rad / (V*m)
+    sigma_SI_rad_Vnm = sigma_SI_rad_Vm * 1e-9  # rad / (V*nm)
+    return sigma_SI_rad_Vnm
 
 
 def propagate_fresnel(wave, dz_nm, pixel_size_nm, wavelength_nm):
@@ -129,7 +130,7 @@ class DifferentiableMultislice(nn.Module):
         # TODO self.z_positions_nm = z_positions_nm
 
         self.pixel_size_nm = config.pixel_size_nm
-        self.wavelength_nm = config.wavelength_nm
+        self.wavelength_nm = relativistic_wavelength_nm(config.voltage_kV)
         self.device = device
 
         self.H, self.W = config.shape

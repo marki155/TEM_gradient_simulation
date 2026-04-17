@@ -22,13 +22,6 @@ class ParticlesTunableParameters:
     ctf_parameters: TunableCTFParameters
     normalisation_parameters: nn.Parameter
 
-@dataclass
-class ParticlesConfig:
-    init_positions: List[np.ndarray]
-    init_intensities: List[np.ndarray]
-    shape: tuple
-    pixel_size_nm: float
-    wavelength_nm: float
 
 
 
@@ -132,17 +125,7 @@ def get_trainmethod_param_registry(params: ParticlesTunableParameters):
 
 
 
-def relativistic_wavelength_nm(voltage_kV):
-    """Relativistische Elektronenwellenlänge in nm."""
-    V = voltage_kV * 1e3
-    h = 6.62607015e-34
-    m0 = 9.10938356e-31
-    e = 1.602176634e-19
-    c = 299792458.0
-    E = e * V
-    p = math.sqrt(E**2 + 2 * E * m0 * c**2) / c
-    lam_m = h / p
-    return lam_m * 1e9  # nm
+
 
 
 class NN_free_potential(nn.Module):
@@ -275,25 +258,25 @@ class ParticlesConfig:
     z_positions_nm: List[float]
     shape: tuple
     pixel_size_nm: float
-    wavelength_nm: float
-    dz: float
     voltage_kV: float
     init_aberrations: dict
     init_ctf_env_params: dict
     init_amp_contrast: float
     ctf_alpha_max_mrad: float
     padding: int
+    control_points_graphen: List[float]
+    control_points_ws2: List[float]
 
 
 class NN_particles(nn.Module):
-    def __init__(self, image_shape, pixel_size_nm, voltage_kV, train_method, device='cpu', train_methods=None):
+    def __init__(self, config, image_shape, pixel_size_nm, voltage_kV, train_method, device='cpu', train_methods=None):
         super().__init__()
+        self.config = config
         self.shape = image_shape
         self.pixel_size_nm = pixel_size_nm
         self.voltage_kV = voltage_kV
         self.device = device
         self.train_method = train_method
-        self.wavelength_nm = relativistic_wavelength_nm(voltage_kV)
         self.train_methods = train_methods
 
     def build_optimizer(self,
@@ -342,70 +325,55 @@ class NN_particles(nn.Module):
 
         return optimizer_cls(param_groups, **optimizer_kwargs)
 
+    # -------------------------
+    # SAVE
+    # -------------------------
+    def save_particles_config(self, path: str):
+        def serialize(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, tuple):
+                return list(obj)
+            return obj
 
+        data = asdict(self.config)
 
-    def save_parameters(self):
-        # Speichern
-        p = self.tunable_parameters
+        # numpy Arrays konvertieren
+        data["init_positions"] = [serialize(x) for x in data["init_positions"]]
+        data["init_intensities"] = [serialize(x) for x in data["init_intensities"]]
+        data["shape"] = serialize(data["shape"])
 
-        with open("parameters.json", "w") as f:
-            json.dump(asdict(p), f)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
 
-    def load_parameters(self):
-        with open("parameters.json", "r") as f:
+    # -------------------------
+    # LOAD
+    # -------------------------
+    def load_particles_config(self, path: str) -> ParticlesConfig:
+        with open(path, "r") as f:
             data = json.load(f)
 
-        p_loaded = ParticlesTunableParameters(**data)
-        print(p_loaded)
+        # zurück zu numpy
+        data["init_positions"] = [np.array(x) for x in data["init_positions"]]
+        data["init_intensities"] = [np.array(x) for x in data["init_intensities"]]
+        data["shape"] = tuple(data["shape"])
+        self.config = ParticlesConfig(**data)
 
-    def build_multislice(self, init_positions, init_intensities, dz, max_shifts=None, max_rotations=None):
+        return self.config
 
-
-
-        aberrations = {"C10": -13.,
-                       'C12': 1.0, "phi12": 0.,
-                       'C23': 2., 'phi23': 0.,
-                       'C21': 2., 'phi21': 0.,
-                       "C30": 4.,  # um
-                       'C34': .02, 'phi34': 0.,  # um
-                       'C45': .05, 'phi45': 0.}  # um
-
-        env_params = {
-            'source_size': 0.1e-3,  # rad
-            'Cc_um': 1.e3,  # um
-            'deltaE': .35,  # eV
-            'instab_defocus_nm': .01,  # nm
-            'use_detector': False,
-        }
-
-        amp_contrast = .1
-
-        z_positions_nm = [
-            0.00,  # Graphen
-            0.33,  # S1
-            0.488,  # W
-            0.646,  # S2
-        ]
-
-        config = ParticlesConfig(init_positions=init_positions, init_intensities=init_intensities,
-                                           shape=self.shape, pixel_size_nm=self.pixel_size_nm,
-                                            z_positions_nm=z_positions_nm,
-                                           wavelength_nm=self.wavelength_nm, dz=dz, voltage_kV=self.voltage_kV,
-                                           init_aberrations=aberrations, init_ctf_env_params=env_params,
-                                           init_amp_contrast=amp_contrast, ctf_alpha_max_mrad=50.,
-                                            padding=100)
-        potential_layer = DifferentiablePotential(config, self.train_method, device=self.device,
+    def build_multislice(self, max_shifts=None, max_rotations=None):
+        potential_layer = DifferentiablePotential(self.config, self.train_method, device=self.device,
                                                   max_shifts=max_shifts, max_rotations=max_rotations)
 
 
         multislice = DifferentiableMultislice(
-            config,
+            self.config,
             train_method=self.train_method,
             device=self.device)
 
 
 
-        ctf_layer = CTFLayer(config,
+        ctf_layer = CTFLayer(self.config,
                              device=self.device,
                              train_method=self.train_method)
 
@@ -558,12 +526,19 @@ class NN_particles(nn.Module):
 
         if train_area_idx >= 0:
             ref_idx = train_area_idx
-        else:
-            ref_idx = 0
+            mask_img = self.train_methods.area_masks[ref_idx]
+        else: # Main Training
+            mask_img_gr = self.train_methods.area_masks[0]
+            mask_img_ws2 = self.train_methods.area_masks[1]
+            mask_img_both = torch.logical_or(mask_img_gr > 0, mask_img_ws2 > 0).float()
+            mask_img = mask_img_both
 
-        mask_img = self.train_methods.area_masks[ref_idx]
-        sim_ref = simulated_image[mask_img > 0]
-        tgt_ref = target_image[mask_img > 0]
+        if mask_img is None:
+            sim_ref = simulated_image.flatten()
+            tgt_ref = target_image.flatten()
+        else:
+            sim_ref = simulated_image[mask_img > 0]
+            tgt_ref = target_image[mask_img > 0]
 
         return tgt_ref, sim_ref
 

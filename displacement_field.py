@@ -20,17 +20,18 @@ class SplineDisplacementField2D(nn.Module):
     """
 
     def __init__(
-        self,
-        image_shape,
-        control_shape=(8, 8),
+        self,config,
+        control_shape=(8,8),
         init_scale=0.0,
         device="cpu",
         dtype=torch.float32,
     ):
         super().__init__()
 
-        self.H, self.W = image_shape
+        self.H = config.shape[0] + 2 * config.padding
+        self.W = config.shape[1] + 2 * config.padding
         self.control_shape = control_shape
+        self.padding = config.padding
         self.device = device
         self.dtype = dtype
 
@@ -72,7 +73,7 @@ class SplineDisplacementField2D(nn.Module):
         sampled = F.grid_sample(
             self.control,
             grid,
-            mode="bilinear",
+            mode="bicubic",
             padding_mode="border",
             align_corners=True,
         )
@@ -193,6 +194,13 @@ class SplineDisplacementField2D(nn.Module):
             "rot": rot.detach().cpu().numpy(),
             "div": div.detach().cpu().numpy(),
         }
+
+        pad = self.padding
+        H = H - 2 * pad
+        W = W - 2 * pad
+
+        for k in out.keys():
+            out[k] = out[k][pad:pad+H, pad:pad+W]
 
         if lambda_ is not None and mu is not None:
             energy = self.elastic_energy_density(coords, lambda_=lambda_, mu=mu)

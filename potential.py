@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,8 +13,9 @@ from displacement_field import SplineDisplacementField2D, StrainTunableParameter
 
 from torch.nn.utils.rnn import pad_sequence
 
-from kirkland import KirklandPrecalcPotential
+from kirkland_supersampled import KirklandPrecalcPotential
 from lobato_potential import projected_atomic_potential_kernel_lobato
+from physics_helper import relativistic_wavelength_nm
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_default_device(DEVICE)
@@ -136,6 +138,9 @@ class TunablePotentialParameters:
     rotation_WS2: nn.Parameter = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
     shift_WS2: nn.Parameter = nn.Parameter(torch.tensor([15.9, -5.0 ], dtype=torch.float32))
 
+    graphene_potential_factor: nn.Parameter = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+    ws2_potential_factor: nn.Parameter = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+
 
 
 
@@ -148,7 +153,7 @@ class DifferentiablePotential(nn.Module):
         super().__init__()
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
         self.pixel_size_nm = config.pixel_size_nm
-        self.wavelength_nm = config.wavelength_nm
+        self.wavelength_nm = relativistic_wavelength_nm(config.voltage_kV)
         self.device = device
         self.max_shifts = max_shifts
         self.max_rotations = max_rotations
@@ -162,9 +167,11 @@ class DifferentiablePotential(nn.Module):
         self.train_methods = train_methods
         self.config = config
 
-        self.strain_fields = [SplineDisplacementField2D(image_shape=config.shape, control_shape=(4,4),
+
+
+        self.strain_fields = [SplineDisplacementField2D(config=config, control_shape=config.control_points_graphen,
                                                          device=device, dtype=torch.float32, init_scale=0.0),
-                         SplineDisplacementField2D(image_shape=config.shape, control_shape=(10,10),
+                         SplineDisplacementField2D(config=config, control_shape=config.control_points_ws2,
                                                          device=device, dtype=torch.float32, init_scale=0.0)]
 
 
@@ -684,10 +691,22 @@ class DifferentiablePotential(nn.Module):
             else:
                 #potential_i = self.projected_slice_potential_lobato(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
                 potential_i = self.projected_slice_potential_kirkland(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
+
+            if i == self._IDX["Gr"]:
+                potential_i = potential_i * self.tunable_parameters.graphene_potential_factor
+            else:
+                potential_i = potential_i * self.tunable_parameters.ws2_potential_factor
             potential_list.append(potential_i)
+
+        potential_list = potential_list[::-1]
 
         return potential_list, self.aux_loss()
 
+    def get_potential_images(self):
+        pot_list, _ = self(None)
+        pad = self.potential_pad
+        pot_images = [p.detach().cpu().numpy()[pad:self.H+pad, pad:self.W+pad] for p in pot_list[::-1]]
+        return pot_images
 
 
 
@@ -774,6 +793,7 @@ class DifferentiablePotential(nn.Module):
             positions_xy=positions_pad,
             weights=occupancies
         )
+
 
         Vp = self.kirkland_precalc_pot.projected_slice_potential_kirkland(rho, atom_type, self.pixel_size_nm, self.device)
         V = Vp#[pad:pad + self.H, pad:pad + self.W]

@@ -38,14 +38,17 @@ def projected_atomic_potential_kernel_kirkland(H, W, atom_type: str, pixel_size_
     pixel_size_A = pixel_size_nm * 10.0  # nm -> Å für Kirkland-Parameter
 
 
-    y = (torch.arange(H, device=device, dtype=torch.float32) - H // 2) * pixel_size_A
-    x = (torch.arange(W, device=device, dtype=torch.float32) - W // 2) * pixel_size_A
-    Y, X = torch.meshgrid(y, x, indexing="ij")
+    x = (torch.arange(H, device=device, dtype=torch.float32) - H // 2) * pixel_size_A
+    y = (torch.arange(W, device=device, dtype=torch.float32) - W // 2) * pixel_size_A
+    X, Y = torch.meshgrid(x, y, indexing="ij")
     R = torch.sqrt(X**2 + Y**2)
 
     # K0 hat bei r=0 eine Singularität -> numerischer floor
-    r_floor = max(pixel_size_A * 0.25, 1e-6)
-    R_safe = torch.clamp(R, min=r_floor)
+    #r_floor = max(pixel_size_A * 0.25, 1e-6)
+    #R_safe = torch.clamp(R, min=r_floor)
+
+    a = pixel_size_A * 0.01
+    R_eff = torch.sqrt(R ** 2 + a ** 2)
 
     p = _get_kirkland_projected_parameters(atom_type)
     a = p[0]
@@ -54,7 +57,7 @@ def projected_atomic_potential_kernel_kirkland(H, W, atom_type: str, pixel_size_
     d = p[3]
 
     # scipy.special.k0 läuft auf CPU/NumPy; Kernel ist fest, daher okay
-    R_cpu = R_safe.detach().cpu().numpy()  # nm -> Å für K0-Input
+    R_cpu = R_eff.detach().cpu().numpy()
 
 
 
@@ -87,3 +90,31 @@ class KirklandPrecalcPotential:
         V = torch.fft.ifft2(torch.fft.fft2(rho) * torch.fft.fft2(kernel)).real
 
         return V
+
+
+if __name__ == "__main__":
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from abtem.parametrizations import KirklandParametrization
+
+    kp = KirklandParametrization()
+    f_ref = kp.projected_potential("C")  # direkte abTEM-Referenzfunktion
+
+    r_A = np.linspace(0.01, 5.0, 500)  # Å
+    v_ref = f_ref(r_A)  # Referenz
+
+    # deine Implementierung als 1D-Kurve:
+    p = _get_kirkland_projected_parameters("C")
+    a, b, c, d = p[0], p[1], p[2], p[3]
+
+    from scipy.special import k0
+
+    v_own = np.zeros_like(r_A)
+    for j in range(3):
+        v_own += 2.0 * a[j] * k0(b[j] * r_A)
+        v_own += np.sqrt(np.pi / d[j]) * c[j] * np.exp(-d[j] * r_A ** 2)
+
+    plt.plot(r_A, v_ref, label="abTEM ref")
+    plt.plot(r_A, v_own, "--", label="own")
+    plt.legend()
+    plt.show()

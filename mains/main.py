@@ -7,7 +7,7 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from matplotlib import pyplot as plt
 
-from nn import NN_particles
+from nn import NN_particles, ParticlesConfig
 from testing import show_init_positions
 from training_parameter import TrainMethod
 from gui_qt import launch_gui_qt
@@ -31,7 +31,7 @@ if __name__ == '__main__':
     image = tifffile.imread(os.path.join(path, "target_div-b.tif"))
     image[np.where(image == 0.0)] = np.median(image)
 
-    image_gr = tifffile.imread(os.path.join(path, "target_gr_only.tif"))
+    image_gr = tifffile.imread(os.path.join(path, "target_no_ws2.tif"))
     image_gr[np.where(image_gr == 0.0)] = np.median(image_gr)
     target_gr = torch.tensor(image_gr, dtype=torch.float32)
 
@@ -179,7 +179,44 @@ if __name__ == '__main__':
 
     train_method = TrainMethod(area_masks=[gr_mask, ws2_mask], target_gr=target_gr)
 
+    amp_contrast = .1
+
+    z_positions_nm = [
+        0.00,  # Graphen
+        0.33,  # S1
+        0.488,  # W
+        0.646,  # S2
+    ]
+
+    aberrations = {"C10": -13.,
+                   'C12': 1.0, "phi12": 0.,
+                   'C23': 2., 'phi23': 0.,
+                   'C21': 2., 'phi21': 0.,
+                   "C30": 4.,  # um
+                   'C34': .02, 'phi34': 0.,  # um
+                   'C45': .05, 'phi45': 0.}  # um
+
+    env_params = {
+        'source_size': 0.1e-3,  # rad
+        'Cc_um': 1.e3,  # um
+        'deltaE': .35,  # eV
+        'instab_defocus_nm': .01,  # nm
+        'use_detector': False,
+    }
+
+
+    config = ParticlesConfig(init_positions=init_positions, init_intensities=init_intensities,
+                             shape=(H, W), pixel_size_nm=pixel_size_nm,
+                             z_positions_nm=z_positions_nm, voltage_kV=VOLTAGE_KV,
+                             init_aberrations=aberrations, init_ctf_env_params=env_params,
+                             init_amp_contrast=amp_contrast, ctf_alpha_max_mrad=50.,
+                             padding=100, control_points_graphen=[10, 10], control_points_ws2=[10, 10])
+
+
+
+
     model = NN_particles(
+        config=config,
         image_shape=image.shape,
         pixel_size_nm=pixel_size_nm,
         voltage_kV=VOLTAGE_KV,
@@ -188,10 +225,9 @@ if __name__ == '__main__':
         train_methods=train_method
     )
 
+    model.save_particles_config(os.path.join(path, "particles_config.json"))
+
     model.build_multislice(
-        init_positions=init_positions,#[arr[:, ::-1].copy() for arr in init_positions],
-        init_intensities=init_intensities,
-        dz=slice_thickness / 10,
         max_shifts=(max_shift_graphen, max_shift_ws2),
         max_rotations=(max_rot_graphen, max_rot_ws2)
     )

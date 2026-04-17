@@ -357,6 +357,22 @@ class ParametersFrame(QFrame):
     def trigger_parameter_changed(self):
         self.parameter_tuned.emit()
 
+    def reset_occupancies_ws2(self):
+        for editor in self._tensor_editors:
+            if "occupancies[1]" in editor.label_text or "occupancies[2]" in editor.label_text or "occupancies[3]" in editor.label_text:
+                with torch.no_grad():
+                    editor.tensor.fill_(0.0)
+                editor.refresh_from_tensor()
+        self.trigger_parameter_changed()
+
+    def reset_free_positions_ws2(self):
+        for editor in self._tensor_editors:
+            if "positions[1]" in editor.label_text or "positions[2]" in editor.label_text or "positions[3]" in editor.label_text:
+                with torch.no_grad():
+                    editor.tensor.fill_(0.0)
+                editor.refresh_from_tensor()
+        self.trigger_parameter_changed()
+
     def save_parameters(self):
         # Speichern
         p = self.params_root
@@ -392,7 +408,7 @@ class ParametersFrame(QFrame):
         print("parameters loaded:", f.name)
         self.refresh_from_params()
 
-    def load_dataclass_json(self, path: str, cls: Type[T]) -> T:
+    def load_dataclass_json(self, path: str, cls):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return update_from_serialized(self.params_root, data)
@@ -408,8 +424,9 @@ class ParametersFrame(QFrame):
         if not file_path:
             return
 
-        loaded = self.load_dataclass_json(file_path, type(self.params_root))
-        self.params_root = loaded
+        self.load_dataclass_json(file_path, type(self.params_root))
+        self.refresh_from_params()
+        self.trigger_parameter_changed()
         return
 
         if selected_fields is None:

@@ -9,6 +9,8 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
+from physics_helper import relativistic_wavelength_nm
+
 
 def scherzer_defocus(C30_um, lam_nm):
     C30_nm = C30_um*1000.
@@ -156,7 +158,7 @@ class CTFLayer(nn.Module):
         self.envelope_params = config.init_ctf_env_params
         #self.deltaE = nn.Parameter(torch.tensor(envelope_params["deltaE"], device=device))
         #self.Cc_um = nn.Parameter(torch.tensor(envelope_params["Cc_um"], device=device))
-        self.lam = config.wavelength_nm
+        self.lam = relativistic_wavelength_nm(config.voltage_kV)
         self.semiangle_cutoff_mrad = None
         self.alpha_max_mrad = config.ctf_alpha_max_mrad
         self.device = device

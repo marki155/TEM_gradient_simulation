@@ -181,7 +181,7 @@ class TrainingWorker(QtCore.QObject):
         self.parameter_update.emit(self.model.get_tunable_parameters())
 
     def build_heavy_payload(self, step: int, loss_item: float, simulated_image, target_image, p_diff):
-        target_image, mask_img = self.model.get_current_target_and_mask_img(target_image)
+        _, mask_img = self.model.get_current_target_and_mask_img(target_image)
         if mask_img is not None:
             mask_img = mask_img.detach().cpu().numpy()
         sim_img = simulated_image.detach().cpu().numpy()
@@ -230,12 +230,9 @@ class TrainingWorker(QtCore.QObject):
             show_strain_map_idx = 1
         strain_maps = self.pot_layer.strain_fields[show_strain_map_idx].strain_maps()
 
-        potential_maps, _ = self.pot_layer(None)
+        pot_imgs = self.pot_layer.get_potential_images()
 
-        pot_imgs = []
-        for pot_i in potential_maps[:4]:
-            pot_i_blurred = gaussian_filter(pot_i.detach().cpu().numpy(), sigma=5.0)
-            pot_imgs.append(pot_i_blurred)
+
 
 
 
@@ -572,9 +569,10 @@ class MplCanvas(FigureCanvasQTAgg):
                 self.full_target_ax.set_xticks([])
                 self.full_target_ax.set_yticks([])
 
-                pos, ints = self.get_pos_and_ints(payload)
-                if len(ints) > 0:
-                    self.full_target_ax.scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=0.5)
+                if self.show_positions_on_target:
+                    pos, ints = self.get_pos_and_ints(payload)
+                    if len(ints) > 0:
+                        self.full_target_ax.scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=0.5)
             return
 
 
@@ -589,14 +587,15 @@ class MplCanvas(FigureCanvasQTAgg):
             self.axes_cmap["target"].clear()
             self.axes_cmap["target"].imshow(payload.target_img, cmap="viridis", origin="lower")
             self.axes_cmap["target"].set_title("Target")
-            pos, ints = self.get_pos_and_ints(payload)
 
 
-            ss = 0.5
+            if self.show_positions_on_target:
+                pos, ints = self.get_pos_and_ints(payload)
+                ss = 0.5
 
-            self.axes_cmap["target"].scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=ss)
-            #self.im_tgt_sc.set_offsets(pos)
-            #self.im_tgt_sc.set_array(ints)
+                self.axes_cmap["target"].scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=ss)
+                #self.im_tgt_sc.set_offsets(pos)
+                #self.im_tgt_sc.set_array(ints)
 
 
         if payload.strain_maps["ux"] is not None:
@@ -791,7 +790,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         right.addWidget(status_box)
 
         control_box = QtWidgets.QGroupBox("Training control")
-        control_layout = QtWidgets.QVBoxLayout(control_box)
+        control_layout = QtWidgets.QGridLayout(control_box)
 
         self.start_btn = QtWidgets.QPushButton("Start")
         self.pause_btn = QtWidgets.QPushButton("Pause")
@@ -799,17 +798,26 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.stop_btn = QtWidgets.QPushButton("Stop")
 
         self.full_target_checkbox = QtWidgets.QCheckBox("Target fullscreen")
+        self.show_atoms_on_target_checkbox = QtWidgets.QCheckBox("Show atom positions on target")
+        self.show_atoms_on_target_checkbox.setChecked(True)
+        self.reset_occupancies_btn = QtWidgets.QPushButton("Reset occupancies WS2")
+        self.reset_free_positions_ws2_btn = QtWidgets.QPushButton("Reset free positions WS2")
+        self.render_btn = QtWidgets.QPushButton("Render")
 
 
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
 
-        control_layout.addWidget(self.start_btn)
-        control_layout.addWidget(self.pause_btn)
-        control_layout.addWidget(self.resume_btn)
-        control_layout.addWidget(self.stop_btn)
-        control_layout.addWidget(self.full_target_checkbox)
+        control_layout.addWidget(self.start_btn, 0, 0)
+        control_layout.addWidget(self.pause_btn, 1, 0)
+        control_layout.addWidget(self.resume_btn, 2, 0)
+        control_layout.addWidget(self.stop_btn, 3, 0)
+        control_layout.addWidget(self.full_target_checkbox, 0, 1)
+        control_layout.addWidget(self.show_atoms_on_target_checkbox, 1, 1)
+        control_layout.addWidget(self.reset_occupancies_btn, 2, 1)
+        control_layout.addWidget(self.reset_free_positions_ws2_btn, 3, 1)
+        control_layout.addWidget(self.render_btn, 4, 1)
 
         right.addWidget(control_box)
 
@@ -868,15 +876,20 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.editor.changed.connect(self._apply_trainable_selection)
 
         self.full_target_checkbox.toggled.connect(self.canvas.set_full_canvas_target_mode)
+        self.show_atoms_on_target_checkbox.toggled.connect(self._on_show_positions_changed)
+        self.reset_occupancies_btn.clicked.connect(self.reset_occupancies_ws2)
+        self.reset_free_positions_ws2_btn.clicked.connect(self.reset_free_positions_ws2)
 
-        #self.scale_spin_x.valueChanged.connect(self._on_scale_x_changed)
-        #self.scale_spin_y.valueChanged.connect(self._on_scale_y_changed)
-        #self.shift_spin_x.valueChanged.connect(self._on_shift_x_changed)
-        #self.shift_spin_y.valueChanged.connect(self._on_shift_y_changed)
-        #self.rotation_spin.valueChanged.connect(self._on_rotation_changed)
-        #self.show_positions_checkbox.stateChanged.connect(self._on_show_positions_changed)
+        self.render_btn.clicked.connect(self._trigger_heavy_refresh)
 
-        # TODO connect actions from tune frame
+    def reset_occupancies_ws2(self):
+        self.parameter_frame.reset_occupancies_ws2()
+        self._trigger_heavy_refresh()
+
+    def reset_free_positions_ws2(self):
+        self.parameter_frame.reset_free_positions_ws2()
+        self._trigger_heavy_refresh()
+
 
     def _apply_trainable_selection(self):
         if hasattr(self.pot_layer, "apply_trainable_selection"):
@@ -1011,12 +1024,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             show_strain_map_idx = 1
         strain_maps = self.pot_layer.strain_fields[show_strain_map_idx].strain_maps()
 
-        potential_maps, _ = self.pot_layer(None)
 
-        pot_imgs = []
-        for pot_i in potential_maps[:4]:
-            pot_i_blurred = gaussian_filter(pot_i.detach().cpu().numpy(), sigma=5.0)
-            pot_imgs.append(pot_i_blurred)
+        pot_imgs = self.pot_layer.get_potential_images()
 
         return VizPayload(
             step=step,
