@@ -18,7 +18,7 @@ torch.set_default_device(DEVICE)
 VOLTAGE_KV = 80
 
 
-path = "E:\PhD\Messdaten\Markus\WS2_TEM\Rekonstruktionen\platelet_11"
+path = "..\platelet_11"
 
 length_of_10_unity_cells_WS2 =  612 #px
 pixel_size_nm = 3.18 / length_of_10_unity_cells_WS2

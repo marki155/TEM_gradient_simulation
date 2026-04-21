@@ -17,6 +17,9 @@ from kirkland_supersampled import KirklandPrecalcPotential
 from lobato_potential import projected_atomic_potential_kernel_lobato
 from physics_helper import relativistic_wavelength_nm
 
+from dataclasses import fields, is_dataclass, asdict
+from typing import Any, Type
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_default_device(DEVICE)
 
@@ -122,6 +125,65 @@ DOYLE_TURNER_PARAMS = {
     ],
 }
 
+
+def update_from_serialized(target: Any, source: Any):
+    # Dataclass rekursiv durchlaufen
+    if is_dataclass(target):
+        if not isinstance(source, dict):
+            raise TypeError(f"Für Dataclass {type(target).__name__} wurde dict erwartet, bekam {type(source).__name__}")
+        for f in fields(target):
+            name = f.name
+            if name not in source:
+                continue
+            update_from_serialized(getattr(target, name), source[name])
+        return
+
+    # Einzelner Parameter
+    if isinstance(target, nn.Parameter):
+        tensor = torch.tensor(source, dtype=target.dtype, device=target.device)
+        with torch.no_grad():
+            target.copy_(tensor)
+        return
+
+    # Normaler Tensor
+    if isinstance(target, torch.Tensor):
+        tensor = torch.tensor(source, dtype=target.dtype, device=target.device)
+        with torch.no_grad():
+            target.copy_(tensor)
+        return
+
+    # ParameterList
+    if isinstance(target, nn.ParameterList):
+        if len(target) != len(source):
+            raise ValueError(f"ParameterList-Länge passt nicht: {len(target)} != {len(source)}")
+        for t, s in zip(target, source):
+            update_from_serialized(t, s)
+        return
+
+    # ParameterDict
+    if isinstance(target, nn.ParameterDict):
+        for key, value in source.items():
+            if key not in target:
+                raise KeyError(f"Key {key!r} fehlt in ParameterDict")
+            update_from_serialized(target[key], value)
+        return
+
+    # list
+    if isinstance(target, list):
+        if len(target) != len(source):
+            raise ValueError(f"Listenlänge passt nicht: {len(target)} != {len(source)}")
+        for t, s in zip(target, source):
+            update_from_serialized(t, s)
+        return
+
+    # dict
+    if isinstance(target, dict):
+        for key, value in source.items():
+            if key not in target:
+                raise KeyError(f"Key {key!r} fehlt im dict")
+            update_from_serialized(target[key], value)
+        return
+
 @dataclass
 class TunablePotentialParameters:
     strain_fields: List[StrainTunableParameters]
@@ -197,6 +259,16 @@ class DifferentiablePotential(nn.Module):
         for name, value in vars(self.tunable_parameters).items():
             if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
                 setattr(self, name, value)
+
+    @classmethod
+    def from_config_and_parameters(cls, config, train_methods, tunable_parameters):
+        instance = cls(config, train_methods, "cpu")
+        update_from_serialized(instance.tunable_parameters, tunable_parameters)
+        instance.apply_trainable_selection()
+        for name, value in vars(instance.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(instance, name, value)
+        return instance
 
     def get_tunable_parameters(self):
         return self.tunable_parameters
@@ -275,7 +347,8 @@ class DifferentiablePotential(nn.Module):
         positions_ = [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions]
         for i, t in enumerate(positions_):
             self.register_buffer(f"init_positions_{i}", t)
-
+        if not isinstance(init_positions[0], np.ndarray):
+            init_positions = [np.array(pos) for pos in init_positions]
         position_shifts_ = nn.ParameterList(
             [torch.tensor(pos*0.0, dtype=torch.float32, device=self.device) for pos in init_positions])
 
@@ -292,6 +365,10 @@ class DifferentiablePotential(nn.Module):
 
 
     def initialize_intensities_parameters(self, init_intensities):
+        if not isinstance(init_intensities[0], np.ndarray):
+            init_intensities = [np.array(pos) for pos in init_intensities]
+
+
         intensities_ = nn.ParameterList(
             [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
         occupancies_ = nn.ParameterList(
@@ -581,11 +658,11 @@ class DifferentiablePotential(nn.Module):
                         ]
 
 
-    def get_pos_and_ints(self, pos_idx, filter_by_area=False):
+    def get_pos_and_ints(self, pos_idx, filter_by_area=False, occ_cutoff=0.5):
 
         intensities = self.get_intensities_raw()[pos_idx].detach().clone().cpu().numpy()
         occ = self.occupancies[pos_idx].sigmoid().detach().cpu().numpy()
-        occ_neg_mask = occ < 0.5
+        occ_neg_mask = occ < occ_cutoff
         intensities[occ_neg_mask] = None # TODO
         positions = self.get_positions()[pos_idx].cpu().detach().cpu().numpy()
         if filter_by_area:
@@ -600,6 +677,19 @@ class DifferentiablePotential(nn.Module):
             #pos_idx = mask.nonzero(as_tuple=True)[0]
 
         return (positions[:,0], positions[:,1]), intensities
+
+    def occupied_positions(self, occ_cutoff=0.5):
+        pos_list = []
+        for i in range(self.N_l):
+            occ = self.occupancies[i].sigmoid().detach().cpu().numpy()
+            occ_mask = occ > occ_cutoff
+            positions = self.get_positions()[i].cpu().detach().cpu().numpy()
+            pad = self.config.padding
+            limit_mask = ((positions[:, 0] >= pad) & (positions[:, 0] < self.H + pad) &
+                          (positions[:, 1] >= pad) & (positions[:, 1] < self.W + pad))
+            mask = occ_mask & limit_mask
+            pos_list.append(positions[mask])
+        return pos_list
 
     def get_intensities_old(self):
         if self.train_methods.intensity_classes == "classes":
