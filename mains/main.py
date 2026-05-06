@@ -3,6 +3,15 @@ import torch
 import ase.build
 import numpy as np
 import os
+
+import sys
+from inspect import getsourcefile
+current_path = os.path.abspath(getsourcefile(lambda:0))
+current_dir = os.path.dirname(current_path)
+parent_dir = current_dir[:current_dir.rfind(os.path.sep)]
+
+sys.path.insert(0, parent_dir)
+
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from matplotlib import pyplot as plt
@@ -18,7 +27,7 @@ torch.set_default_device(DEVICE)
 VOLTAGE_KV = 80
 
 
-path = "..\platelet_11"
+path = "../platelet_11"
 
 length_of_10_unity_cells_WS2 =  612 #px
 pixel_size_nm = 3.18 / length_of_10_unity_cells_WS2
@@ -245,7 +254,7 @@ if __name__ == '__main__':
         pot_layer=pot_layer,
         ctf_layer=ctf_layer,
         train_method=train_method,
-        plot_every=25,
-        heavy_every=50,
+        plot_every=50,
+        heavy_every=200,
         max_steps=2_000_000,
     )
