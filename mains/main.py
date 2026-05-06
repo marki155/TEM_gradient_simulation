@@ -15,7 +15,6 @@ sys.path.insert(0, parent_dir)
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from matplotlib import pyplot as plt
-
 from nn import NN_particles, ParticlesConfig
 from testing import show_init_positions
 from training_parameter import TrainMethod
