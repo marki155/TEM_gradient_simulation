@@ -97,6 +97,7 @@ class TrainingWorker(QtCore.QObject):
         self._stop = False
         self._pause = False
         self.losses = []
+        self.deleted_steps = 0
 
 
     def _set_optimizer_lr(self):
@@ -128,7 +129,12 @@ class TrainingWorker(QtCore.QObject):
     #spin_values_changed = QtCore.Signal(float, float, float, float, float, float, float,n  bool)  # scale, rot, shift_x, shift_y
     parameter_update = QtCore.Signal(ParticlesTunableParameters)
 
+    def reset_losses(self):
+        self.deleted_steps = len(self.losses)
+        self.losses = []
 
+    def get_step(self):
+        return len(self.losses) + self.deleted_steps
 
     @QtCore.Slot()
     def request_heavy_refresh(self):
@@ -803,6 +809,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.reset_occupancies_btn = QtWidgets.QPushButton("Reset occupancies WS2")
         self.reset_free_positions_ws2_btn = QtWidgets.QPushButton("Reset free positions WS2")
         self.render_btn = QtWidgets.QPushButton("Render")
+        self.reset_losses = QtWidgets.QPushButton("Reset losses")
 
 
         self.pause_btn.setEnabled(False)
@@ -813,11 +820,15 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(self.pause_btn, 1, 0)
         control_layout.addWidget(self.resume_btn, 2, 0)
         control_layout.addWidget(self.stop_btn, 3, 0)
+        control_layout.addWidget(self.render_btn, 4, 0)
+
+
         control_layout.addWidget(self.full_target_checkbox, 0, 1)
         control_layout.addWidget(self.show_atoms_on_target_checkbox, 1, 1)
         control_layout.addWidget(self.reset_occupancies_btn, 2, 1)
         control_layout.addWidget(self.reset_free_positions_ws2_btn, 3, 1)
-        control_layout.addWidget(self.render_btn, 4, 1)
+        control_layout.addWidget(self.reset_losses, 4, 1)
+
 
         right.addWidget(control_box)
 
@@ -859,7 +870,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def on_parameter_update(self, params: ParticlesTunableParameters):
-        self.parameter_frame.refresh_from_params(len(self.worker.losses), self.worker.losses[-1])
+        self.parameter_frame.refresh_from_params(self.worker.get_step(), self.worker.losses[-1])
 
 
 
@@ -881,6 +892,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.reset_free_positions_ws2_btn.clicked.connect(self.reset_free_positions_ws2)
 
         self.render_btn.clicked.connect(self._trigger_heavy_refresh)
+        self.reset_losses.clicked.connect(self.worker.reset_losses)
 
     def reset_occupancies_ws2(self):
         self.parameter_frame.reset_occupancies_ws2()
