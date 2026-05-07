@@ -892,7 +892,10 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.reset_free_positions_ws2_btn.clicked.connect(self.reset_free_positions_ws2)
 
         self.render_btn.clicked.connect(self._trigger_heavy_refresh)
-        self.reset_losses.clicked.connect(self.worker.reset_losses)
+        self.reset_losses.clicked.connect(self._reset_losses)
+
+    def _reset_losses(self):
+        self.worker.reset_losses()
 
     def reset_occupancies_ws2(self):
         self.parameter_frame.reset_occupancies_ws2()
