@@ -5,6 +5,15 @@ import torch
 import ase.build
 import numpy as np
 import os
+
+import sys
+from inspect import getsourcefile
+current_path = os.path.abspath(getsourcefile(lambda:0))
+current_dir = os.path.dirname(current_path)
+parent_dir = current_dir[:current_dir.rfind(os.path.sep)]
+
+sys.path.insert(0, parent_dir)
+
 import json
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -20,9 +29,9 @@ torch.set_default_device(DEVICE)
 VOLTAGE_KV = 80
 
 
-path = "..\platelet_11"
+path = "../platelet_11"
 
-length_of_10_unity_cells_WS2 =  596 #px
+length_of_10_unity_cells_WS2 =  612 #px
 pixel_size_nm = 3.18 / length_of_10_unity_cells_WS2
 
 DEBUG = False
@@ -295,6 +304,7 @@ if __name__ == '__main__':
 
     model = NN_particles(
         config=config,
+        image_shape=image.shape,
         pixel_size_nm=pixel_size_nm,
         voltage_kV=VOLTAGE_KV,
         train_method=train_method,
