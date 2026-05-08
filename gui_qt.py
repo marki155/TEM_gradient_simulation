@@ -142,7 +142,7 @@ class TrainingWorker(QtCore.QObject):
         #try:
         with torch.no_grad():
             simulated_image, target_image, p_diff, loss = self.model.loss_multislice(
-                self.target, self.brightness, self.contrast
+                self.target
             )
 
             loss_item = float(loss.detach().cpu().item())

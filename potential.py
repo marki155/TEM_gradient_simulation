@@ -210,15 +210,14 @@ class TunablePotentialParameters:
 
 
 class DifferentiablePotential(nn.Module):
-    def __init__(self, config, train_methods, device,
-                 max_shifts=None, max_rotations=None):
+    def __init__(self, config, train_methods, device):
         super().__init__()
         #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
         self.pixel_size_nm = config.pixel_size_nm
         self.wavelength_nm = relativistic_wavelength_nm(config.voltage_kV)
         self.device = device
-        self.max_shifts = max_shifts
-        self.max_rotations = max_rotations
+        self.max_shifts = config.max_shifts
+        self.max_rotations = config.max_rotations
 
         self.H, self.W = config.shape
 

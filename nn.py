@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict, fields, is_dataclass
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -266,13 +266,15 @@ class ParticlesConfig:
     padding: int
     control_points_graphen: List[float]
     control_points_ws2: List[float]
+    max_shifts: Tuple[float, float]
+    max_rotations: Tuple[float, float]
 
 
 class NN_particles(nn.Module):
-    def __init__(self, config, image_shape, pixel_size_nm, voltage_kV, train_method, device='cpu', train_methods=None):
+    def __init__(self, config, pixel_size_nm, voltage_kV, train_method, device='cpu', train_methods=None):
         super().__init__()
         self.config = config
-        self.shape = image_shape
+        self.shape = config.shape
         self.pixel_size_nm = pixel_size_nm
         self.voltage_kV = voltage_kV
         self.device = device
@@ -361,9 +363,8 @@ class NN_particles(nn.Module):
 
         return self.config
 
-    def build_multislice(self, max_shifts=None, max_rotations=None):
-        potential_layer = DifferentiablePotential(self.config, self.train_method, device=self.device,
-                                                  max_shifts=max_shifts, max_rotations=max_rotations)
+    def build_multislice(self):
+        potential_layer = DifferentiablePotential(self.config, self.train_method, device=self.device)
 
 
         multislice = DifferentiableMultislice(
