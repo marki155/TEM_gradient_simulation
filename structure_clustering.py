@@ -84,20 +84,24 @@ def compare_s_triangles(s_top, s_bot, center_2d):
         return np.mean(np.linalg.norm(vecs, axis=1))
 
     angle_top = np.degrees(triangle_angle(s_top))
-    if angle_top < 0:
+    while angle_top < 0:
         angle_top += 120
-    if angle_top > 120:
+    while angle_top > 120:
         angle_top -= 120
     angle_bot = np.degrees(triangle_angle(s_bot))
-    if angle_bot < 0:
+    while angle_bot < 0:
         angle_bot += 120
-    if angle_bot > 120:
+    while angle_bot > 120:
         angle_bot -= 120
     r_top     = triangle_radius(s_top)
     r_bot     = triangle_radius(s_bot)
 
     # Rotationswinkel zwischen den beiden Dreiecken (in Grad)
     delta = np.abs(angle_top - angle_bot)
+    if delta > 60:
+        delta = 120 - delta
+    if delta < 0:
+        delta += 120
 
 
     # Radiusverhältnis: 1.0 = symmetrisch, abweichend = verzerrt
@@ -185,152 +189,152 @@ def classify_hexagon(h, atoms, ww_neighbors, r_WW=3.9):
         'S_triangles_info': triangles_info
     }
 
+if __name__ == "__main__":
+    # ── Ausführen ────────────────────────────────────────────────────────────────
+    hexagons, ww_neighbors = find_hexagons(atoms)
+    deltas = []
+    for h in hexagons:
+        h['class'], h['info'] = classify_hexagon(h, atoms, ww_neighbors)
+        deltas.append(h['info']['S_triangles_info']['angle'])
 
-# ── Ausführen ────────────────────────────────────────────────────────────────
-hexagons, ww_neighbors = find_hexagons(atoms)
-deltas = []
-for h in hexagons:
-    h['class'], h['info'] = classify_hexagon(h, atoms, ww_neighbors)
-    deltas.append(h['info']['S_triangles_info']['angle'])
+    import matplotlib.pyplot as plt
+    plt.hist(deltas, bins=30, color='skyblue', edgecolor='black')
+    plt.show()
 
-import matplotlib.pyplot as plt
-plt.hist(deltas, bins=30, color='skyblue', edgecolor='black')
-plt.show()
-
-counts = Counter(h['class'] for h in hexagons)
-print(counts)
-
-
-# ── Plot ─────────────────────────────────────────────────────────────────────
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.collections import PolyCollection, LineCollection
-import numpy as np
-from collections import Counter
-
-class_colors = {
-    'pristine_H':          '#1D9E75',
-    'pristine_T':          '#085041',
-    "pristine_T'":         '#5DCAA5',
-    'pristine_H_distorted':'#9FE1CB',
-    'V_1S_H':              '#7F77DD',
-    'V_1S_T':              '#3C3489',
-    "V_1S_T'":             '#AFA9EC',
-    'V_2S_H':              '#D85A30',
-    "V_2S_T'":             '#F0997B',
-    'V_3S_H':              '#D4537E',
-    "V_3S_T'":             '#ED93B1',
-    'V_4S_H':              '#BA7517',
-    'V_5S_H':              '#EF9F27',
-    'V_6S_H':              '#E24B4A',
-    'edge_pristine_H':     '#85B7EB',
-    'edge_pristine_T':     '#0C447C',
-    "edge_pristine_T'":    '#B5D4F4',
-    'edge_V_1S_H':         '#888780',
-    'edge_V_2S_H':         '#B4B2A9',
-    'unknown':             '#444441',
-}
-
-def triangle_verts(s_group, pos):
-    """xy-Koordinaten eines S-Dreiecks, nach Winkel sortiert."""
-    pts = pos[s_group][:, :2]
-    center = pts.mean(axis=0)
-    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-    return pts[np.argsort(angles)]
-
-# ── Figure ────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(1, 2, figsize=(18, 8),
-                         gridspec_kw={'width_ratios': [2.5, 1]})
-ax_map = axes[0]
-ax_bar = axes[1]
-
-# ── Hintergrund: Atome ────────────────────────────────────────────────────────
-syms = np.array(atoms.get_chemical_symbols())
-pos  = atoms.positions
-ax_map.scatter(pos[syms == 'S', 0], pos[syms == 'S', 1],
-               c='y', s=6, linewidths=0, zorder=1)
-ax_map.scatter(pos[syms == 'W', 0], pos[syms == 'W', 1],
-               c='#888780', s=12, linewidths=0, zorder=2)
-
-# ── Dreiecke sammeln ──────────────────────────────────────────────────────────
-top_verts_by_class  = {cls: [] for cls in class_colors}
-bot_verts_by_class  = {cls: [] for cls in class_colors}
-
-for h in hexagons:
-    cls = h['class']
-    if cls not in top_verts_by_class:
-        top_verts_by_class[cls] = []
-        bot_verts_by_class[cls] = []
-
-    w_z   = np.mean(pos[list(h['W'])][:, 2])
-    s_arr = np.array(h['S'])
-    w_arr = np.array(h['W'])
-    if len(s_arr) == 0:
-        continue
-    s_z   = pos[s_arr][:, 2]
-
-    top_i = s_arr[s_z > w_z + 0.5]
-    bot_i = s_arr[s_z < w_z - 0.5]
+    counts = Counter(h['class'] for h in hexagons)
+    print(counts)
 
 
-    top_verts_by_class[cls].append(triangle_verts(w_arr, pos))
+    # ── Plot ─────────────────────────────────────────────────────────────────────
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.collections import PolyCollection, LineCollection
+    import numpy as np
+    from collections import Counter
 
-# ── Dreiecke zeichnen ─────────────────────────────────────────────────────────
-for cls in list(top_verts_by_class.keys()) + list(bot_verts_by_class.keys()):
-    color = class_colors.get(cls, '#888780')
-    alpha = 0.45 if cls.startswith('edge') else 0.65
+    class_colors = {
+        'pristine_H':          '#1D9E75',
+        'pristine_T':          '#085041',
+        "pristine_T'":         '#5DCAA5',
+        'pristine_H_distorted':'#9FE1CB',
+        'V_1S_H':              '#7F77DD',
+        'V_1S_T':              '#3C3489',
+        "V_1S_T'":             '#AFA9EC',
+        'V_2S_H':              '#D85A30',
+        "V_2S_T'":             '#F0997B',
+        'V_3S_H':              '#D4537E',
+        "V_3S_T'":             '#ED93B1',
+        'V_4S_H':              '#BA7517',
+        'V_5S_H':              '#EF9F27',
+        'V_6S_H':              '#E24B4A',
+        'edge_pristine_H':     '#85B7EB',
+        'edge_pristine_T':     '#0C447C',
+        "edge_pristine_T'":    '#B5D4F4',
+        'edge_V_1S_H':         '#888780',
+        'edge_V_2S_H':         '#B4B2A9',
+        'unknown':             '#444441',
+    }
 
-    # oberes Dreieck: gefüllt
-    if top_verts_by_class.get(cls):
-        col_top = PolyCollection(top_verts_by_class[cls],
-                                 facecolor=color,
-                                 edgecolor='white',
-                                 linewidth=0.4,
-                                 alpha=alpha,
-                                 zorder=3)
-        ax_map.add_collection(col_top)
+    def triangle_verts(s_group, pos):
+        """xy-Koordinaten eines S-Dreiecks, nach Winkel sortiert."""
+        pts = pos[s_group][:, :2]
+        center = pts.mean(axis=0)
+        angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+        return pts[np.argsort(angles)]
 
-    # unteres Dreieck: nur Umriss, gestrichelt
-    if bot_verts_by_class.get(cls):
-        for verts in bot_verts_by_class[cls]:
-            closed = np.vstack([verts, verts[0]])  # Dreieck schließen
-            ax_map.plot(closed[:, 0], closed[:, 1],
-                        color=color, linewidth=0.8,
-                        linestyle='--', alpha=alpha + 0.1, zorder=4)
+    # ── Figure ────────────────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(18, 8),
+                             gridspec_kw={'width_ratios': [2.5, 1]})
+    ax_map = axes[0]
+    ax_bar = axes[1]
 
-ax_map.autoscale_view()
-ax_map.set_aspect('equal')
-ax_map.set_xlabel('x (Å)', fontsize=11)
-ax_map.set_ylabel('y (Å)', fontsize=11)
-ax_map.set_title(f'WS₂ S-Dreiecke  —  {len(hexagons)} Hexagone  '
-                 f'(▲ oben  - - unten)', fontsize=12)
+    # ── Hintergrund: Atome ────────────────────────────────────────────────────────
+    syms = np.array(atoms.get_chemical_symbols())
+    pos  = atoms.positions
+    ax_map.scatter(pos[syms == 'S', 0], pos[syms == 'S', 1],
+                   c='y', s=6, linewidths=0, zorder=1)
+    ax_map.scatter(pos[syms == 'W', 0], pos[syms == 'W', 1],
+                   c='#888780', s=12, linewidths=0, zorder=2)
 
-# ── Legende ───────────────────────────────────────────────────────────────────
-cls_order = [c for c in class_colors if c in counts]
-for c in counts:
-    if c not in cls_order:
-        cls_order.append(c)
+    # ── Dreiecke sammeln ──────────────────────────────────────────────────────────
+    top_verts_by_class  = {cls: [] for cls in class_colors}
+    bot_verts_by_class  = {cls: [] for cls in class_colors}
 
-patches = [
-    mpatches.Patch(facecolor=class_colors.get(c, '#888780'),
-                   edgecolor='white', linewidth=0.5,
-                   label=f"{c}  ({counts[c]})")
-    for c in cls_order
-]
-ax_map.legend(handles=patches, fontsize=7.5, loc='upper right',
-              framealpha=0.92, ncol=1)
+    for h in hexagons:
+        cls = h['class']
+        if cls not in top_verts_by_class:
+            top_verts_by_class[cls] = []
+            bot_verts_by_class[cls] = []
 
-# ── Balkendiagramm ────────────────────────────────────────────────────────────
-values = [counts[c] for c in cls_order]
-colors = [class_colors.get(c, '#888780') for c in cls_order]
-bars   = ax_bar.barh(cls_order, values, color=colors, alpha=0.9, height=0.6)
-ax_bar.bar_label(bars, padding=4, fontsize=9)
-ax_bar.set_xlabel('Anzahl Hexagone', fontsize=10)
-ax_bar.set_title('Klassenverteilung', fontsize=12)
-ax_bar.invert_yaxis()
-ax_bar.set_xlim(0, max(values) * 1.25)
-ax_bar.tick_params(labelsize=9)
+        w_z   = np.mean(pos[list(h['W'])][:, 2])
+        s_arr = np.array(h['S'])
+        w_arr = np.array(h['W'])
+        if len(s_arr) == 0:
+            continue
+        s_z   = pos[s_arr][:, 2]
 
-plt.tight_layout()
-plt.savefig('ws2_triangles.png', dpi=150, bbox_inches='tight')
-plt.show()
+        top_i = s_arr[s_z > w_z + 0.5]
+        bot_i = s_arr[s_z < w_z - 0.5]
+
+
+        top_verts_by_class[cls].append(triangle_verts(w_arr, pos))
+
+    # ── Dreiecke zeichnen ─────────────────────────────────────────────────────────
+    for cls in list(top_verts_by_class.keys()) + list(bot_verts_by_class.keys()):
+        color = class_colors.get(cls, '#888780')
+        alpha = 0.45 if cls.startswith('edge') else 0.65
+
+        # oberes Dreieck: gefüllt
+        if top_verts_by_class.get(cls):
+            col_top = PolyCollection(top_verts_by_class[cls],
+                                     facecolor=color,
+                                     edgecolor='white',
+                                     linewidth=0.4,
+                                     alpha=alpha,
+                                     zorder=3)
+            ax_map.add_collection(col_top)
+
+        # unteres Dreieck: nur Umriss, gestrichelt
+        if bot_verts_by_class.get(cls):
+            for verts in bot_verts_by_class[cls]:
+                closed = np.vstack([verts, verts[0]])  # Dreieck schließen
+                ax_map.plot(closed[:, 0], closed[:, 1],
+                            color=color, linewidth=0.8,
+                            linestyle='--', alpha=alpha + 0.1, zorder=4)
+
+    ax_map.autoscale_view()
+    ax_map.set_aspect('equal')
+    ax_map.set_xlabel('x (Å)', fontsize=11)
+    ax_map.set_ylabel('y (Å)', fontsize=11)
+    ax_map.set_title(f'WS₂ S-Dreiecke  —  {len(hexagons)} Hexagone  '
+                     f'(▲ oben  - - unten)', fontsize=12)
+
+    # ── Legende ───────────────────────────────────────────────────────────────────
+    cls_order = [c for c in class_colors if c in counts]
+    for c in counts:
+        if c not in cls_order:
+            cls_order.append(c)
+
+    patches = [
+        mpatches.Patch(facecolor=class_colors.get(c, '#888780'),
+                       edgecolor='white', linewidth=0.5,
+                       label=f"{c}  ({counts[c]})")
+        for c in cls_order
+    ]
+    ax_map.legend(handles=patches, fontsize=7.5, loc='upper right',
+                  framealpha=0.92, ncol=1)
+
+    # ── Balkendiagramm ────────────────────────────────────────────────────────────
+    values = [counts[c] for c in cls_order]
+    colors = [class_colors.get(c, '#888780') for c in cls_order]
+    bars   = ax_bar.barh(cls_order, values, color=colors, alpha=0.9, height=0.6)
+    ax_bar.bar_label(bars, padding=4, fontsize=9)
+    ax_bar.set_xlabel('Anzahl Hexagone', fontsize=10)
+    ax_bar.set_title('Klassenverteilung', fontsize=12)
+    ax_bar.invert_yaxis()
+    ax_bar.set_xlim(0, max(values) * 1.25)
+    ax_bar.tick_params(labelsize=9)
+
+    plt.tight_layout()
+    plt.savefig('ws2_triangles.png', dpi=150, bbox_inches='tight')
+    plt.show()

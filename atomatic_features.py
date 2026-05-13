@@ -1,8 +1,6 @@
 import os
 
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-import hdbscan
+
 import numpy as np
 
 from structure_clustering import find_hexagons, compare_s_triangles
@@ -85,7 +83,9 @@ X = np.array([hexagon_features(h, atoms, ww_neighbors) for h in hexagons])
 
 # NaN/Inf auffangen
 X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import hdbscan
 X_scaled = StandardScaler().fit_transform(X)
 
 # ── HDBSCAN ───────────────────────────────────────────────────────────────────
