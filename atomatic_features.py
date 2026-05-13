@@ -5,7 +5,7 @@ from sklearn.cluster import KMeans
 import hdbscan
 import numpy as np
 
-from structure_clustering import find_hexagons
+from structure_clustering import find_hexagons, compare_s_triangles
 
 
 def hexagon_features(h, atoms, ww_neighbors):
