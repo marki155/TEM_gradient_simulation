@@ -43,24 +43,25 @@ labels = clusterer.fit_predict(X_2d)
 
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import matplotlib.cm as mplcm
+import numpy as np
+
+unique_labels = np.unique(labels)
+cmap = mplcm.get_cmap("tab10")  # kein zweites Argument
+
+# Farben als Liste, nicht als numpy-Array
+color_map = {l: "#aaaaaa" if l == -1 else cmap(i / max(len(unique_labels)-1, 1))
+             for i, l in enumerate(unique_labels)}
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-# ── Farben ──────────────────────────────────────────────
-unique_labels = np.unique(labels)
-cmap = plt.cm.get_cmap("tab10", len(unique_labels))
-color_map = {l: ("#aaaaaa" if l == -1 else cmap(i))
-             for i, l in enumerate(unique_labels)}
-colors = np.array([color_map[l] for l in labels])
-
-# ── 1. UMAP-Plot ─────────────────────────────────────────
+# ── 1. UMAP-Plot ──────────────────────────────────────────
 ax = axes[0]
 for l in unique_labels:
     mask = labels == l
     label_str = "Ausreißer" if l == -1 else f"Cluster {l}  (n={mask.sum()})"
     ax.scatter(X_2d[mask, 0], X_2d[mask, 1],
-               c=[color_map[l]], s=18, alpha=0.7,
+               color=color_map[l], s=18, alpha=0.7,
                linewidths=0, label=label_str)
 ax.set_xlabel("UMAP-1")
 ax.set_ylabel("UMAP-2")
@@ -74,7 +75,7 @@ for l in unique_labels:
     mask = labels == l
     label_str = "Ausreißer" if l == -1 else f"Cluster {l}"
     ax2.scatter(w_positions[mask, 0], w_positions[mask, 1],
-                c=[color_map[l]], s=22, alpha=0.85,
+                color=color_map[l], s=22, alpha=0.85,
                 linewidths=0, label=label_str)
 ax2.set_xlabel("x (Å)")
 ax2.set_ylabel("y (Å)")
