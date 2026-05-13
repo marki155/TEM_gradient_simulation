@@ -97,11 +97,7 @@ def compare_s_triangles(s_top, s_bot, center_2d):
     r_bot     = triangle_radius(s_bot)
 
     # Rotationswinkel zwischen den beiden Dreiecken (in Grad)
-    delta = np.abs(angle_top - angle_bot)
-    if delta > 60:
-        delta = 120 - delta
-    if delta < 0:
-        delta += 120
+    delta = np.abs(angle_top - angle_bot) % 60
 
 
     # Radiusverhältnis: 1.0 = symmetrisch, abweichend = verzerrt
