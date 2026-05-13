@@ -161,7 +161,7 @@ patches = [mpatches.Patch(color=color_map[l],
 ax_map.legend(handles=patches, fontsize=8, loc='upper right', framealpha=0.9)
 
 # ── 2. Feature-Scatter: Verdrehwinkel vs. n_S ────────────────────────────────
-angles = X[:, 6]   # Verdrehwinkel
+angles = X[:, 3]   # Verdrehwinkel
 n_S    = X[:, 0]   # Anzahl S
 
 for l in unique_labels:
