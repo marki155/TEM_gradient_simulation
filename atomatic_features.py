@@ -130,35 +130,27 @@ def triangle_verts(s_group, pos):
     angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
     return pts[np.argsort(angles)]
 
-top_by_cluster = {l: [] for l in unique_labels}
-bot_by_cluster = {l: [] for l in unique_labels}
+by_cluster = {l: [] for l in unique_labels}
 
 for h in hexagons:
     l     = h['cluster']
     s_arr = np.array(h['S'])
+    w_arr = np.array(h['W'])
     if len(s_arr) == 0:
         continue
     w_z   = np.mean(pos[list(h['W'])][:, 2])
     s_z   = pos[s_arr][:, 2]
     top_i = s_arr[s_z > w_z + 0.5]
     bot_i = s_arr[s_z < w_z - 0.5]
-    if len(top_i) == 3:
-        top_by_cluster[l].append(triangle_verts(top_i, pos))
-    if len(bot_i) == 3:
-        bot_by_cluster[l].append(triangle_verts(bot_i, pos))
+    by_cluster[l].append(triangle_verts(w_arr, pos))
 
 for l in unique_labels:
     color = color_map[l]
     alpha = 0.35 if l == -1 else 0.65
     if top_by_cluster[l]:
         ax_map.add_collection(PolyCollection(
-            top_by_cluster[l], facecolor=color,
+            by_cluster[l], facecolor=color,
             edgecolor='white', linewidth=0.3, alpha=alpha, zorder=3))
-    for verts in bot_by_cluster[l]:
-        closed = np.vstack([verts, verts[0]])
-        ax_map.plot(closed[:, 0], closed[:, 1],
-                    color=color, linewidth=0.7,
-                    linestyle='--', alpha=alpha + 0.1, zorder=4)
 
 ax_map.autoscale_view()
 ax_map.set_aspect('equal')
