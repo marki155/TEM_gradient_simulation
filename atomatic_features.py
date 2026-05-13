@@ -84,7 +84,7 @@ import hdbscan
 X_scaled = StandardScaler().fit_transform(X)
 
 # ── HDBSCAN ───────────────────────────────────────────────────────────────────
-clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=3)
+clusterer = hdbscan.HDBSCAN(min_cluster_size=8, min_samples=3)
 labels    = clusterer.fit_predict(X_scaled)
 
 for i, h in enumerate(hexagons):
