@@ -58,10 +58,7 @@ def hexagon_features(h, atoms, ww_neighbors):
     w_dist_std = float(np.std(w_dists))
 
     return np.array([
-        n_S,           # Anzahl S-Atome
-        n_top,         # S oben
-        n_bot,         # S unten
-        n_top - n_bot, # Asymmetrie oben/unten
+        n_S,
         r_mean,        # mittlerer S-Abstand zum Zentrum
         r_std,         # Streuung S-Abstände
         angle,         # Verdrehwinkel top/bot Dreieck
@@ -204,7 +201,7 @@ plt.savefig('ws2_auto_clusters.png', dpi=150, bbox_inches='tight')
 plt.show()
 
 # ── Feature-Bedeutung ausgeben ────────────────────────────────────────────────
-feature_names = ['n_S', 'n_top', 'n_bot', 'asym_top_bot',
+feature_names = ['n_S',
                  'r_mean', 'r_std', 'angle', 'r_ratio',
                  'min_w_coord', 'mean_w_coord', 'w_dist_std']
 print("\nCluster-Mittelwerte pro Feature:")
