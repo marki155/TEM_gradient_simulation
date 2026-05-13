@@ -304,7 +304,6 @@ if __name__ == '__main__':
 
     model = NN_particles(
         config=config,
-        image_shape=image.shape,
         pixel_size_nm=pixel_size_nm,
         voltage_kV=VOLTAGE_KV,
         train_method=train_method,

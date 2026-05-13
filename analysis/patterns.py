@@ -248,7 +248,7 @@ def load_json(path=None):
 if __name__ == "__main__":
     path = "../platelet_11/"
     config_file = path + "particles_config.json"
-    param_file = path + "best.json"
+    param_file = path + "best_long_free_ws2_no_occ4.json"
     params_json = load_json(param_file)
     config_json = load_json(config_file)
 

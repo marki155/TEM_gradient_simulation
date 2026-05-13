@@ -677,7 +677,8 @@ class DifferentiablePotential(nn.Module):
 
         return (positions[:,0], positions[:,1]), intensities
 
-    def occupied_positions(self, occ_cutoff=0.5):
+    def occupied_free_shifts(self, occ_cutoff=0.5):
+        shifts = []
         pos_list = []
         for i in range(self.N_l):
             occ = self.occupancies[i].sigmoid().detach().cpu().numpy()
@@ -687,8 +688,34 @@ class DifferentiablePotential(nn.Module):
             limit_mask = ((positions[:, 0] >= pad) & (positions[:, 0] < self.H + pad) &
                           (positions[:, 1] >= pad) & (positions[:, 1] < self.W + pad))
             mask = occ_mask & limit_mask
+
+            shi = self.tunable_parameters.position_shifts[i]
+            shifts.append(shi.cpu().detach().numpy()[mask])
             pos_list.append(positions[mask])
-        return pos_list
+
+        return pos_list,shifts
+
+    def occupied_positions_A(self, occ_cutoff=0.5, include_graphene=False):
+        pos_list = []
+        Z_list = []
+        for i in range(self.N_l):
+            if (i == self._IDX["Gr"] and not include_graphene):
+                continue
+            occ = self.occupancies[i].sigmoid().detach().cpu().numpy()
+            occ_mask = occ > occ_cutoff
+            positions = self.get_positions()[i].cpu().detach().cpu().numpy()
+            pad = self.config.padding
+            limit_mask = ((positions[:, 0] >= pad) & (positions[:, 0] < self.H + pad) &
+                          (positions[:, 1] >= pad) & (positions[:, 1] < self.W + pad))
+            mask = occ_mask & limit_mask
+
+            filtered_positions = positions[mask] * self.config.pixel_size_nm * 10
+            z_pos_A = self.config.z_positions_nm[i] * 10
+            z_poses = np.full(filtered_positions.shape[0], z_pos_A)
+            full_positions = np.hstack((filtered_positions, z_poses[:, np.newaxis]))
+            pos_list.append(full_positions)
+            Z_list.append(self.get_intensities_raw()[i][mask].cpu().detach().numpy())
+        return np.concatenate(pos_list), np.concatenate(Z_list)
 
     def get_intensities_old(self):
         if self.train_methods.intensity_classes == "classes":
