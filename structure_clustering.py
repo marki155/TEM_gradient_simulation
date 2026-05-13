@@ -3,11 +3,11 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans, DBSCAN
 from umap import umap_ as umap
 import numpy as np
-import ase
+from ase.io import read
 import os
 
 path = "platelet_11/"
-atoms = ase.io.read(os.path.join(path, "structure_mod.xyz"))
+atoms = read(os.path.join(path, "structure_mod.xyz"))
 
 
 
