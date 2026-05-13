@@ -145,7 +145,7 @@ for l in unique_labels:
     cx, cy = X_2d[mask].mean(axis=0)
     # Feature-Mittelwerte als Tooltip im Plot
     n_s_mean   = X[mask, 0].mean()
-    angle_mean = X[mask, 6].mean()
+    angle_mean = X[mask, 3].mean()
     ax_umap.text(cx, cy,
                  f"C{l}\nn_S={n_s_mean:.1f}\n{angle_mean:.0f}°",
                  fontsize=7, ha='center', va='center',
