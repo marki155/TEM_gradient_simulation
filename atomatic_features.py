@@ -147,7 +147,7 @@ for h in hexagons:
 for l in unique_labels:
     color = color_map[l]
     alpha = 0.35 if l == -1 else 0.65
-    if top_by_cluster[l]:
+    if by_cluster[l]:
         ax_map.add_collection(PolyCollection(
             by_cluster[l], facecolor=color,
             edgecolor='white', linewidth=0.3, alpha=alpha, zorder=3))
