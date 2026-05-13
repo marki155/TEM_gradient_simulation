@@ -38,7 +38,7 @@ X_2d = reducer.fit_transform(X)
 # 4. Clustering
 # HDBSCAN: findet Cluster automatisch, markiert Ausreißer als -1
 import hdbscan
-clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=5)
+clusterer = hdbscan.HDBSCAN(min_cluster_size=50, min_samples=5)
 labels = clusterer.fit_predict(X_2d)
 
 
