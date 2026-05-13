@@ -63,8 +63,6 @@ def hexagon_features(h, atoms, ww_neighbors):
         r_std,         # Streuung S-Abstände
         angle,         # Verdrehwinkel top/bot Dreieck
         r_ratio,       # Radiusverhältnis top/bot
-        min_w_coord,   # kleinste W-Außenkoordination
-        mean_w_coord,  # mittlere W-Außenkoordination
         w_dist_std,    # W-Dreieck Verzerrung
     ])
 
@@ -203,7 +201,9 @@ plt.show()
 # ── Feature-Bedeutung ausgeben ────────────────────────────────────────────────
 feature_names = ['n_S',
                  'r_mean', 'r_std', 'angle', 'r_ratio',
-                 'min_w_coord', 'mean_w_coord', 'w_dist_std']
+                 'w_dist_std']
+
+
 print("\nCluster-Mittelwerte pro Feature:")
 print(f"{'Feature':<16}", end='')
 for l in unique_labels:
