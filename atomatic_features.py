@@ -2,7 +2,7 @@ import os
 
 
 import numpy as np
-
+import matplotlib.pyplot as plt
 from structure_clustering import find_hexagons, compare_s_triangles
 
 
@@ -76,12 +76,16 @@ hexagons, ww_neighbors = find_hexagons(atoms)
 
 X = np.array([hexagon_features(h, atoms, ww_neighbors) for h in hexagons])
 
+from sklearn.preprocessing import StandardScaler
 # NaN/Inf auffangen
 X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-from sklearn.preprocessing import StandardScaler
+X_scaled = StandardScaler().fit_transform(X)
+import umap
+
+
 from sklearn.cluster import KMeans
 import hdbscan
-X_scaled = StandardScaler().fit_transform(X)
+
 
 # ── HDBSCAN ───────────────────────────────────────────────────────────────────
 clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=10)
@@ -94,12 +98,76 @@ cluster_counts = Counter(labels)
 print(f"Cluster gefunden: {len(set(labels) - {-1})}")
 print(cluster_counts)
 
+
+
 # ── Plot: räumlich + Feature-Scatter ─────────────────────────────────────────
-import matplotlib.pyplot as plt
+
 import matplotlib.patches as mpatches
 import matplotlib.cm as mplcm
 
 unique_labels = sorted(set(labels))
+
+
+# ── UMAP auf den Hexagon-Features ────────────────────────────────────────────
+reducer  = umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)
+X_2d     = reducer.fit_transform(X_scaled)
+
+# ── Plot: UMAP + räumliche Karte nebeneinander ────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+ax_umap, ax_map = axes
+
+# ── 1. UMAP-Projektion ────────────────────────────────────────────────────────
+
+# ── Feature-Bedeutung ausgeben ────────────────────────────────────────────────
+feature_names = ['n_S',
+                 'r_mean', 'r_std', 'angle', 'r_ratio',
+                 'w_dist_std']
+
+
+cmap          = mplcm.get_cmap('tab10')
+color_map     = {l: ('#aaaaaa' if l == -1 else cmap(l % 10))
+                 for l in unique_labels}
+
+
+for l in unique_labels:
+    mask  = labels == l
+    color = color_map[l]
+    label = f"Cluster {l}  (n={cluster_counts[l]})" if l >= 0 else f"Ausreißer  (n={cluster_counts[l]})"
+    ax_umap.scatter(X_2d[mask, 0], X_2d[mask, 1],
+                    c=[color], s=20, alpha=0.8,
+                    linewidths=0, label=label)
+
+# Cluster-Zentren beschriften
+for l in unique_labels:
+    if l < 0:
+        continue
+    mask = labels == l
+    cx, cy = X_2d[mask].mean(axis=0)
+    # Feature-Mittelwerte als Tooltip im Plot
+    n_s_mean   = X[mask, 0].mean()
+    angle_mean = X[mask, 6].mean()
+    ax_umap.text(cx, cy,
+                 f"C{l}\nn_S={n_s_mean:.1f}\n{angle_mean:.0f}°",
+                 fontsize=7, ha='center', va='center',
+                 bbox=dict(boxstyle='round,pad=0.2',
+                           facecolor='white', alpha=0.7,
+                           edgecolor='none'))
+
+ax_umap.set_xlabel('UMAP-1', fontsize=11)
+ax_umap.set_ylabel('UMAP-2', fontsize=11)
+ax_umap.set_title('UMAP-Projektion der Hexagon-Features\n'
+                  '(Beschriftung: Cluster-Nr · Ø n_S · Ø Verdrehwinkel)',
+                  fontsize=11)
+ax_umap.legend(fontsize=8, markerscale=1.5, framealpha=0.9)
+
+
+
+
+
+
+
+
+
 n_clusters    = len([l for l in unique_labels if l >= 0])
 cmap          = mplcm.get_cmap('tab10')
 color_map     = {l: ('#aaaaaa' if l == -1 else cmap(l % 10))
@@ -198,10 +266,6 @@ plt.tight_layout()
 plt.savefig('ws2_auto_clusters.png', dpi=150, bbox_inches='tight')
 plt.show()
 
-# ── Feature-Bedeutung ausgeben ────────────────────────────────────────────────
-feature_names = ['n_S',
-                 'r_mean', 'r_std', 'angle', 'r_ratio',
-                 'w_dist_std']
 
 
 print("\nCluster-Mittelwerte pro Feature:")
