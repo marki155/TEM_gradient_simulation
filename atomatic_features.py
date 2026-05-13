@@ -88,7 +88,7 @@ import hdbscan
 
 
 # ── HDBSCAN ───────────────────────────────────────────────────────────────────
-clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=10)
+clusterer = hdbscan.HDBSCAN(min_cluster_size=10, min_samples=2)
 labels    = clusterer.fit_predict(X_scaled)
 
 for i, h in enumerate(hexagons):
