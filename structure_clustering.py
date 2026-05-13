@@ -7,7 +7,7 @@ import ase
 import os
 
 path = "platelet_11/"
-atoms = ase.io.read(os.path.join(path, "structure_mod.xyz")
+atoms = ase.io.read(os.path.join(path, "structure_mod.xyz"))
 
 
 
