@@ -18,7 +18,7 @@ from training_parameter import TrainMethod
 
 matplotlib.use("QtAgg")
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib import patches
 
@@ -27,6 +27,19 @@ from train_methods_gui_builder_qt import TrainMethodEditor
 from scipy.ndimage import gaussian_filter
 
 SHOW_POTENTIAL=True
+
+#: Anzeige-Interpolation der Bildpanels. "antialiased" (Matplotlib-Default)
+#: filtert beim Zeichnen ueber das ganze Bild und kostet hier ~1 s pro Redraw.
+IMAGE_INTERPOLATION = "nearest"
+
+#: Potentialbilder nur in dieser Verkleinerung anzeigen (spart Zeichenzeit;
+#: das Panel ist ohnehin nur ein paar hundert Pixel breit).
+POTENTIAL_DISPLAY_DOWNSAMPLE = 2
+
+#: Kantenlaenge, mit der die Strain-Karten fuer die Anzeige abgetastet werden.
+#: Das Feld ist ein Spline mit ~10x10 Kontrollpunkten - auf dem vollen Gitter
+#: (hier 1892x2045) dauert das ueber 7 s pro Aktualisierung, hier 0.1 s.
+STRAIN_MAP_RESOLUTION = 256
 
 
 
@@ -66,6 +79,15 @@ class VizPayload:
     active_group: Optional[str] = None
 
 
+def potential_images_for_display(pot_layer, downsample=POTENTIAL_DISPLAY_DOWNSAMPLE):
+    """Potentialbilder fuer die Anzeige - bei Bedarf ausgeduennt."""
+
+    images = pot_layer.get_potential_images()
+    if downsample and downsample > 1:
+        images = [image[::downsample, ::downsample] for image in images]
+    return images
+
+
 def collect_layer_visuals(pot_layer):
     """Positionen, Intensitaeten und Histogramme aller Schichten einsammeln."""
 
@@ -91,13 +113,18 @@ def collect_layer_visuals(pot_layer):
     return pot_positions, pot_intensities, hist_counts, hist_edges
 
 
-def strain_maps_for_active_group(pot_layer, train_method):
+def strain_maps_for_active_group(pot_layer, train_method, resolution=STRAIN_MAP_RESOLUTION):
     """Strain-Maps der aktiven Gruppe (ohne aktive Gruppe: letzte Gruppe)."""
 
     name = train_method.active_group
     if name is None or name not in pot_layer.strain_fields:
         name = pot_layer.group_names[-1]
-    return pot_layer.strain_fields[name].strain_maps(), name
+
+    field = pot_layer.strain_fields[name]
+    scale = resolution / max(field.H, field.W)
+    H = max(32, int(round(field.H * scale)))
+    W = max(32, int(round(field.W * scale)))
+    return field.strain_maps(H=H, W=W), name
 
 
 class TrainingWorker(QtCore.QObject):
@@ -230,7 +257,7 @@ class TrainingWorker(QtCore.QObject):
         strain_maps, strain_group = strain_maps_for_active_group(
             self.pot_layer, self.train_method)
 
-        pot_imgs = self.pot_layer.get_potential_images()
+        pot_imgs = potential_images_for_display(self.pot_layer)
 
 
 
@@ -354,6 +381,7 @@ class MplCanvas(FigureCanvasQTAgg):
         self.layer_groups = [l.group for l in config.layers] if config is not None else []
 
         self.target_tensor = target_tensor
+        self._target_shape = None
 
         self.full_canvas_target_mode = False
         self.full_target_ax = None
@@ -385,12 +413,11 @@ class MplCanvas(FigureCanvasQTAgg):
             ax_target.set_title("Target")
 
             self.full_target_ax = ax_target
-            self.full_target_im = ax_target.imshow(
-                np.zeros((64, 64), dtype=np.float32),
-                cmap="viridis",
-                origin="lower"
-            )
-            self.full_target_scatter = ax_target.scatter([], [], c="red", s=1)
+            dummy = (np.zeros_like(self.target_tensor.detach().cpu().numpy(), dtype=np.float32)
+                     if self.target_tensor is not None else np.zeros((64, 64), dtype=np.float32))
+            self.full_target_im = ax_target.imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
+            self.full_target_scatter = ax_target.scatter(
+                [], [], c=[], cmap="Wistia", s=1)
 
 
             self.axes_cmap = {"loss": ax_loss, "target_full": ax_target}
@@ -438,21 +465,21 @@ class MplCanvas(FigureCanvasQTAgg):
         self.axes_cmap["loss"].set_xlabel("Step")
         self.axes_cmap["loss"].set_ylabel("Loss")
 
-        self.im_sim = self.axes_cmap["sim"].imshow(dummy, cmap="viridis", origin="lower")
-        self.im_diff = self.axes_cmap["diff"].imshow(dummy, cmap="viridis", origin="lower")
-        self.im_tgt = self.axes_cmap["target"].imshow(dummy, cmap="viridis", origin="lower")
-        self.im_tgt_sc = self.axes_cmap["target"].scatter([], [], c="red", s=2)
+        self.im_sim = self.axes_cmap["sim"].imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_diff = self.axes_cmap["diff"].imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_tgt = self.axes_cmap["target"].imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_tgt_sc = self.axes_cmap["target"].scatter([], [], c=[], cmap="Wistia", s=2)
 
-        self.im_eps_xx = self.axes_cmap["eps_xx"].imshow(dummy, cmap="RdBu", origin="lower")
-        self.im_eps_yy = self.axes_cmap["eps_yy"].imshow(dummy, cmap="RdBu", origin="lower")
-        self.im_eps_xy = self.axes_cmap["eps_xy"].imshow(dummy, cmap="RdBu", origin="lower")
-        self.im_ux = self.axes_cmap["ux"].imshow(dummy, cmap="RdBu", origin="lower")
-        self.im_uy = self.axes_cmap["uy"].imshow(dummy, cmap="RdBu", origin="lower")
+        self.im_eps_xx = self.axes_cmap["eps_xx"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_eps_yy = self.axes_cmap["eps_yy"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_eps_xy = self.axes_cmap["eps_xy"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_ux = self.axes_cmap["ux"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_uy = self.axes_cmap["uy"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
 
         self.pot_scatters = []
         for i in range(n_layers):
             if SHOW_POTENTIAL:
-                sc = self.axes_cmap["pot" + str(i)].imshow(dummy, cmap="RdBu", origin="lower")
+                sc = self.axes_cmap["pot" + str(i)].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
             else:
                 sc = self.axes_cmap["pot" + str(i)].scatter([], [], s=2, c=[], cmap="viridis")
             self.pot_scatters.append(sc)
@@ -463,12 +490,14 @@ class MplCanvas(FigureCanvasQTAgg):
             vmin=-np.pi,
             vmax=np.pi,
             origin="lower",
+            interpolation=IMAGE_INTERPOLATION,
         )
         self.im_ring = self.axes_cmap["ctf"].imshow(
             np.zeros((10, 10), dtype=np.float32),
             cmap="Greens",
             alpha=0.35,
             origin="lower",
+            interpolation=IMAGE_INTERPOLATION,
         )
 
         self.hist_lines = []
@@ -492,6 +521,80 @@ class MplCanvas(FigureCanvasQTAgg):
             )
             self.axes_cmap["target"].add_patch(rect)
 
+    # ------------------------------------------------------------------
+    # Zoom
+    # ------------------------------------------------------------------
+    def target_axis(self):
+        """Die gerade sichtbare Target-Achse (normal oder Vollbild)."""
+
+        if self.full_canvas_target_mode:
+            return self.full_target_ax
+        return self.axes_cmap.get("target")
+
+    def reset_zoom(self):
+        """Zoom aller Bildpanels auf das ganze Bild zuruecksetzen."""
+
+        if self._target_shape is None:
+            return
+        H, W = self._target_shape
+        for ax in ([self.target_axis()] if self.full_canvas_target_mode
+                   else [self.axes_cmap[k] for k in ("sim", "diff", "target")
+                         if k in self.axes_cmap]):
+            if ax is None:
+                continue
+            ax.set_xlim(-0.5, W - 0.5)
+            ax.set_ylim(-0.5, H - 0.5)
+        self.draw_idle()
+
+    def _scatter_size(self, ax):
+        """Punktgroesse an den Zoom anpassen - sonst sieht man beim
+        Reinzoomen nur noch Staub, beim Rauszoomen nur noch Farbe."""
+
+        if ax is None or self._target_shape is None:
+            return 0.5
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        span = max(abs(x1 - x0), abs(y1 - y0), 1e-6)
+        return float(np.clip(1200.0 / span, 0.5, 60.0))
+
+    def _apply_target_image(self, artist, ax, image):
+        """Bild setzen, ohne den Zoom zu verlieren."""
+
+        shape = image.shape
+        first_or_changed = self._target_shape != shape
+        self._target_shape = shape
+
+        artist.set_data(image)
+        vmin = float(np.nanmin(image))
+        vmax = float(np.nanmax(image))
+        if not np.isfinite(vmin):
+            vmin = 0.0
+        if not np.isfinite(vmax) or vmax == vmin:
+            vmax = vmin + 1e-12
+        artist.set_clim(vmin, vmax)
+        artist.set_extent((-0.5, shape[1] - 0.5, -0.5, shape[0] - 0.5))
+
+        if first_or_changed:
+            ax.set_xlim(-0.5, shape[1] - 0.5)
+            ax.set_ylim(-0.5, shape[0] - 0.5)
+
+    def _update_target_scatter(self, scatter, ax, payload):
+        pos, ints = self.get_pos_and_ints(payload)
+        ints = np.asarray(ints, dtype=np.float32)
+
+        if len(ints) == 0:
+            scatter.set_offsets(np.empty((0, 2), dtype=np.float32))
+            scatter.set_array(np.array([], dtype=np.float32))
+            return
+
+        scatter.set_offsets(np.column_stack([np.asarray(pos[1]), np.asarray(pos[0])]))
+        scatter.set_array(ints)
+        finite = ints[np.isfinite(ints)]
+        if finite.size:
+            imin, imax = float(finite.min()), float(finite.max())
+            scatter.set_clim(imin, imax if imax > imin else imin + 1e-12)
+        scatter.set_sizes(np.full(len(ints), self._scatter_size(ax)))
+
     def _safe_set_image(self, artist, arr):
         artist.set_data(arr)
         vmin = float(np.nanmin(arr))
@@ -511,6 +614,29 @@ class MplCanvas(FigureCanvasQTAgg):
             self.loss_line.set_data(xs, losses)
             loss_ax.relim()
             loss_ax.autoscale_view()
+            self.redraw_loss_only()
+
+    def redraw_loss_only(self) -> bool:
+        """Nur das Loss-Panel neu zeichnen statt der ganzen Figur.
+
+        Ein kompletter Redraw kostet bei 15 Panels mit Megapixel-Bildern
+        ueber eine Sekunde - fuer die Loss-Kurve reicht die eine Achse.
+        """
+
+        loss_ax = self.axes_cmap.get("loss")
+        if loss_ax is None:
+            return False
+
+        try:
+            renderer = self.get_renderer()
+            loss_ax.draw(renderer)
+            bbox = loss_ax.get_tightbbox(renderer)
+            self.blit(bbox.expanded(1.15, 1.15) if bbox is not None else loss_ax.bbox)
+            return True
+        except Exception as exc:  # Fallback: normal zeichnen
+            print("Loss-Blit fehlgeschlagen, zeichne komplett:", exc)
+            self.draw_idle()
+            return False
 
         #self.axes[1].set_title(f"Simulated (Step {step})")
         #self.axes[2].set_title(f"Diff (Step {step})")
@@ -560,16 +686,13 @@ class MplCanvas(FigureCanvasQTAgg):
     def update_heavy(self, payload: VizPayload, ctf_layer=None):
         if self.full_canvas_target_mode:
             if payload.target_img is not None:
-                self.full_target_ax.clear()
-                self.full_target_ax.imshow(payload.target_img, cmap="viridis", origin="lower")
+                # kein clear() - sonst waere der Zoom nach jeder
+                # Aktualisierung wieder weg
+                self._apply_target_image(self.full_target_im, self.full_target_ax,
+                                         payload.target_img)
                 self.full_target_ax.set_title(f"Target (Step {payload.step})")
-                self.full_target_ax.set_xticks([])
-                self.full_target_ax.set_yticks([])
-
-                if self.show_positions_on_target:
-                    pos, ints = self.get_pos_and_ints(payload)
-                    if len(ints) > 0:
-                        self.full_target_ax.scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=0.5)
+                self._update_target_scatter(self.full_target_scatter,
+                                            self.full_target_ax, payload)
             return
 
 
@@ -580,19 +703,11 @@ class MplCanvas(FigureCanvasQTAgg):
             self._safe_set_image(self.im_diff, payload.diff_img)
 
         if payload.target_img is not None:
-            #self._safe_set_image(self.im_tgt, payload.target_img)
-            self.axes_cmap["target"].clear()
-            self.axes_cmap["target"].imshow(payload.target_img, cmap="viridis", origin="lower")
-            self.axes_cmap["target"].set_title("Target")
-
-
-            if self.show_positions_on_target:
-                pos, ints = self.get_pos_and_ints(payload)
-                ss = 0.5
-
-                self.axes_cmap["target"].scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=ss)
-                #self.im_tgt_sc.set_offsets(pos)
-                #self.im_tgt_sc.set_array(ints)
+            # Artists wiederverwenden statt die Achse zu leeren, damit der
+            # Zoom (Toolbar) ueber die Aktualisierungen hinweg stehen bleibt
+            ax_target = self.axes_cmap["target"]
+            self._apply_target_image(self.im_tgt, ax_target, payload.target_img)
+            self._update_target_scatter(self.im_tgt_sc, ax_target, payload)
 
 
         if payload.strain_maps["ux"] is not None:
@@ -771,6 +886,10 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.canvas = MplCanvas(target_tensor=self.target, train_method=self.train_method,
                                 config=self.model.config)
+        # Matplotlib-Toolbar: Lupe zum Aufziehen eines Ausschnitts, Hand zum
+        # Verschieben, Haus zurueck zur Gesamtansicht
+        self.nav_toolbar = NavigationToolbar2QT(self.canvas, self)
+        left.addWidget(self.nav_toolbar, stretch=0)
         left.addWidget(self.canvas, stretch=1)
 
 
@@ -803,6 +922,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.reset_free_positions_ws2_btn = QtWidgets.QPushButton("Reset free positions (aktive Gruppe)")
         self.render_btn = QtWidgets.QPushButton("Render")
         self.reset_losses = QtWidgets.QPushButton("Reset losses")
+        self.reset_zoom_btn = QtWidgets.QPushButton("Zoom zuruecksetzen")
 
 
         self.pause_btn.setEnabled(False)
@@ -821,6 +941,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(self.reset_occupancies_btn, 2, 1)
         control_layout.addWidget(self.reset_free_positions_ws2_btn, 3, 1)
         control_layout.addWidget(self.reset_losses, 4, 1)
+        control_layout.addWidget(self.reset_zoom_btn, 5, 1)
 
 
         right.addWidget(control_box)
@@ -894,6 +1015,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.render_btn.clicked.connect(self._trigger_heavy_refresh)
         self.reset_losses.clicked.connect(self._reset_losses)
+        self.reset_zoom_btn.clicked.connect(self.canvas.reset_zoom)
 
     def _reset_losses(self):
         self.worker.reset_losses()
@@ -1017,7 +1139,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         strain_maps, strain_group = strain_maps_for_active_group(
             self.pot_layer, self.train_method)
 
-        pot_imgs = self.pot_layer.get_potential_images()
+        pot_imgs = potential_images_for_display(self.pot_layer)
 
         return VizPayload(
             step=step,
@@ -1086,8 +1208,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.step_label.setText(f"step: {step}")
         self.loss_label.setText(f"loss: {loss:.6g}")
+        # update_light zeichnet nur noch das Loss-Panel neu (kein voller Redraw)
         self.canvas.update_light(step, loss, losses)
-        self.canvas.draw()
         self.canvas.flush_events()
         # self.updating_gui = False
 

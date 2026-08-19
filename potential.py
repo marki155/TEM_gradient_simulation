@@ -723,24 +723,30 @@ class DifferentiablePotential(nn.Module):
         potential_list = []
         for i, layer in enumerate(self.layers):
             if not contributes[i]:
-                potential_i = torch.zeros(
-                    (self.H + self.potential_pad * 2, self.W + self.potential_pad * 2),
-                    dtype=torch.float32, device=self.device)
-            else:
-                potential_i = self.projected_slice_potential_kirkland(
-                    positions[i], occupancies[i].sigmoid(), atom_type=layer.element)
+                # None statt eines Nullbildes: der Multislice ueberspringt die
+                # Schicht dann komplett (spart Transmission und Propagation)
+                potential_list.append(None)
+                continue
 
+            potential_i = self.projected_slice_potential_kirkland(
+                positions[i], occupancies[i].sigmoid(), atom_type=layer.element)
             potential_i = potential_i * self.tunable_parameters.potential_factors[layer.group]
             potential_list.append(potential_i)
 
         return potential_list, self.aux_loss()
 
     def get_potential_images(self):
-        """Potentialbilder in Schicht-Reihenfolge (``config.layers``)."""
+        """Potentialbilder in Schicht-Reihenfolge (``config.layers``).
+
+        Nicht beitragende Schichten (isolierte Gruppe) liefern ein Nullbild.
+        """
 
         pot_list, _ = self(None)
         pad = self.potential_pad
-        return [p.detach().cpu().numpy()[pad:self.H + pad, pad:self.W + pad] for p in pot_list]
+        empty = np.zeros((self.H, self.W), dtype=np.float32)
+        return [empty.copy() if p is None
+                else p.detach().cpu().numpy()[pad:self.H + pad, pad:self.W + pad]
+                for p in pot_list]
 
     def rasterize_atoms_bilinear(self, H, W, positions_xy, weights):
         rho = torch.zeros((H, W), dtype=torch.float32, device=self.device)

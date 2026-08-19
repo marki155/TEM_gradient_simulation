@@ -47,26 +47,31 @@ def interaction_parameter_rad_per_Vnm(voltage_kV):
     return sigma_SI_rad_Vnm
 
 
-def propagate_fresnel(wave, dz_nm, pixel_size_nm, wavelength_nm):
-    H, W = wave.shape
-    device = wave.device
+def fresnel_propagator(H, W, dz_nm, pixel_size_nm, wavelength_nm, device=None):
+    """Fresnel-Propagator im k-Raum. Haengt nur an der Geometrie, nicht an der Welle."""
 
     fy = torch.fft.fftfreq(H, d=pixel_size_nm, device=device)
     fx = torch.fft.fftfreq(W, d=pixel_size_nm, device=device)
     Y, X = torch.meshgrid(fy, fx, indexing="ij")
-    k2 = X**2 + Y**2
+    k2 = X ** 2 + Y ** 2
 
-    P = torch.exp(-1j * math.pi * wavelength_nm * dz_nm * k2)
+    return torch.exp(-1j * math.pi * wavelength_nm * dz_nm * k2)
+
+
+def propagate_fresnel(wave, dz_nm, pixel_size_nm, wavelength_nm, propagator=None):
+    if propagator is None:
+        propagator = fresnel_propagator(
+            wave.shape[0], wave.shape[1], dz_nm, pixel_size_nm, wavelength_nm, wave.device)
 
     wave_ft = torch.fft.fft2(wave)
-    return torch.fft.ifft2(wave_ft * P)
+    return torch.fft.ifft2(wave_ft * propagator)
 
 
 
 
 #: Prueft nach jedem Slice, ob die Phase den sinnvollen Bereich verlaesst.
-#: Kostet pro Schritt eine GPU->CPU Kopie je Schicht - zum Trainieren gern aus.
-CHECK_PHASE = True
+#: Kostet pro Schritt eine GPU->CPU Kopie je Schicht - deshalb per Default aus.
+CHECK_PHASE = False
 
 
 class PhysicalPhaseObjectLayer(nn.Module):
@@ -87,6 +92,18 @@ class PhysicalPhaseObjectLayer(nn.Module):
         self.layer_names = [l.name for l in self.layers]
         self.atom_names_by_layer = [l.element for l in self.layers]
 
+        #: Propagatoren je Schichtabstand - konstant ueber das ganze Training
+        self._propagators = {}
+
+    def get_propagator(self, dz_nm, device):
+        key = round(float(dz_nm), 9)
+        propagator = self._propagators.get(key)
+        if propagator is None:
+            propagator = fresnel_propagator(
+                self.H, self.W, key, self.pixel_size_nm, self.lambda_nm, device)
+            self._propagators[key] = propagator
+        return propagator
+
     def forward(self, potential_slices, z_positions_nm, reverse=False):
         """
         potential_slices: Liste (H,W) - eine pro Schicht, in Config-Reihenfolge
@@ -105,9 +122,16 @@ class PhysicalPhaseObjectLayer(nn.Module):
                 f"{len(potential_slices)} Potential-Slices, aber "
                 f"{len(z_positions_nm)} z-Positionen.")
 
-        order = sorted(range(len(z_positions_nm)), key=lambda i: z_positions_nm[i])
+        full_order = sorted(range(len(z_positions_nm)), key=lambda i: z_positions_nm[i])
         if reverse:
-            order = order[::-1]
+            full_order = full_order[::-1]
+
+        # Schichten ohne Potential (None, z.B. isolierte Gruppe) ueberspringen:
+        # ihre Transmission waere die Identitaet. Die Propagationsstrecke bleibt
+        # erhalten - die Austrittsebene liegt weiterhin am Ende des Stapels.
+        order = [i for i in full_order if potential_slices[i] is not None]
+        if not order:
+            return torch.ones((self.H, self.W), dtype=torch.complex64, device=self.device)
 
         wave = torch.ones((self.H, self.W), dtype=torch.complex64, device=self.device)
 
@@ -135,7 +159,21 @@ class PhysicalPhaseObjectLayer(nn.Module):
                     dz_nm=dz_nm,
                     pixel_size_nm=self.pixel_size_nm,
                     wavelength_nm=self.lambda_nm,
+                    propagator=self.get_propagator(dz_nm, wave.device),
                 )
+
+        # Reststrecke von der letzten aktiven Schicht bis zum Ende des Stapels
+        # (Fresnel-Propagatoren multiplizieren sich, P(a)*P(b) = P(a+b), das
+        # Ergebnis ist also identisch zum Durchlaufen leerer Schichten)
+        dz_exit = abs(z_positions_nm[full_order[-1]] - z_positions_nm[order[-1]])
+        if dz_exit > 0:
+            wave = propagate_fresnel(
+                wave=wave,
+                dz_nm=dz_exit,
+                pixel_size_nm=self.pixel_size_nm,
+                wavelength_nm=self.lambda_nm,
+                propagator=self.get_propagator(dz_exit, wave.device),
+            )
 
         return wave
 

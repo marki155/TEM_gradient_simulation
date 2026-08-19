@@ -188,14 +188,19 @@ class KirklandPrecalcPotential:
                 supersample_radius_px=supersample_radius_px,
                 supersample_factor=supersample_factor,
                 softcore_fraction=softcore_fraction,
-            )
+            ).to(torch.float32)
             for atom_type in atom_types
         }
 
+        # Die Fouriertransformierte des Kernels aendert sich nie - einmal
+        # vorberechnen statt bei jedem Aufruf (das war der teuerste Teil der
+        # Faltung). rfft2 statt fft2, weil rho und Kernel reell sind.
+        self.kernels_ft = {name: torch.fft.rfft2(kernel)
+                           for name, kernel in self.kernels.items()}
+
     def projected_slice_potential_kirkland(self, rho, atom_type: str, pixel_size_nm=None, device=None):
-        kernel = self.kernels[atom_type]
-        V = torch.fft.ifft2(torch.fft.fft2(rho) * torch.fft.fft2(kernel)).real
-        return V
+        kernel_ft = self.kernels_ft[atom_type]
+        return torch.fft.irfft2(torch.fft.rfft2(rho) * kernel_ft, s=rho.shape[-2:])
 
 
 if __name__ == "__main__":

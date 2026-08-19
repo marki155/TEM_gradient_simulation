@@ -16,19 +16,35 @@ def scherzer_defocus(C30_um, lam_nm):
     C30_nm = C30_um*1000.
     return - 1.2 * math.sqrt(C30_nm * lam_nm)
 
-def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, Cc_um=None):
-    # gleiche Gauß-Envelopes wie zuvor; minimal gehalten
+def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, Cc_um=None,
+                            cache=None):
+    """Gauss-Envelopes im k-Raum.
+
+    ``cache``: optionales dict. Alles was nur am Gitter haengt (k, k2, die
+    raeumliche und die Instabilitaets-Envelope) wird dort abgelegt und beim
+    naechsten Aufruf wiederverwendet - nur die chromatische Envelope haengt an
+    den trainierbaren deltaE/Cc und wird jedes Mal neu berechnet.
+    """
+
     if params is None:
         params = {}
-    k2 = kx**2 + ky**2
-    k = torch.sqrt(k2 + 1e-30)
+    if cache is None:
+        cache = {}
+
+    if "k" in cache:
+        k2, k = cache["k2"], cache["k"]
+    else:
+        k2 = kx**2 + ky**2
+        k = torch.sqrt(k2 + 1e-30)
+        cache["k2"], cache["k"] = k2, k
     eV = voltage_kV * 1e3
 
     # Spatial (source size / convergence)  [rad]
-    E_spatial = 1.0
-    if params.get('use_spatial', True):
+    E_spatial = cache.get("E_spatial", 1.0)
+    if "E_spatial" not in cache and params.get('use_spatial', True):
         alpha = float(params.get('source_size', 0.0))
         E_spatial = torch.exp(- (math.pi * alpha * k)**2)
+        cache["E_spatial"] = E_spatial
 
     # Chromatic (temporal) via defocus spread Δf = Cc * ΔE / E0
     E_chrom = 1.0
@@ -45,23 +61,25 @@ def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, C
         E_chrom = torch.exp(- (math.pi * lam * delta_f_nm * k2)**2)
 
     # Instability (extra defocus jitter)
-    E_inst = 1.0
-    if params.get('use_instability', True):
+    E_inst = cache.get("E_inst", 1.0)
+    if "E_inst" not in cache and params.get('use_instability', True):
         sigma_df_nm = float(params.get('instab_defocus_nm', 0.0))
         if sigma_df_nm > 0:
             E_inst = torch.exp(- (math.pi * lam * sigma_df_nm * k2)**2)
         else:
             E_inst = torch.ones_like(k)
+        cache["E_inst"] = E_inst
 
     # Detector (optional, Gaussian in k)
-    E_det = 1.0
-    if params.get('use_detector', False):
+    E_det = cache.get("E_det", 1.0)
+    if "E_det" not in cache and params.get('use_detector', False):
         sigma_k = params.get('detector_sigma_k', None)
         if sigma_k is not None:
             sigma_k = float(sigma_k)
             E_det = torch.exp(-(k**2) / (2.0 * sigma_k**2))
         else:
             E_det = torch.ones_like(k)
+        cache["E_det"] = E_det
 
     env = torch.clamp(E_spatial * E_chrom * E_inst * E_det, 0.0, 1.0)
     return env
@@ -184,7 +202,55 @@ def convert_aberrations(coeffs: dict, parametrization: str) -> dict:
     raise ValueError(f"Unbekannte Parametrisierung: {parametrization!r}")
 
 
-def zernike_phase(alpha, phi, coeffs, device='cpu'):
+def aberration_basis_maps(alpha, phi, keys=None):
+    """Vorberechnete Ortsfunktionen der Aberrationsterme.
+
+    Fuer jede Ordnung ``Cnm`` liefert das die fertigen Karten
+
+        a-Karte = vorfaktor * alpha**n * cos(m*phi)
+        b-Karte = vorfaktor * alpha**n * sin(m*phi)
+
+    (bzw. nur die radiale Karte fuer m = 0).  Sie haengen ausschliesslich am
+    Gitter, nicht an den Aberrationswerten - die Phase ist danach nur noch eine
+    Linearkombination dieser Karten.  Das spart pro Aufruf die Potenzen und die
+    Winkelfunktionen auf dem ganzen Gitter.
+    """
+
+    if keys is None:
+        magnitudes = list(ABERRATION_TERMS)
+    else:
+        magnitudes = []
+        for key in keys:
+            magnitude = magnitude_key(key)
+            if magnitude in ABERRATION_TERMS and magnitude not in magnitudes:
+                magnitudes.append(magnitude)
+
+    radial_cache = {}
+
+    def radial(power):
+        if power not in radial_cache:
+            value = alpha * alpha
+            for _ in range(power - 2):
+                value = value * alpha
+            radial_cache[power] = value
+        return radial_cache[power]
+
+    maps = {}
+    for magnitude in magnitudes:
+        power, prefactor, scale, m = ABERRATION_TERMS[magnitude]
+        base = (prefactor * scale) * radial(power)
+
+        if m == 0:
+            maps[magnitude] = base
+        else:
+            a_key, b_key = cartesian_keys(magnitude)
+            maps[a_key] = base * torch.cos(m * phi)
+            maps[b_key] = base * torch.sin(m * phi)
+
+    return maps
+
+
+def zernike_phase(alpha, phi, coeffs, device='cpu', basis=None):
     """Aberrationsphase chi(alpha, phi) / (2 pi / lambda).
 
     Versteht beide Schreibweisen:
@@ -198,28 +264,39 @@ def zernike_phase(alpha, phi, coeffs, device='cpu'):
     Betrag klein wird.
     """
 
+    if basis is None:
+        basis = aberration_basis_maps(alpha, phi, coeffs.keys())
+
     phase = torch.zeros_like(alpha, dtype=torch.float32, device=device)
 
-    for magnitude, (power, prefactor, scale, m) in ABERRATION_TERMS.items():
-        radial = prefactor * scale * alpha ** power
-
+    for magnitude, (_power, _prefactor, _scale, m) in ABERRATION_TERMS.items():
         if m == 0:
-            if magnitude not in coeffs:
+            if magnitude not in coeffs or magnitude not in basis:
                 continue
             value = coeffs[magnitude]
             clamp = ABERRATION_CLAMPS.get(magnitude)
             if clamp is not None:
                 value = torch.clamp(value, min=clamp[0], max=clamp[1])
-            phase = phase + radial * value
+            phase = phase + basis[magnitude] * value
             continue
 
         a_key, b_key = cartesian_keys(magnitude)
+        if a_key not in basis:
+            continue
+
         if a_key in coeffs and b_key in coeffs:
-            phase = phase + radial * (coeffs[a_key] * torch.cos(m * phi)
-                                      + coeffs[b_key] * torch.sin(m * phi))
+            a, b = coeffs[a_key], coeffs[b_key]
         elif magnitude in coeffs and angle_key(magnitude) in coeffs:
-            phase = phase + radial * coeffs[magnitude] * torch.cos(
-                m * (phi - coeffs[angle_key(magnitude)]))
+            # polare Schreibweise: cos(m*(phi-phi_m)) ausmultipliziert, damit
+            # dieselben vorberechneten Karten benutzt werden koennen
+            amplitude = coeffs[magnitude]
+            argument = m * coeffs[angle_key(magnitude)]
+            a = amplitude * torch.cos(argument)
+            b = amplitude * torch.sin(argument)
+        else:
+            continue
+
+        phase = phase + basis[a_key] * a + basis[b_key] * b
 
     return phase
 
@@ -325,6 +402,16 @@ class CTFLayer(nn.Module):
         self.register_buffer('kx', kx)
         self.register_buffer('ky', ky)
 
+        # alpha/phi und die Ortsfunktionen der Aberrationen haengen nur am
+        # Gitter - einmal berechnen statt bei jedem Forward.
+        alpha = self.lam * torch.sqrt(kx ** 2 + ky ** 2)
+        phi = torch.atan2(ky, kx)
+        self.register_buffer('alpha', alpha)
+        self.register_buffer('phi', phi)
+        self.aberration_basis = aberration_basis_maps(
+            alpha, phi, self.tunable_parameters.aberrations.keys())
+        self._envelope_cache = {}
+
         for name, value in vars(self.tunable_parameters).items():
             if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
                 setattr(self, name, value)
@@ -368,6 +455,9 @@ class CTFLayer(nn.Module):
 
 
     def _build_ctf(self, kx=None, ky=None):
+        # eigenes Gitter -> vorberechnete Karten benutzen; ein uebergebenes
+        # Gitter (z.B. fuer die Beugungsbild-Ansicht) wird frisch gerechnet
+        own_grid = kx is None and ky is None
         if kx is None:
             kx = self.kx
         if ky is None:
@@ -383,12 +473,17 @@ class CTFLayer(nn.Module):
         #ky = ay / lam_nm
 
 
-        alpha = self.lam * torch.sqrt(kx ** 2 + ky ** 2)  # Radialabstand
-        alpha.to(device=self.device)
-        phi = torch.atan2(ky, kx)
-        phi.to(device=self.device)
+        if own_grid:
+            alpha, phi = self.alpha, self.phi
+            basis = self.aberration_basis
+            envelope_cache = self._envelope_cache
+        else:
+            alpha = self.lam * torch.sqrt(kx ** 2 + ky ** 2)  # Radialabstand
+            phi = torch.atan2(ky, kx)
+            basis = None
+            envelope_cache = None
 
-        aberr_phase = zernike_phase(alpha, phi, aberrations, device=self.device)
+        aberr_phase = zernike_phase(alpha, phi, aberrations, device=self.device, basis=basis)
         chi = 2.0 * math.pi * aberr_phase / lam  # klassische TEM-Phase
         if self.train_method is not None and self.train_method.train_amplitude_contrast.enabled:
             Q = torch.clamp(self.tunable_parameters.amp_contrast, 0.0, 1.0)
@@ -408,9 +503,10 @@ class CTFLayer(nn.Module):
             Cc_um = self.tunable_parameters.Cc_um.detach()
 
         # zentrieren
+        env = None
         if self.envelope_params is not None:
-            env = build_ctf_envelope_on_k(kx, ky, self.voltage_kV, self.lam, self.envelope_params, deltaE=deltaE,
-                                          Cc_um=Cc_um)
+            env = build_ctf_envelope_on_k(kx, ky, self.voltage_kV, self.lam, self.envelope_params,
+                                          deltaE=deltaE, Cc_um=Cc_um, cache=envelope_cache)
             ctf = ctf * env.to(ctf.device).type(ctf.dtype)
         # ctf = torch.fft.fftshift(ctf)
         return ctf, env

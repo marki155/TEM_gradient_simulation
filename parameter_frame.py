@@ -85,6 +85,11 @@ class TensorEditor(QFrame):
     """
     value_changed = Signal()
 
+    #: Ab dieser Groesse wird nicht mehr jedes Element als Spinbox angezeigt.
+    #: Sonst baut die GUI fuer eine Schicht mit 6000 Atomen zehntausende
+    #: Widgets - das ist der Grund, warum das Fenster so traege war.
+    MAX_INLINE_ELEMENTS = 64
+
     def __init__(
         self,
         label: str,
@@ -92,11 +97,14 @@ class TensorEditor(QFrame):
         parent: QWidget | None = None,
         decimals: int = 6,
         step: float = 0.01,
+        max_elements: int | None = None,
     ):
         super().__init__(parent)
         self.label_text = label
         self.tensor = tensor
         self.spinboxes: list[QDoubleSpinBox] = []
+        self.max_elements = self.MAX_INLINE_ELEMENTS if max_elements is None else max_elements
+        self.summary_label: QLabel | None = None
 
         self._building = False
 
@@ -132,8 +140,16 @@ class TensorEditor(QFrame):
             self._building = False
             return
 
-        # Allgemein: flatten + Indexlabel
+        # Zu gross fuer einzelne Spinboxen -> nur eine Zusammenfassung zeigen
         flat_count = cpu_tensor.numel()
+        if flat_count > self.max_elements:
+            self.summary_label = QLabel()
+            self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.grid.addWidget(self.summary_label, 0, 0, 1, 2)
+            self._building = False
+            return
+
+        # Allgemein: flatten + Indexlabel
         for flat_idx in range(flat_count):
             multi_idx = np.unravel_index(flat_idx, shape)
             idx_text = "[" + ", ".join(str(i) for i in multi_idx) + "]"
@@ -171,9 +187,22 @@ class TensorEditor(QFrame):
             self.tensor[index] = value
         self.value_changed.emit()
 
+    def _summary_text(self, cpu_tensor) -> str:
+        values = cpu_tensor.reshape(-1).to(torch.float32)
+        shape = "x".join(str(s) for s in tuple(cpu_tensor.shape))
+        return (f"{shape} ({values.numel()} Werte)   "
+                f"min {float(values.min()):.4g}   "
+                f"mittel {float(values.mean()):.4g}   "
+                f"max {float(values.max()):.4g}")
+
     def refresh_from_tensor(self):
         self._building = True
         cpu_tensor = self.tensor.detach().cpu()
+
+        if self.summary_label is not None:
+            self.summary_label.setText(self._summary_text(cpu_tensor))
+            self._building = False
+            return
 
         if cpu_tensor.ndim == 0:
             self.spinboxes[0].blockSignals(True)

@@ -162,10 +162,14 @@ class SplineDisplacementField2D(nn.Module):
             div,
             energy (optional)
         """
-        H = self.H if H is None else H
-        W = self.W if W is None else W
+        H = self.H if H is None else int(H)
+        W = self.W if W is None else int(W)
 
-        coords = self.make_coordinate_grid(H=H, W=W)
+        # Bei voller Aufloesung wie bisher pixelzentriert abtasten; bei
+        # reduzierter Aufloesung ueber die gesamte Flaeche verteilen (sonst
+        # wuerde nur die linke obere Ecke abgetastet).
+        full_resolution = (H == self.H and W == self.W)
+        coords = self.make_coordinate_grid(H=H, W=W, pixel_centers=full_resolution)
         coords = coords.clone().detach().requires_grad_(True)
 
         u = self.sample(coords)                    # (N, 2)
@@ -195,16 +199,16 @@ class SplineDisplacementField2D(nn.Module):
             "div": div.detach().cpu().numpy(),
         }
 
-        pad = self.padding
-        H = H - 2 * pad
-        W = W - 2 * pad
-
-        for k in out.keys():
-            out[k] = out[k][pad:pad+H, pad:pad+W]
-
         if lambda_ is not None and mu is not None:
             energy = self.elastic_energy_density(coords, lambda_=lambda_, mu=mu)
-            out["energy"] = energy.reshape(H, W)
+            out["energy"] = energy.reshape(H, W).detach().cpu().numpy()
+
+        # Padding abschneiden - bei reduzierter Aufloesung entsprechend skaliert
+        pad_y = int(round(self.padding * H / self.H))
+        pad_x = int(round(self.padding * W / self.W))
+
+        for k in out.keys():
+            out[k] = out[k][pad_y:H - pad_y, pad_x:W - pad_x]
 
         return out
 

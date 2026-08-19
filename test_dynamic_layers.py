@@ -142,6 +142,41 @@ def test_multiple_groups_and_isolation():
     print(f"  5 Schichten / 3 Gruppen: loss={loss:.4f}, Gradienten fuer {with_grad}")
 
 
+def test_isolated_group_skips_empty_slices():
+    """Uebersprungene Schichten aendern die Welle nicht (nur die Rechenzeit)."""
+
+    layers = [
+        LayerConfig("Gr", "C", 0.0, "Gr", init_occupancy=100.0, occ_entropy=False),
+        LayerConfig("S1", "S", 0.33, "WS2"),
+        LayerConfig("W", "W", 0.488, "WS2"),
+        LayerConfig("S2", "S", 0.646, "WS2"),
+    ]
+    groups = [
+        LayerGroupConfig("Gr", max_shift=20., max_rotation=0.35, isolate_when_active=True),
+        LayerGroupConfig("WS2", max_shift=20., max_rotation=0.09),
+    ]
+    config = make_config(layers, groups)
+    tm = TrainMethod().ensure_for_config(config)
+    tm.set_active_group("Gr")
+
+    model = build_model(config, tm)
+    potentials, aux = model.model[0](None)
+    assert [p is None for p in potentials] == [False, True, True, True], \
+        "isolierte Gruppe: nur die eigene Schicht darf ein Potential liefern"
+
+    wave_skipped = model.model[1]((potentials, aux))[0]
+
+    # Vergleich mit dem alten Weg: explizite Nullbilder statt None
+    zeros = torch.zeros_like(potentials[0])
+    filled = [p if p is not None else zeros for p in potentials]
+    wave_zeros = model.model[1]((filled, aux))[0]
+
+    difference = float((wave_skipped - wave_zeros).abs().max())
+    scale = float(wave_zeros.abs().max())
+    assert difference < 1e-4 * max(scale, 1.0), (difference, scale)
+    print(f"  isolierte Gruppe: Welle identisch (max. Abweichung {difference:.2e})")
+
+
 def test_ctf_aberration_switches():
     """CTF: Betraege UND Winkel werden mitoptimiert, Startwerte aus der Config."""
 
@@ -271,6 +306,8 @@ if __name__ == "__main__":
     test_single_graphene_layer()
     print("test_multiple_groups_and_isolation")
     test_multiple_groups_and_isolation()
+    print("test_isolated_group_skips_empty_slices")
+    test_isolated_group_skips_empty_slices()
     print("test_ctf_aberration_switches")
     test_ctf_aberration_switches()
     print("test_ctf_parametrizations_are_equivalent")
