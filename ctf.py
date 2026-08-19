@@ -249,19 +249,19 @@ class CTFLayer(nn.Module):
 
         aberr_phase = zernike_phase(alpha, phi, aberrations, device=self.device)
         chi = 2.0 * math.pi * aberr_phase / lam  # klassische TEM-Phase
-        if self.train_method is not None and self.train_method.train_amplitude_contrast:
+        if self.train_method is not None and self.train_method.train_amplitude_contrast.enabled:
             Q = torch.clamp(self.tunable_parameters.amp_contrast, 0.0, 1.0)
         else:
             Q = torch.clamp(self.tunable_parameters.amp_contrast.detach(), 0.0, 1.0)
         ac = math.sqrt(1.0 - Q ** 2) - 1j * Q
         ctf = ac * torch.exp(-1j * chi)
 
-        if self.train_method.train_env_params["deltaE"] and self.train_method.train_env_parameters:
+        if self.train_method.train_env_params["deltaE"] and self.train_method.train_env_parameters.enabled:
             deltaE = torch.clamp(self.tunable_parameters.deltaE, min=0.25, max=0.45)
         else:
             deltaE = self.tunable_parameters.deltaE.detach()
 
-        if self.train_method.train_env_params["Cc"] and self.train_method.train_env_parameters:
+        if self.train_method.train_env_params["Cc"] and self.train_method.train_env_parameters.enabled:
             Cc_um = torch.clamp(self.tunable_parameters.Cc_um, min=1.e2, max=1.e4)
         else:
             Cc_um = self.tunable_parameters.Cc_um.detach()

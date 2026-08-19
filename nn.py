@@ -1,5 +1,5 @@
-from dataclasses import dataclass, asdict, fields, is_dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field, asdict, fields, is_dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -14,6 +14,13 @@ from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
 
 from ctf import CTFLayer, TunableCTFParameters
+
+from layers import (
+    LayerConfig,
+    LayerGroupConfig,
+    legacy_layers_and_groups,
+    resolve_layers_and_groups,
+)
 
 
 @dataclass
@@ -78,39 +85,17 @@ def _safe_paramlist_slice(param_list, start: int, stop=None):
 def _collect_strain_params(displacement):
     return _flatten_params(displacement)
 
-def get_trainmethod_param_registry(params: ParticlesTunableParameters):
+def get_trainmethod_param_registry(params: ParticlesTunableParameters,
+                                   layer_names, group_names):
+    """Bildet die Schluessel aus :meth:`TrainMethod.iter_train_params` auf Parameter ab.
+
+    Schichten und Gruppen kommen aus der Config, es ist nichts fest verdrahtet.
+    """
+
     pot = params.potential_parameters
     ctf = params.ctf_parameters
 
     registry = {
-        # Graphen geometry
-        "graphen_shift": lambda: [pot.shift_Gr],
-        "graphen_rotation": lambda: [pot.rotation_Gr],
-        "graphen_scale": lambda: [pot.scale_Gr],
-
-        # WS2 geometry
-        "WS2_shift": lambda: [pot.shift_WS2],
-        "WS2_rotation": lambda: [pot.rotation_WS2],
-        "WS2_scale": lambda: [pot.scale_WS2],
-
-        # Strain / free positions
-        "Gr_strain_field": lambda: _collect_strain_params(pot.strain_fields[0]),
-        "WS2_strain_field": lambda: _collect_strain_params(pot.strain_fields[1]),
-        "graphen_free_positions": lambda: pot.position_shifts[0],
-        "WS2_free_positions": lambda: pot.position_shifts[1:],
-
-        # Intensities
-        "train_graphen_intensities": lambda: _safe_index_paramlist(pot.intensities, 0),
-        "train_S1_intensities": lambda: _safe_index_paramlist(pot.intensities, 1),
-        "train_W_intensities": lambda: _safe_index_paramlist(pot.intensities, 2),
-        "train_S2_intensities": lambda: _safe_index_paramlist(pot.intensities, 3),
-
-        # Occupancies
-        "train_graphen_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 0),
-        "train_S1_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 1),
-        "train_W_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 2),
-        "train_S2_occupancies": lambda: _safe_index_paramlist(pot.occupancies, 3),
-
         # CTF
         "train_amplitude_contrast": lambda: [ctf.amp_contrast],
         "train_ctf_aberrations": lambda: list(ctf.aberrations.values()),
@@ -120,12 +105,22 @@ def get_trainmethod_param_registry(params: ParticlesTunableParameters):
         "train_normalisation_parameters": lambda: [params.normalisation_parameters],
     }
 
+    for gname in group_names:
+        registry[f"groups.{gname}.shift"] = lambda g=gname: [pot.shifts[g]]
+        registry[f"groups.{gname}.rotation"] = lambda g=gname: [pot.rotations[g]]
+        registry[f"groups.{gname}.scale"] = lambda g=gname: [pot.scales[g]]
+        registry[f"groups.{gname}.strain_field"] = (
+            lambda g=gname: _collect_strain_params(pot.strain_fields[g]))
+
+    for i, lname in enumerate(layer_names):
+        registry[f"layers.{lname}.free_positions"] = (
+            lambda idx=i: _safe_index_paramlist(pot.position_shifts, idx))
+        registry[f"layers.{lname}.intensities"] = (
+            lambda idx=i: _safe_index_paramlist(pot.intensities, idx))
+        registry[f"layers.{lname}.occupancies"] = (
+            lambda idx=i: _safe_index_paramlist(pot.occupancies, idx))
+
     return registry
-
-
-
-
-
 
 
 class NN_free_potential(nn.Module):
@@ -253,9 +248,16 @@ class NN_free_potential(nn.Module):
 
 @dataclass
 class ParticlesConfig:
+    """Beschreibt das Modell - inkl. der frei definierbaren Schichten.
+
+    ``layers``/``groups`` ersetzen die alte feste Gr/S1/W/S2-Struktur.  Alte
+    configs ohne diese Felder werden in ``__post_init__`` automatisch migriert
+    (aus ``z_positions_nm``, ``control_points_*``, ``max_shifts``,
+    ``max_rotations``).
+    """
+
     init_positions: List[np.ndarray]
     init_intensities: List[np.ndarray]
-    z_positions_nm: List[float]
     shape: tuple
     pixel_size_nm: float
     voltage_kV: float
@@ -264,10 +266,79 @@ class ParticlesConfig:
     init_amp_contrast: float
     ctf_alpha_max_mrad: float
     padding: int
-    control_points_graphen: List[float]
-    control_points_ws2: List[float]
-    max_shifts: Tuple[float, float]
-    max_rotations: Tuple[float, float]
+
+    #: Schichten (eine je Multislice-Slice) und ihre Struktur-Gruppen
+    layers: List[LayerConfig] = field(default_factory=list)
+    groups: List[LayerGroupConfig] = field(default_factory=list)
+
+    #: "+z" = Strahl laeuft von der kleinsten zur groessten z-Position
+    beam_direction: str = "+z"
+
+    # --- Legacy-Felder (nur noch fuer die Migration alter configs) -----------
+    z_positions_nm: Optional[List[float]] = None
+    control_points_graphen: Optional[List[int]] = None
+    control_points_ws2: Optional[List[int]] = None
+    max_shifts: Optional[Tuple[float, float]] = None
+    max_rotations: Optional[Tuple[float, float]] = None
+
+    def __post_init__(self):
+        if not self.layers:
+            legacy_layers, legacy_groups = legacy_layers_and_groups(
+                z_positions_nm=self.z_positions_nm or [],
+                control_points_graphen=self.control_points_graphen or (10, 10),
+                control_points_ws2=self.control_points_ws2 or (10, 10),
+                max_shifts=self.max_shifts,
+                max_rotations=self.max_rotations,
+                n_layers=len(self.init_positions),
+            )
+            self.layers = legacy_layers
+            if not self.groups:
+                self.groups = legacy_groups
+
+        self.layers, self.groups = resolve_layers_and_groups(self.layers, self.groups)
+
+        # z_positions_nm bleibt als abgeleitete Sicht erhalten
+        self.z_positions_nm = [float(l.z_nm) for l in self.layers]
+
+    # -- Bequeme Sichten ------------------------------------------------------
+    @property
+    def layer_names(self) -> List[str]:
+        return [l.name for l in self.layers]
+
+    @property
+    def group_names(self) -> List[str]:
+        return [g.name for g in self.groups]
+
+    def group(self, name: str) -> LayerGroupConfig:
+        for g in self.groups:
+            if g.name == name:
+                return g
+        raise KeyError(f"Unbekannte Gruppe {name!r}, vorhanden: {self.group_names}")
+
+    def layer_indices(self, group_name: str) -> List[int]:
+        return [i for i, l in enumerate(self.layers) if l.group == group_name]
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ParticlesConfig":
+        data = dict(data)
+        data["init_positions"] = [np.array(x) for x in data["init_positions"]]
+        data["init_intensities"] = [np.array(x) for x in data["init_intensities"]]
+        data["shape"] = tuple(data["shape"])
+        known = {f.name for f in fields(cls)}
+        unknown = [k for k in data if k not in known]
+        for k in unknown:
+            data.pop(k)
+        if unknown:
+            print(f"[config] ignorierte unbekannte Felder: {unknown}")
+        return cls(**data)
+
+
+#: Registry fuer die (De)Serialisierung einer ParticlesConfig
+CONFIG_CLASS_REGISTRY = {
+    "ParticlesConfig": ParticlesConfig,
+    "LayerConfig": LayerConfig,
+    "LayerGroupConfig": LayerGroupConfig,
+}
 
 
 class NN_particles(nn.Module):
@@ -285,41 +356,29 @@ class NN_particles(nn.Module):
             optimizer_cls=torch.optim.Adam,
             **optimizer_kwargs,
     ):
-        registry = get_trainmethod_param_registry(self.tunable_parameters)
+        registry = get_trainmethod_param_registry(
+            self.tunable_parameters,
+            layer_names=self.config.layer_names,
+            group_names=self.config.group_names,
+        )
 
         param_groups = []
-        seen = set()
 
-        for f in fields(self.train_method):
-            name = f.name
-            value = getattr(self.train_method, name)
-
-            if not is_train_param_instance(value):
+        for name, train_param in self.train_method.iter_train_params():
+            if name not in registry:
+                # z.B. Reste einer alten train_method, die es in dieser Config
+                # nicht mehr gibt (andere Schichten/Gruppen)
+                print(f"[optimizer] kein Parameter fuer '{name}' in dieser Config - uebersprungen")
                 continue
 
-
-
-            if name not in registry:
-                raise KeyError(f"Kein Registry-Eintrag für TrainMethod-Feld '{name}' gefunden.")
-
             params = registry[name]()
-            #params = [p for p in params if p is not None and getattr(p, "requires_grad", True)]
-
-            #unique_params = []
-            #for p in params:
-            #    pid = id(p)
-            #    if pid in seen:
-            #        continue
-            #    seen.add(pid)
-            #    unique_params.append(p)#
-
-            #if not unique_params:
-            #    continue
+            if not params:
+                continue
 
             param_groups.append({
                 "name": name,
                 "params": params,
-                "lr": float(value.lr),
+                "lr": float(train_param.lr),
             })
 
         if not param_groups:
@@ -355,11 +414,7 @@ class NN_particles(nn.Module):
         with open(path, "r") as f:
             data = json.load(f)
 
-        # zurück zu numpy
-        data["init_positions"] = [np.array(x) for x in data["init_positions"]]
-        data["init_intensities"] = [np.array(x) for x in data["init_intensities"]]
-        data["shape"] = tuple(data["shape"])
-        self.config = ParticlesConfig(**data)
+        self.config = ParticlesConfig.from_dict(data)
 
         return self.config
 
@@ -396,35 +451,6 @@ class NN_particles(nn.Module):
     def get_tunable_parameters(self):
         return self.tunable_parameters
 
-
-    def loss_old(self, target_image, brightness=None, constrast=None):
-
-        intensities = torch.pow(self.intensities, self.contrast)
-        potential = self.simulation.calc_potential(self.positions, torch.abs(intensities))
-        simulated_image = self.simulation.simulate(potential, self.aberrations, blur=self.blur)
-
-
-
-        if self.train_methods.only_train_small_area >= 0:
-            # train_small_area_square = [(500, 600), (1000, 1000)]
-            x_min, y_min, x_max, y_max = self.train_small_area_square[self.train_methods.only_train_small_area]
-            simulated_image = simulated_image[x_min:x_max,y_min:y_max]
-            target_image = target_image[x_min:x_max, y_min:y_max]
-
-        minimum_sim_image = torch.min(simulated_image)
-        maximum_sim_image = torch.max(simulated_image)
-        brightness_sim_image = torch.mean(simulated_image)
-        contrast_sim_image = torch.std(simulated_image)
-        # Normalisierung der Simulation
-        simulated_image = (simulated_image - brightness_sim_image) / contrast_sim_image
-        # simulated_image = (simulated_image - minimum_sim_image) / (maximum_sim_image - minimum_sim_image)
-
-        brightness_tgt_image = torch.mean(target_image)
-        contrast_tgt_image = torch.std(target_image)
-        # Normalisierung des Zielbildes
-        target_image = (target_image - brightness_tgt_image) / contrast_tgt_image
-
-        return simulated_image, F.mse_loss(simulated_image, target_image)
 
     def clamp_parameters(self):
         self.model[1].aberr_params['C10'] = torch.clamp(self.model[1].aberr_params['C10'], -100, 0)
@@ -508,31 +534,43 @@ class NN_particles(nn.Module):
              total_loss += a_var_local_100 * local_loss_var(sim, tt, mask)
         return  total_loss, P_diff
 
+    def _union_mask(self):
+        """Maske ueber alle Gruppen (fuer das Main-Training)."""
+
+        masks = [m for m in self.train_methods.masks.values() if m is not None]
+        if not masks:
+            return None
+        union = masks[0] > 0
+        for m in masks[1:]:
+            union = torch.logical_or(union, m > 0)
+        return union.float()
+
     def get_current_target_and_mask_img(self, target_image):
-        train_area_idx = int(self.train_methods.only_train_small_area)
-        if self.train_methods.target_gr is not None and train_area_idx == 0:
-            ret_target = self.train_methods.target_gr
-            mask_img = None
-        else:
-            if train_area_idx >= 0:
-                mask_img = self.train_methods.area_masks[train_area_idx]
-                ret_target = target_image
-            else:
-                mask_img = None
-                ret_target = target_image
-        return ret_target, mask_img
+        """Zielbild + Maske der aktiven Gruppe.
+
+        Hat die aktive Gruppe ein eigenes Zielbild (``targets[gruppe]``), wird
+        dieses ohne Maske benutzt - sonst das globale Zielbild mit der
+        Gruppenmaske.  Ohne aktive Gruppe: globales Ziel, keine Maske.
+        """
+
+        active = self.train_methods.active_group
+
+        group_target = self.train_methods.target_for(active)
+        if group_target is not None:
+            return group_target, None
+
+        if active is not None:
+            return target_image, self.train_methods.mask_for(active)
+
+        return target_image, None
 
     def get_current_target_and_sim_ref(self, target_image, simulated_image):
-        train_area_idx = int(self.train_methods.only_train_small_area)
+        active = self.train_methods.active_group
 
-        if train_area_idx >= 0:
-            ref_idx = train_area_idx
-            mask_img = self.train_methods.area_masks[ref_idx]
-        else: # Main Training
-            mask_img_gr = self.train_methods.area_masks[0]
-            mask_img_ws2 = self.train_methods.area_masks[1]
-            mask_img_both = torch.logical_or(mask_img_gr > 0, mask_img_ws2 > 0).float()
-            mask_img = mask_img_both
+        if active is not None:
+            mask_img = self.train_methods.mask_for(active)
+        else:  # Main Training
+            mask_img = self._union_mask()
 
         if mask_img is None:
             sim_ref = simulated_image.flatten()
@@ -563,7 +601,7 @@ class NN_particles(nn.Module):
         eps = 1e-8
         tgt_ref, sim_ref = self.get_current_target_and_sim_ref(target_image, simulated_image)
 
-        if self.train_methods.train_normalisation_parameters:
+        if self.train_methods.train_normalisation_parameters.enabled:
             norm_params = self.tunable_parameters.normalisation_parameters
         else:
             norm_params = self.tunable_parameters.normalisation_parameters.detach()

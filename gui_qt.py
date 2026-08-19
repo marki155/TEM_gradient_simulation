@@ -54,10 +54,50 @@ class VizPayload:
     train_method: TrainMethod = None
 
     strain_maps: Optional[Dict[str, np.ndarray]] = None
+    strain_group: Optional[str] = None
 
     status: str = "idle"
 
     potential_maps: List = None
+
+    #: Schicht-/Gruppen-Info, damit die Anzeige nicht auf 4 Schichten festhaengt
+    layer_names: Optional[List[str]] = None
+    layer_groups: Optional[List[str]] = None
+    active_group: Optional[str] = None
+
+
+def collect_layer_visuals(pot_layer):
+    """Positionen, Intensitaeten und Histogramme aller Schichten einsammeln."""
+
+    pot_positions = []
+    pot_intensities = []
+    for i in range(pot_layer.N_l):
+        (px, py), ints = pot_layer.get_pos_and_ints(i)
+        pot_positions.append(np.column_stack([px, py]).astype(np.float32))
+        pot_intensities.append(np.asarray(ints, dtype=np.float32))
+
+    hist_counts = None
+    hist_edges = None
+    intensities = pot_layer.get_intensities_raw()
+    if intensities is not None:
+        hist_counts = []
+        for arr in intensities:
+            arr_np = arr.detach().cpu().numpy().ravel()
+            arr_np = arr_np[np.isfinite(arr_np)]
+            counts, edges = np.histogram(arr_np, bins=100)
+            hist_counts.append(counts.astype(np.float32))
+            hist_edges = edges.astype(np.float32)
+
+    return pot_positions, pot_intensities, hist_counts, hist_edges
+
+
+def strain_maps_for_active_group(pot_layer, train_method):
+    """Strain-Maps der aktiven Gruppe (ohne aktive Gruppe: letzte Gruppe)."""
+
+    name = train_method.active_group
+    if name is None or name not in pot_layer.strain_fields:
+        name = pot_layer.group_names[-1]
+    return pot_layer.strain_fields[name].strain_maps(), name
 
 
 class TrainingWorker(QtCore.QObject):
@@ -157,32 +197,6 @@ class TrainingWorker(QtCore.QObject):
         #except Exception as exc:
         #    print("request_heavy_refresh failed:", exc)
 
-    def _current_transform_group(self) -> int:
-        if hasattr(self.train_method, "only_train_small_area"):
-            if self.train_method.only_train_small_area == 0:
-                return 0
-            if self.train_method.only_train_small_area == 1:
-                return 1
-        return None
-
-    def emit_current_spin_values(self):
-        idx = self._current_transform_group()
-
-        if idx is None:
-            self.spin_values_changed.emit(0,0,0,0,0, False)
-        else:
-
-            with torch.no_grad():
-                scale_x_val = float(self.pot_layer.scales_[idx][0].detach().cpu().item())
-                scale_y_val = float(self.pot_layer.scales_[idx][1].detach().cpu().item())
-                rot_val = float(self.pot_layer.rotations_[idx].detach().cpu().item())
-                shift_x_val = float(self.pot_layer.shifts_[idx][0].detach().cpu().item())
-                shift_y_val = float(self.pot_layer.shifts_[idx][1].detach().cpu().item())
-                ux_val = float(self.pot_layer.ws2_displacement.ux.detach().cpu().numpy())
-                uy_val = float(self.pot_layer.ws2_displacement.uy.detach().cpu().numpy())
-
-            self.spin_values_changed.emit(scale_x_val, scale_y_val, rot_val, shift_x_val, shift_y_val, ux_val, uy_val, True)
-
     def emit_parameter_update(self):
         self.parameter_update.emit(self.model.get_tunable_parameters())
 
@@ -194,26 +208,8 @@ class TrainingWorker(QtCore.QObject):
         tgt_img = target_image.detach().cpu().numpy()
         diff_img = sim_img - tgt_img
 
-        pot_positions = []
-        pot_intensities = []
-        for i in range(4):
-            (px, py), ints = self.pot_layer.get_pos_and_ints(i)
-            pos = np.column_stack([px, py]).astype(np.float32)
-            ints = np.asarray(ints, dtype=np.float32)
-            pot_positions.append(pos)
-            pot_intensities.append(ints)
-
-        hist_counts = None
-        hist_edges = None
-        intensities = self.pot_layer.get_intensities_raw()
-        if intensities is not None:
-            hist_counts = []
-            for arr in intensities[:4]:
-                arr_np = arr.detach().cpu().numpy().ravel()
-                arr_np = arr_np[np.isfinite(arr_np)]
-                counts, edges = np.histogram(arr_np, bins=100)
-                hist_counts.append(counts.astype(np.float32))
-                hist_edges = edges.astype(np.float32)
+        (pot_positions, pot_intensities,
+         hist_counts, hist_edges) = collect_layer_visuals(self.pot_layer)
 
         ctf_phase = None
         ring = None
@@ -231,10 +227,8 @@ class TrainingWorker(QtCore.QObject):
         if p_diff is not None:
             p_diff_np = p_diff.detach().cpu().numpy()
 
-        show_strain_map_idx = self.train_method.only_train_small_area
-        if self.train_method.only_train_small_area < 0:
-            show_strain_map_idx = 1
-        strain_maps = self.pot_layer.strain_fields[show_strain_map_idx].strain_maps()
+        strain_maps, strain_group = strain_maps_for_active_group(
+            self.pot_layer, self.train_method)
 
         pot_imgs = self.pot_layer.get_potential_images()
 
@@ -260,7 +254,11 @@ class TrainingWorker(QtCore.QObject):
             status="running",
             train_method=self.train_method,
             strain_maps=strain_maps,
-            potential_maps=pot_imgs
+            strain_group=strain_group,
+            potential_maps=pot_imgs,
+            layer_names=self.pot_layer.layer_names,
+            layer_groups=[l.group for l in self.pot_layer.layers],
+            active_group=self.train_method.active_group,
         )
         return payload
 
@@ -340,12 +338,20 @@ class TrainingWorker(QtCore.QObject):
 
 
 class MplCanvas(FigureCanvasQTAgg):
-    def __init__(self, target_tensor=None, parent=None, train_method=None):
+    #: feste Kacheln vor bzw. nach den Potential-Kacheln
+    LEADING_TILES = ("loss", "sim", "diff", "target", "ctf")
+    TRAILING_TILES = ("hist", "ux", "uy", "eps_xx", "eps_yy", "eps_xy")
+    COLUMNS = 5
+
+    def __init__(self, target_tensor=None, parent=None, train_method=None, config=None):
         self.fig = Figure(figsize=(12, 8), dpi=100, constrained_layout=True)
-        self.axes = [self.fig.add_subplot(3, 5, i + 1) for i in range(15)]
         super().__init__(self.fig)
         self.setParent(parent)
         self.train_method = train_method
+        self.config = config
+
+        self.layer_names = list(config.layer_names) if config is not None else []
+        self.layer_groups = [l.group for l in config.layers] if config is not None else []
 
         self.target_tensor = target_tensor
 
@@ -394,28 +400,28 @@ class MplCanvas(FigureCanvasQTAgg):
             return
 
         # ---------- Normalmodus ----------
-        self.axes = [self.fig.add_subplot(3, 5, i + 1) for i in range(15)]
+        # Kachel-Raster waechst mit der Anzahl der Schichten mit
+        n_layers = max(len(self.layer_names), 1)
+        keys = (list(self.LEADING_TILES)
+                + [f"pot{i}" for i in range(n_layers)]
+                + list(self.TRAILING_TILES))
+        rows = int(np.ceil(len(keys) / self.COLUMNS))
+
+        self.axes = [self.fig.add_subplot(rows, self.COLUMNS, i + 1) for i in range(len(keys))]
         for ax in self.axes:
             ax.set_xticks([])
             ax.set_yticks([])
 
-        self.axes_cmap = {
-            "loss": self.axes[0], "sim": self.axes[1], "diff": self.axes[2], "target": self.axes[3],
-            "ctf": self.axes[4],
-            "pot0": self.axes[5], "pot1": self.axes[6], "pot2": self.axes[7], "pot3": self.axes[8],
-            "hist": self.axes[9], "ux": self.axes[10], "uy": self.axes[11],
-            "eps_xx": self.axes[12], "eps_yy": self.axes[13], "eps_xy": self.axes[14]
-        }
+        self.axes_cmap = {key: ax for key, ax in zip(keys, self.axes)}
 
         self.axes_cmap["loss"].set_title("Loss")
         self.axes_cmap["sim"].set_title("Simulated")
         self.axes_cmap["diff"].set_title("Diff")
         self.axes_cmap["target"].set_title("Target")
         self.axes_cmap["ctf"].set_title("CTF")
-        self.axes_cmap["pot0"].set_title("Potential Gr")
-        self.axes_cmap["pot1"].set_title("Potential S low")
-        self.axes_cmap["pot2"].set_title("Potential W")
-        self.axes_cmap["pot3"].set_title("Potential S high")
+        for i in range(n_layers):
+            name = self.layer_names[i] if i < len(self.layer_names) else str(i)
+            self.axes_cmap[f"pot{i}"].set_title(f"Potential {name}")
         self.axes_cmap["eps_xx"].set_title("eps xx")
         self.axes_cmap["eps_yy"].set_title("eps yy")
         self.axes_cmap["eps_xy"].set_title("eps xy")
@@ -444,14 +450,12 @@ class MplCanvas(FigureCanvasQTAgg):
         self.im_uy = self.axes_cmap["uy"].imshow(dummy, cmap="RdBu", origin="lower")
 
         self.pot_scatters = []
-        if SHOW_POTENTIAL:
-            for i in range(4):
+        for i in range(n_layers):
+            if SHOW_POTENTIAL:
                 sc = self.axes_cmap["pot" + str(i)].imshow(dummy, cmap="RdBu", origin="lower")
-                self.pot_scatters.append(sc)
-        else:
-            for i in range(4):
+            else:
                 sc = self.axes_cmap["pot" + str(i)].scatter([], [], s=2, c=[], cmap="viridis")
-                self.pot_scatters.append(sc)
+            self.pot_scatters.append(sc)
 
         self.im_ctf = self.axes_cmap["ctf"].imshow(
             np.zeros((10, 10), dtype=np.float32),
@@ -468,14 +472,14 @@ class MplCanvas(FigureCanvasQTAgg):
         )
 
         self.hist_lines = []
-        labels = ["Graphen", "S low", "W", "S high"]
-        for label in labels:
+        for i in range(n_layers):
+            label = self.layer_names[i] if i < len(self.layer_names) else str(i)
             line, = self.axes_cmap["hist"].plot([], [], label=label)
             self.hist_lines.append(line)
-        self.axes_cmap["hist"].legend()
+        self.axes_cmap["hist"].legend(fontsize="x-small")
 
     def set_target_rectangles(self, rectangles):
-        if rectangles is None:
+        if rectangles is None or "target" not in self.axes_cmap:
             return
         for x0, y0, x1, y1 in rectangles:
             rect = patches.Rectangle(
@@ -486,7 +490,7 @@ class MplCanvas(FigureCanvasQTAgg):
                 edgecolor="red",
                 facecolor="none",
             )
-            self.axes[3].add_patch(rect)
+            self.axes_cmap["target"].add_patch(rect)
 
     def _safe_set_image(self, artist, arr):
         artist.set_data(arr)
@@ -512,59 +516,46 @@ class MplCanvas(FigureCanvasQTAgg):
         #self.axes[2].set_title(f"Diff (Step {step})")
         #self.axes[3].set_title(f"Target (Step {step})")
 
-    def get_only_area_pos(self):
-        idx = self.train_method.only_train_small_area
-        xmin, ymin, xmax, ymax = self.train_method.train_small_area_squares[idx]
-        if idx == 0:
-            pos, ints = self.pot_layer.get_pos_and_ints(0)
-        else:
-            pos, ints = self.pot_layer.get_pos_and_ints(1)
-
-
     def get_pos_and_ints(self, payload):
+        """Atompositionen fuer die Target-Ansicht - nur die aktive Gruppe."""
 
-        idx = payload.train_method.only_train_small_area
-
-        if not self.show_positions_on_target:
+        if not self.show_positions_on_target or not payload.pot_positions:
             return ([], []), []
 
+        layer_groups = payload.layer_groups or []
+        active = payload.active_group
 
-        _idx = idx if idx >= 0 else 1
+        if active is None or not layer_groups:
+            indices = list(range(len(payload.pot_positions)))
+        else:
+            indices = [i for i, g in enumerate(layer_groups) if g == active]
+        if not indices:
+            return ([], []), []
+
+        pos = np.concatenate([payload.pot_positions[i] for i in indices], axis=0)
+        ints = np.concatenate([payload.pot_intensities[i] for i in indices], axis=0)
 
         x_min = 0
         y_min = 0
         x_max = payload.target_img.shape[0]
         y_max = payload.target_img.shape[1]
 
-
-        if _idx == 0:
-            pos = payload.pot_positions[_idx]
-            ints = payload.pot_intensities[_idx]
-        elif _idx == 1:
-            poses = []
-            intss = []
-            for i in range(1,4):
-                pos = payload.pot_positions[i]
-                ints = payload.pot_intensities[i]
-                poses.append(pos)
-                intss.append(ints)
-            pos = np.concatenate(poses, axis=0)
-            ints = np.concatenate(intss, axis=0)
-
         mask_borders = ((pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) &
-                (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max))
+                        (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max))
         positions = pos[mask_borders]
         intensities = ints[mask_borders]
 
-        #mask_img = self.train_method.area_masks[_idx].cpu().numpy()
         mask_img = payload.mask_img
-        if mask_img is not None:
-            mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)]
-
+        if mask_img is not None and len(positions) > 0:
+            inside = ((positions[:, 0] < mask_img.shape[0]) &
+                      (positions[:, 1] < mask_img.shape[1]))
+            positions = positions[inside]
+            intensities = intensities[inside]
+            mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)] > 0
             positions = positions[mask]
             intensities = intensities[mask]
 
-        return (positions[:,0] - x_min, positions[:,1]-y_min), intensities
+        return (positions[:, 0] - x_min, positions[:, 1] - y_min), intensities
 
     def update_heavy(self, payload: VizPayload, ctf_layer=None):
         if self.full_canvas_target_mode:
@@ -626,11 +617,16 @@ class MplCanvas(FigureCanvasQTAgg):
             self.im_ring.set_data(payload.ring_mask)
 
 
+        if payload.strain_group is not None:
+            self.axes_cmap["ux"].set_title(f"ux ({payload.strain_group})")
+            self.axes_cmap["uy"].set_title(f"uy ({payload.strain_group})")
+
         if payload.pot_positions is not None and payload.pot_intensities is not None:
             if SHOW_POTENTIAL:
                 for i, sc in enumerate(self.pot_scatters):
-                    pot_map = payload.potential_maps[i]
-                    self._safe_set_image(sc, pot_map)
+                    if payload.potential_maps is None or i >= len(payload.potential_maps):
+                        continue
+                    self._safe_set_image(sc, payload.potential_maps[i])
             else:
                 for i, sc in enumerate(self.pot_scatters):
                     pos = payload.pot_positions[i]
@@ -675,6 +671,8 @@ class MplCanvas(FigureCanvasQTAgg):
             centers = 0.5 * (payload.hist_edges[:-1] + payload.hist_edges[1:])
             ymax = 1.0
             for i, counts in enumerate(payload.hist_counts):
+                if i >= len(self.hist_lines):
+                    break
                 self.hist_lines[i].set_data(centers, counts)
                 if len(counts) > 0:
                     ymax = max(ymax, float(np.max(counts)))
@@ -702,14 +700,6 @@ class MplCanvas(FigureCanvasQTAgg):
             )
         else:
             self.axes_cmap["ctf"].set_title(f"CTF (Step {payload.step})")
-
-
-def dummy_parameters():
-    return ParticlesTunableParameters(
-        potential_parameters=TunablePotentialParameters(),
-        ctf_parameters = TunableCTFParameters(),
-        multislice_parameters = TunableMultisliceParameters()
-    )
 
 
 class LiveTrainWindow(QtWidgets.QMainWindow):
@@ -777,7 +767,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.parameter_frame.parameter_tuned.connect(self._trigger_heavy_refresh)
         left.addWidget(self.parameter_frame, stretch=0)
 
-        self.canvas = MplCanvas(target_tensor=self.target, train_method=self.train_method)
+        self.canvas = MplCanvas(target_tensor=self.target, train_method=self.train_method,
+                                config=self.model.config)
         left.addWidget(self.canvas, stretch=1)
 
 
@@ -806,8 +797,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.full_target_checkbox = QtWidgets.QCheckBox("Target fullscreen")
         self.show_atoms_on_target_checkbox = QtWidgets.QCheckBox("Show atom positions on target")
         self.show_atoms_on_target_checkbox.setChecked(True)
-        self.reset_occupancies_btn = QtWidgets.QPushButton("Reset occupancies WS2")
-        self.reset_free_positions_ws2_btn = QtWidgets.QPushButton("Reset free positions WS2")
+        self.reset_occupancies_btn = QtWidgets.QPushButton("Reset occupancies (aktive Gruppe)")
+        self.reset_free_positions_ws2_btn = QtWidgets.QPushButton("Reset free positions (aktive Gruppe)")
         self.render_btn = QtWidgets.QPushButton("Render")
         self.reset_losses = QtWidgets.QPushButton("Reset losses")
 
@@ -835,31 +826,41 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         quick_box = QtWidgets.QGroupBox("Quick presets")
         quick_layout = QtWidgets.QHBoxLayout(quick_box)
 
-        self.graphen_btn = QtWidgets.QPushButton("Graphen area")
-        self.ws2_btn = QtWidgets.QPushButton("WS2 area")
-        self.main_btn = QtWidgets.QPushButton("Main training")
+        self.group_preset_buttons = {}
+        for name in self.model.config.group_names:
+            btn = QtWidgets.QPushButton(f"nur {name}")
+            btn.clicked.connect(lambda _=False, n=name: self._train_only_group(n))
+            quick_layout.addWidget(btn)
+            self.group_preset_buttons[name] = btn
 
-        quick_layout.addWidget(self.graphen_btn)
-        quick_layout.addWidget(self.ws2_btn)
-        quick_layout.addWidget(self.main_btn)
+        self.free_positions_btn = QtWidgets.QPushButton("freie Positionen")
+        quick_layout.addWidget(self.free_positions_btn)
 
         right.addWidget(quick_box)
 
-        self.editor = TrainMethodEditor(self.train_method)
-        right.addWidget(self.editor, stretch=1)
+        self.editor = TrainMethodEditor(self.train_method, config=self.model.config)
+        editor_scroll = QtWidgets.QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setWidget(self.editor)
+        right.addWidget(editor_scroll, stretch=1)
 
         right.addStretch(1)
 
-        self.editor.graphen_training()
+        # Kein Preset mehr erzwingen - die geladene TrainMethod gilt.
         self._apply_trainable_selection()
 
 
 
     def _current_transform_group(self):
-        if self.train_method.only_train_small_area >= 0:
-            return self.train_method.only_train_small_area
-        else:
-            None
+        return self.train_method.active_group
+
+    def _active_layer_indices(self):
+        """Schicht-Indizes der aktiven Gruppe (ohne aktive Gruppe: alle)."""
+
+        active = self.train_method.active_group
+        if active is None:
+            return list(range(len(self.model.config.layers)))
+        return self.model.config.layer_indices(active)
 
     def _on_show_positions_changed(self, checked: bool):
         #self.show_positions_checkbox.setChecked(checked)
@@ -880,9 +881,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.resume_btn.clicked.connect(self.resume_training)
         self.stop_btn.clicked.connect(self.stop_training)
 
-        self.graphen_btn.clicked.connect(self._graphen_training)
-        self.ws2_btn.clicked.connect(self._ws2_training)
-        self.main_btn.clicked.connect(self._main_training)
+        self.free_positions_btn.clicked.connect(self._free_positions_training)
 
         self.editor.changed.connect(self._apply_trainable_selection)
 
@@ -898,11 +897,11 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.worker.reset_losses()
 
     def reset_occupancies_ws2(self):
-        self.parameter_frame.reset_occupancies_ws2()
+        self.parameter_frame.reset_occupancies(self._active_layer_indices())
         self._trigger_heavy_refresh()
 
     def reset_free_positions_ws2(self):
-        self.parameter_frame.reset_free_positions_ws2()
+        self.parameter_frame.reset_free_positions(self._active_layer_indices())
         self._trigger_heavy_refresh()
 
 
@@ -910,16 +909,12 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         if hasattr(self.pot_layer, "apply_trainable_selection"):
             self.pot_layer.apply_trainable_selection()
 
-    def _graphen_training(self):
-        self.editor.graphen_training()
+    def _train_only_group(self, group_name):
+        self.editor.train_only_group(group_name)
         self._apply_trainable_selection()
 
-    def _ws2_training(self):
-        self.editor.WS2_training()
-        self._apply_trainable_selection()
-
-    def _main_training(self):
-        self.editor.main_training()
+    def _free_positions_training(self):
+        self.editor.free_positions_training()
         self._apply_trainable_selection()
 
     def start_training(self):
@@ -993,32 +988,15 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
                 self._trigger_heavy_refresh()
 
     def _build_local_heavy_payload(self, step, loss_item, simulated_image, target_image, p_diff):
+        _, mask_img = self.model.get_current_target_and_mask_img(target_image)
+        if mask_img is not None:
+            mask_img = mask_img.detach().cpu().numpy()
         sim_img = simulated_image.detach().cpu().numpy()
         tgt_img = target_image.detach().cpu().numpy()
         diff_img = sim_img - tgt_img
 
-        pot_positions = []
-        pot_intensities = []
-        for i in range(4):
-            (px, py), ints = self.pot_layer.get_pos_and_ints(i)
-            pos = np.column_stack([px, py]).astype(np.float32)
-            ints = np.asarray(ints, dtype=np.float32)
-            pot_positions.append(pos)
-            pot_intensities.append(ints)
-
-        hist_counts = []
-        hist_edges = None
-        intensities = self.pot_layer.get_intensities_raw()
-        if intensities is not None:
-            for arr in intensities[:4]:
-                arr_np = arr.detach().cpu().numpy().ravel()
-                arr_np = arr_np[np.isfinite(arr_np)]
-                counts, edges = np.histogram(arr_np, bins=100)
-                hist_counts.append(counts.astype(np.float32))
-                hist_edges = edges.astype(np.float32)
-        else:
-            hist_counts = None
-            hist_edges = None
+        (pot_positions, pot_intensities,
+         hist_counts, hist_edges) = collect_layer_visuals(self.pot_layer)
 
         ctf_phase = None
         ring = None
@@ -1034,11 +1012,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         p_diff_np = None if p_diff is None else p_diff.detach().cpu().numpy()
 
-        show_strain_map_idx = self.train_method.only_train_small_area
-        if self.train_method.only_train_small_area < 0:
-            show_strain_map_idx = 1
-        strain_maps = self.pot_layer.strain_fields[show_strain_map_idx].strain_maps()
-
+        strain_maps, strain_group = strain_maps_for_active_group(
+            self.pot_layer, self.train_method)
 
         pot_imgs = self.pot_layer.get_potential_images()
 
@@ -1049,6 +1024,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             sim_img=sim_img,
             diff_img=diff_img,
             target_img=tgt_img,
+            mask_img=mask_img,
             ctf_phase=ctf_phase,
             ring_mask=ring,
             p_diff=p_diff_np,
@@ -1059,7 +1035,11 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             status="preview",
             train_method=self.train_method,
             strain_maps=strain_maps,
-            potential_maps=pot_imgs
+            strain_group=strain_group,
+            potential_maps=pot_imgs,
+            layer_names=self.pot_layer.layer_names,
+            layer_groups=[l.group for l in self.pot_layer.layers],
+            active_group=self.train_method.active_group,
         )
 
     def _trigger_heavy_refresh(self):

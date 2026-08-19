@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import math
 import torch
@@ -10,6 +10,11 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 from displacement_field import SplineDisplacementField2D, StrainTunableParameters
+from layers import (
+    LEGACY_GROUP_NAMES,
+    LEGACY_LAYER_NAMES,
+    layer_indices_by_group,
+)
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -184,84 +189,189 @@ def update_from_serialized(target: Any, source: Any):
             update_from_serialized(target[key], value)
         return
 
+
 @dataclass
 class TunablePotentialParameters:
-    strain_fields: List[StrainTunableParameters]
+    """Alle trainierbaren Groessen des Potentials.
+
+    Pro Schicht (Reihenfolge = ``config.layers``): ``position_shifts``,
+    ``intensities``, ``occupancies``.
+    Pro Gruppe (Schluessel = Gruppenname): ``shifts``, ``rotations``,
+    ``scales``, ``potential_factors``, ``strain_fields``.
+    """
+
+    strain_fields: Dict[str, StrainTunableParameters]
 
     position_shifts: nn.ParameterList
     intensities: nn.ParameterList
     occupancies: nn.ParameterList
 
-    scale_Gr: nn.Parameter = nn.Parameter(torch.tensor([1.12, 1.14], dtype=torch.float32))
-    rotation_Gr: nn.Parameter = nn.Parameter(torch.tensor(0.025, dtype=torch.float32))
-    shift_Gr: nn.Parameter = nn.Parameter(torch.tensor([-9.5, -11.0], dtype=torch.float32))
-
-    scale_WS2: nn.Parameter = nn.Parameter(torch.tensor([1.05, 1.09 ], dtype=torch.float32))
-    rotation_WS2: nn.Parameter = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
-    shift_WS2: nn.Parameter = nn.Parameter(torch.tensor([15.9, -5.0 ], dtype=torch.float32))
-
-    graphene_potential_factor: nn.Parameter = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
-    ws2_potential_factor: nn.Parameter = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+    shifts: nn.ParameterDict
+    rotations: nn.ParameterDict
+    scales: nn.ParameterDict
+    potential_factors: nn.ParameterDict
 
 
+# ---------------------------------------------------------------------------
+# Migration alter Parameter-Dateien (best.json & Co.)
+# ---------------------------------------------------------------------------
+
+#: alte Feldnamen -> (neues Dict, Gruppenname)
+LEGACY_PARAMETER_FIELDS = {
+    "scale_Gr": ("scales", "Gr"),
+    "rotation_Gr": ("rotations", "Gr"),
+    "shift_Gr": ("shifts", "Gr"),
+    "scale_WS2": ("scales", "WS2"),
+    "rotation_WS2": ("rotations", "WS2"),
+    "shift_WS2": ("shifts", "WS2"),
+    "graphene_potential_factor": ("potential_factors", "Gr"),
+    "ws2_potential_factor": ("potential_factors", "WS2"),
+}
 
 
+def is_legacy_potential_parameters(source) -> bool:
+    return isinstance(source, dict) and any(k in source for k in LEGACY_PARAMETER_FIELDS)
 
+
+def migrate_serialized_potential_parameters(source, config):
+    """Bringt eine alte (Gr/WS2-)Parameter-Datei in die neue Gruppen-Struktur.
+
+    Schichtbezogene Listen werden ueber die alten Schichtnamen zugeordnet, damit
+    z.B. eine reine Graphen-Config die Graphen-Eintraege einer alten
+    4-Schicht-Datei uebernehmen kann.
+    """
+
+    if not is_legacy_potential_parameters(source):
+        return source
+
+    group_names = [g.name for g in config.groups]
+    layer_names_new = [l.name for l in config.layers]
+
+    out = dict(source)
+    buckets: Dict[str, Dict[str, object]] = {
+        "scales": {}, "rotations": {}, "shifts": {}, "potential_factors": {}}
+
+    for old_key, (bucket, gname) in LEGACY_PARAMETER_FIELDS.items():
+        if old_key in out:
+            value = out.pop(old_key)
+            if gname in group_names:
+                buckets[bucket][gname] = value
+
+    for bucket, values in buckets.items():
+        if values:
+            out[bucket] = values
+
+    strain = out.get("strain_fields")
+    if isinstance(strain, list):
+        out["strain_fields"] = {
+            name: strain[i]
+            for i, name in enumerate(LEGACY_GROUP_NAMES)
+            if i < len(strain) and name in group_names
+        }
+
+    # Schichtlisten auf die neuen Schichten umsortieren
+    for key in ("position_shifts", "intensities", "occupancies"):
+        value = out.get(key)
+        if not isinstance(value, list) or len(value) == len(layer_names_new):
+            continue
+        remapped = []
+        ok = True
+        for name in layer_names_new:
+            if name in LEGACY_LAYER_NAMES:
+                idx = LEGACY_LAYER_NAMES.index(name)
+                if idx < len(value):
+                    remapped.append(value[idx])
+                    continue
+            ok = False
+            break
+        if ok:
+            print(f"[potential migration] '{key}' von {len(value)} auf "
+                  f"{len(remapped)} Schichten gemappt: {layer_names_new}")
+            out[key] = remapped
+        else:
+            print(f"[potential migration] '{key}' passt nicht zu den neuen "
+                  f"Schichten {layer_names_new} und wird ignoriert.")
+            out.pop(key)
+
+    return out
 
 
 class DifferentiablePotential(nn.Module):
+    """Projiziertes Potential aller Schichten.
+
+    Die Schichten und ihre Gruppen kommen komplett aus ``config.layers`` /
+    ``config.groups`` - im Code ist nichts mehr auf Gr/S1/W/S2 festgelegt.
+    """
+
     def __init__(self, config, train_methods, device):
         super().__init__()
-        #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
         self.pixel_size_nm = config.pixel_size_nm
         self.wavelength_nm = relativistic_wavelength_nm(config.voltage_kV)
         self.device = device
-        self.max_shifts = config.max_shifts
-        self.max_rotations = config.max_rotations
 
         self.H, self.W = config.shape
 
-        self._IDX = {"Gr": 0, "S1": 1, "W": 2, "S2": 3}
-        self.atom_names_by_layer = ["C", "S", "W", "S"]
-        self.N_l = len(config.init_positions)
+        self.layers = list(config.layers)
+        self.groups = list(config.groups)
+        self.groups_by_name = {g.name: g for g in self.groups}
+        self.layer_indices_by_group = layer_indices_by_group(self.layers)
+        self.group_of_layer = [self.groups_by_name[l.group] for l in self.layers]
+        self.layer_names = [l.name for l in self.layers]
+        self.group_names = [g.name for g in self.groups]
+        self.N_l = len(self.layers)
+
+        if len(config.init_positions) != self.N_l:
+            raise ValueError(
+                f"init_positions hat {len(config.init_positions)} Eintraege, "
+                f"die Config definiert aber {self.N_l} Schichten "
+                f"({self.layer_names}).")
 
         self.train_methods = train_methods
+        self.train_method = train_methods  # Alias, altes Attribut
         self.config = config
 
+        self.strain_fields = nn.ModuleDict({
+            group.name: SplineDisplacementField2D(
+                config=config, control_shape=list(group.control_points),
+                device=device, dtype=torch.float32, init_scale=0.0)
+            for group in self.groups
+        })
 
-
-        self.strain_fields = [SplineDisplacementField2D(config=config, control_shape=config.control_points_graphen,
-                                                         device=device, dtype=torch.float32, init_scale=0.0),
-                         SplineDisplacementField2D(config=config, control_shape=config.control_points_ws2,
-                                                         device=device, dtype=torch.float32, init_scale=0.0)]
-
-
-        #self.positions_method = "graphen_shift"
-        #self.intensity_classes = "free" # "free", "vacancies", "classes"
-        strain_parameters = [field.get_tunable_parameters() for field in self.strain_fields]
+        strain_parameters = {name: fieldd.get_tunable_parameters()
+                             for name, fieldd in self.strain_fields.items()}
         position_shifts_ = self.initialize_position_shifts_parameters(config.init_positions)
         intensities_, occupancies_ = self.initialize_intensities_parameters(config.init_intensities)
+        shifts_, rotations_, scales_, factors_ = self.initialize_group_parameters()
 
-        self.tunable_parameters = TunablePotentialParameters(strain_fields=strain_parameters, position_shifts=position_shifts_,
-                                                             intensities=intensities_, occupancies=occupancies_,)
+        self.tunable_parameters = TunablePotentialParameters(
+            strain_fields=strain_parameters,
+            position_shifts=position_shifts_,
+            intensities=intensities_,
+            occupancies=occupancies_,
+            shifts=shifts_,
+            rotations=rotations_,
+            scales=scales_,
+            potential_factors=factors_,
+        )
 
         self.potential_pad = config.padding
         self.kirkland_precalc_pot = KirklandPrecalcPotential(self.H + 2 * self.potential_pad,
                                                              self.W + 2 * self.potential_pad,
-                                                             self.pixel_size_nm, self.device)
-
-
+                                                             self.pixel_size_nm, self.device,
+                                                             atom_types=sorted({l.element for l in self.layers}))
 
         self.apply_trainable_selection()
-        #self.zero_grads_for_frozen()
 
         for name, value in vars(self.tunable_parameters).items():
             if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
                 setattr(self, name, value)
 
+    # -- Konstruktion ---------------------------------------------------------
     @classmethod
-    def from_config_and_parameters(cls, config, train_methods, tunable_parameters):
-        instance = cls(config, train_methods, "cpu")
+    def from_config_and_parameters(cls, config, train_methods, tunable_parameters, device="cpu"):
+        instance = cls(config, train_methods, device)
+        if isinstance(tunable_parameters, dict):
+            tunable_parameters = migrate_serialized_potential_parameters(tunable_parameters, config)
         update_from_serialized(instance.tunable_parameters, tunable_parameters)
         instance.apply_trainable_selection()
         for name, value in vars(instance.tunable_parameters).items():
@@ -272,241 +382,132 @@ class DifferentiablePotential(nn.Module):
     def get_tunable_parameters(self):
         return self.tunable_parameters
 
+    def group_for_layer(self, i: int):
+        return self.group_of_layer[i]
 
-    def apply_trainable_selection(self):
-            self.tunable_parameters.intensities[0].requires_grad = self.train_methods.train_graphen_intensities.enabled
-            self.tunable_parameters.intensities[1].requires_grad = self.train_methods.train_S1_intensities.enabled
-            self.tunable_parameters.intensities[2].requires_grad = self.train_methods.train_W_intensities.enabled
-            self.tunable_parameters.intensities[3].requires_grad = self.train_methods.train_S2_intensities.enabled
+    def layer_indices(self, group_name: str):
+        return self.layer_indices_by_group.get(group_name, [])
 
-            self.tunable_parameters.occupancies[0].requires_grad = self.train_methods.train_graphen_occupancies.enabled
-            self.tunable_parameters.occupancies[1].requires_grad = self.train_methods.train_S1_occupancies.enabled
-            self.tunable_parameters.occupancies[2].requires_grad = self.train_methods.train_W_occupancies.enabled
-            self.tunable_parameters.occupancies[3].requires_grad = self.train_methods.train_S2_occupancies.enabled
+    def initialize_group_parameters(self):
+        shifts = nn.ParameterDict()
+        rotations = nn.ParameterDict()
+        scales = nn.ParameterDict()
+        factors = nn.ParameterDict()
 
-            self.tunable_parameters.shift_Gr.requires_grad = self.train_methods.graphen_shift.enabled
-            self.tunable_parameters.rotation_Gr.requires_grad = self.train_methods.graphen_rotation.enabled
-            self.tunable_parameters.position_shifts[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions.enabled
+        for group in self.groups:
+            shifts[group.name] = nn.Parameter(
+                torch.tensor(list(group.init_shift), dtype=torch.float32, device=self.device))
+            rotations[group.name] = nn.Parameter(
+                torch.tensor(float(group.init_rotation), dtype=torch.float32, device=self.device))
+            scales[group.name] = nn.Parameter(
+                torch.tensor(list(group.init_scale), dtype=torch.float32, device=self.device))
+            factors[group.name] = nn.Parameter(
+                torch.tensor(float(group.init_potential_factor), dtype=torch.float32, device=self.device))
 
-            self.tunable_parameters.shift_WS2.requires_grad = self.train_methods.WS2_shift.enabled
-            self.tunable_parameters.rotation_WS2.requires_grad = self.train_methods.WS2_rotation.enabled
-            for i in range(self.N_l):
-                if i != self._IDX["Gr"]:
-                    self.tunable_parameters.position_shifts[i].requires_grad = self.train_methods.WS2_free_positions.enabled
+        return shifts, rotations, scales, factors
 
+    def initialize_position_shifts_parameters(self, init_positions):
+        positions_ = [torch.tensor(np.asarray(pos), dtype=torch.float32, device=self.device)
+                      for pos in init_positions]
+        for i, t in enumerate(positions_):
+            self.register_buffer(f"init_positions_{i}", t)
 
+        position_shifts_ = nn.ParameterList(
+            [torch.zeros_like(pos) for pos in positions_])
 
-            for p in self.strain_fields[0].parameters():
-                p.requires_grad = self.train_methods.Gr_strain_field.enabled
+        for i, layer in enumerate(self.layers):
+            position_shifts_[i].requires_grad = self.train_methods.layer_enabled(
+                layer.name, "free_positions")
 
-            for p in self.strain_fields[1].parameters():
-                p.requires_grad = self.train_methods.WS2_strain_field.enabled
+        return position_shifts_
 
+    def initialize_intensities_parameters(self, init_intensities):
+        init_intensities = [np.asarray(I) for I in init_intensities]
 
+        intensities_ = nn.ParameterList(
+            [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
 
-    def zero_grads_for_frozen(self):
-        if not self.train_methods.train_graphen_intensities.enabled:
-            self.intensities[0].grad = None
-        if not self.train_methods.train_S1_intensities.enabled:
-            self.intensities[1].grad = None
-        if not self.train_methods.train_W_intensities.enabled:
-            self.intensities[2].grad = None
-        if not self.train_methods.train_S2_intensities.enabled:
-            self.intensities[3].grad = None
+        occupancies_ = nn.ParameterList([
+            torch.ones(init_intensities[i].shape, dtype=torch.float32, device=self.device)
+            * float(self.layers[i].init_occupancy)
+            for i in range(self.N_l)
+        ])
 
-        if not  self.train_methods.train_graphen_occupancies.enabled:
-            self.occupancies[0].grad = None
-        if not self.train_methods.train_S1_occupancies.enabled:
-            self.occupancies[1].grad = None
-        if not self.train_methods.train_W_occupancies.enabled:
-            self.occupancies[2].grad = None
-        if not self.train_methods.train_S2_occupancies.enabled:
-            self.occupancies[3].grad = None
-
-        if not self.train_methods.graphen_shift.enabled:
-            self.tunable_parameters.shift_Gr.grad = None
-        if not self.train_methods.graphen_rotation.enabled:
-            self.tunable_parameters.rotation_Gr.grad = None
-        if not self.train_methods.graphen_free_positions.enabled:
-            self.position_shifts[self._IDX["Gr"]].grad = None
-
-        if not self.train_methods.WS2_shift.enabled:
-            self.tunable_parameters.shift_WS2.grad = None
-        if not self.train_methods.WS2_rotation.enabled:
-            self.tunable_parameters.rotation_WS2.grad = None
-        for i in range(self.N_l):
-            if i != self._IDX["Gr"] and not self.train_methods.WS2_free_positions.enabled:
-                self.position_shifts[i].grad = None
+        return intensities_, occupancies_
 
     def get_init_positions(self, i):
         return getattr(self, f"init_positions_{i}")
 
+    # -- Trainierbarkeit ------------------------------------------------------
+    def apply_trainable_selection(self):
+        tp = self.tunable_parameters
+        tm = self.train_methods
 
-    def initialize_position_shifts_parameters(self, init_positions):
-        positions_ = [torch.tensor(pos, dtype=torch.float32, device=self.device) for pos in init_positions]
-        for i, t in enumerate(positions_):
-            self.register_buffer(f"init_positions_{i}", t)
-        if not isinstance(init_positions[0], np.ndarray):
-            init_positions = [np.array(pos) for pos in init_positions]
-        position_shifts_ = nn.ParameterList(
-            [torch.tensor(pos*0.0, dtype=torch.float32, device=self.device) for pos in init_positions])
+        for i, layer in enumerate(self.layers):
+            tp.intensities[i].requires_grad = tm.layer_enabled(layer.name, "intensities")
+            tp.occupancies[i].requires_grad = tm.layer_enabled(layer.name, "occupancies")
+            tp.position_shifts[i].requires_grad = tm.layer_enabled(layer.name, "free_positions")
 
-        position_shifts_[self._IDX["Gr"]].requires_grad = self.train_methods.graphen_free_positions.enabled
-        for i in range(self.N_l):
-            if i != self._IDX["Gr"]:
-                position_shifts_[i].requires_grad = self.train_methods.WS2_free_positions.enabled
+        for group in self.groups:
+            tp.shifts[group.name].requires_grad = tm.group_enabled(group.name, "shift")
+            tp.rotations[group.name].requires_grad = tm.group_enabled(group.name, "rotation")
+            tp.scales[group.name].requires_grad = tm.group_enabled(group.name, "scale")
 
-        return position_shifts_
+            strain_enabled = tm.group_enabled(group.name, "strain_field")
+            for p in self.strain_fields[group.name].parameters():
+                p.requires_grad = strain_enabled
 
+    def zero_grads_for_frozen(self):
+        tp = self.tunable_parameters
+        tm = self.train_methods
 
+        for i, layer in enumerate(self.layers):
+            if not tm.layer_enabled(layer.name, "intensities"):
+                tp.intensities[i].grad = None
+            if not tm.layer_enabled(layer.name, "occupancies"):
+                tp.occupancies[i].grad = None
+            if not tm.layer_enabled(layer.name, "free_positions"):
+                tp.position_shifts[i].grad = None
 
+        for group in self.groups:
+            if not tm.group_enabled(group.name, "shift"):
+                tp.shifts[group.name].grad = None
+            if not tm.group_enabled(group.name, "rotation"):
+                tp.rotations[group.name].grad = None
+            if not tm.group_enabled(group.name, "scale"):
+                tp.scales[group.name].grad = None
+            if not tm.group_enabled(group.name, "strain_field"):
+                for p in self.strain_fields[group.name].parameters():
+                    p.grad = None
 
-
-
-    def initialize_intensities_parameters(self, init_intensities):
-        if not isinstance(init_intensities[0], np.ndarray):
-            init_intensities = [np.array(pos) for pos in init_intensities]
-
-
-        intensities_ = nn.ParameterList(
-            [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
-        occupancies_ = nn.ParameterList(
-            [torch.ones(init_intensities[0].shape, dtype=torch.float32, device=self.device)*100,
-             torch.ones(init_intensities[1].shape, dtype=torch.float32, device=self.device)*2,
-             torch.ones(init_intensities[2].shape, dtype=torch.float32, device=self.device)*2,
-             torch.ones(init_intensities[3].shape, dtype=torch.float32, device=self.device)*2])
-
-
-        return intensities_, occupancies_
-
-
-        if False:
-
-            if self.train_methods.intensity_classes == "free":
-                for i in range(len(init_intensities)):
-                    self.intensities_[i].requires_grad = True
-                    self.occupancies_[i].requires_grad = True
-            elif self.train_methods.intensity_classes == "free_ws2":
-                for n in self._IDX:
-                    if n == "Gr":
-                        self.intensities_[self._IDX[n]].requires_grad = False
-                    else:
-                        self.intensities_[self._IDX[n]].requires_grad = True
-
-            elif self.train_methods.intensity_classes == "vacancies":
-                raise NotImplementedError("Vacancies not implemented yet")
-                self.vacancies_ = nn.ParameterList(
-                    [torch.ones(init_intensities[i].shape, dtype=torch.float32, device=self.device)
-                     for i in range(len(init_intensities))])
-
-            elif self.train_methods.intensity_classes == "vacancies_WS2":
-                raise NotImplementedError("Vacancies not implemented yet")
-                self.vacancies_ = nn.ParameterList(
-                    [torch.ones(init_intensities[i].shape, dtype=torch.float32, device=self.device)
-                     for i in range(len(init_intensities))])
-
-                self.vacancies_[self._IDX["Gr"]].requires_grad = False
-
-
-            elif self.train_methods.intensity_classes == "classes": ## eher über loss funktion (abweichung von 16, 32, 74)
-                raise NotImplementedError("Classes not implemented yet")
-                self.classes = torch.nn.Parameter(torch.tensor([0.0, 16., 32., 74.], dtype=torch.float32, device=self.device))
-                K = len(self.classes)
-                N = self.positions.shape[0]
-                self.intensities_ = torch.nn.Parameter(torch.rand(N, K))
-            elif self.train_methods.intensity_classes == "fixed":
-                for i in range(len(init_intensities)):
-                    self.intensities_[i].requires_grad = False
-            else:
-
-                raise ValueError("Unknown intensity class type")
-
-
-    def initialize_intensities_parameters_old(self, init_intensities):
-        if self.train_methods.intensity_classes == "free":
-            self.intensities_ = nn.ParameterList(
-                [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
-        elif self.train_methods.intensity_classes == "free_ws2":
-            self.register_buffer("init_intensities_Gr", torch.tensor(init_intensities[self._IDX["Gr"]],
-                                                                   dtype=torch.float32, device=self.device))
-            self.intensities_ = nn.ParameterList(
-                [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities[1:]])
-        elif self.train_methods.intensity_classes == "vacancies":
-            self.register_buffer("init_intensities_Gr", torch.tensor(init_intensities[self._IDX["Gr"]],
-                                                                     dtype=torch.float32, device=self.device))
-            #self.init_intensities = [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities]
-            # self.init_intensities = init_intensities
-            # self.register_buffer("init_intensities", torch.tensor(init_intensities, dtype=torch.float32))
-            self.vacanciesS1 = nn.Parameter(
-                torch.ones(init_intensities[1].shape, dtype=torch.float32, device=self.device))
-            self.vacanciesW = nn.Parameter(
-                torch.ones(init_intensities[2].shape, dtype=torch.float32, device=self.device))
-            self.vacanciesS2 = nn.Parameter(
-                torch.ones(init_intensities[3].shape, dtype=torch.float32, device=self.device))
-            #vacancies_list = [self.vacanciesS1, self.vacanciesW, self.vacanciesS2]
-
-            #self.vacancies_tensor = pad_sequence(vacancies_list, batch_first=True)
-
-
-        elif self.intensity_classes == "classes": ## eher über loss funktion (abweichung von 16, 32, 74)
-            self.classes = torch.nn.Parameter(torch.tensor([0.0, 16., 32., 74.], dtype=torch.float32, device=self.device))
-            K = len(self.classes)
-            N = self.positions.shape[0]
-            self.intensities_ = torch.nn.Parameter(torch.rand(N, K))
-        elif self.intensity_classes == "fixed":
-            self.intensities_ = [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities]
-        else:
-
-            raise ValueError("Unknown intensity class type")
-
-
+    # -- Geometrie ------------------------------------------------------------
     def get_positions(self):
+        tp = self.tunable_parameters
+        tm = self.train_methods
+        center = torch.tensor((self.H / 2, self.W / 2), device=self.device)
+
         ret_positions = []
-        rotations_ = (self.tunable_parameters.rotation_Gr, self.tunable_parameters.rotation_WS2)
-        shifts_ = (self.tunable_parameters.shift_Gr, self.tunable_parameters.shift_WS2)
-        scales_ = (self.tunable_parameters.scale_Gr, self.tunable_parameters.scale_WS2)
+        for i, layer in enumerate(self.layers):
+            group = self.group_of_layer[i]
+            gname = group.name
 
-
-        for i in range(self.N_l):
-            if i == self._IDX["Gr"]:
-                idx_s_r = 0
-            else:
-                idx_s_r = 1
-
-
-
-            # Rotation um den Mittelpunkt der Graphen-Positionen
-
-            #center = torch.tensor((self.H/2, self.W/2), device=self.device)
-            area_mask = self.train_methods.area_masks[idx_s_r]
-            #center = torch.tensor([(x_min + x_max) / 2, (y_min + y_max) / 2], device=self.device)
-            center = torch.tensor((self.H/2, self.W/2), device=self.device)
-
-
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_rotation.enabled)):
-                theta = rotations_[idx_s_r]
-            else:
-                theta = rotations_[idx_s_r].detach()
-
-            if self.max_rotations is not None:
-                theta = torch.clamp(theta, - self.max_rotations[idx_s_r], self.max_rotations[idx_s_r])
+            theta = tp.rotations[gname]
+            if not tm.group_enabled(gname, "rotation"):
+                theta = theta.detach()
+            if group.max_rotation is not None:
+                theta = torch.clamp(theta, -group.max_rotation, group.max_rotation)
             cos_theta = torch.cos(theta)
             sin_theta = torch.sin(theta)
 
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_shift.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_shift.enabled)):
-                shifts = shifts_[idx_s_r]
-            else:
-                shifts = shifts_[idx_s_r].detach()
-            shift = torch.clamp(shifts, -self.max_shifts[idx_s_r],
-                                self.max_shifts[idx_s_r]) if self.max_shifts is not None else shifts
+            shift = tp.shifts[gname]
+            if not tm.group_enabled(gname, "shift"):
+                shift = shift.detach()
+            if group.max_shift is not None:
+                shift = torch.clamp(shift, -group.max_shift, group.max_shift)
 
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_free_positions.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_free_positions.enabled)):
-                position_shifts = self.tunable_parameters.position_shifts[i]
-            else:
-                position_shifts = self.tunable_parameters.position_shifts[i].detach()
+            position_shifts = tp.position_shifts[i]
+            if not tm.layer_enabled(layer.name, "free_positions"):
+                position_shifts = position_shifts.detach()
 
             positions = self.get_init_positions(i) + position_shifts
             centered_positions = positions - center
@@ -515,316 +516,231 @@ class DifferentiablePotential(nn.Module):
             rotated_positions[:, 0] = cos_theta * centered_positions[:, 0] - sin_theta * centered_positions[:, 1]
             rotated_positions[:, 1] = sin_theta * centered_positions[:, 0] + cos_theta * centered_positions[:, 1]
 
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_scale.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_scale.enabled)):
-                scales = torch.clamp(scales_[idx_s_r], min=0.80, max=1.2)
+            if tm.group_enabled(gname, "scale"):
+                scales = torch.clamp(tp.scales[gname], min=0.80, max=1.2)
             else:
-                scales = scales_[idx_s_r].detach()
+                scales = tp.scales[gname].detach()
 
             rotated_positions = rotated_positions * scales
             new_positions = rotated_positions + center + shift
-
-            if i == self._IDX["Gr"]:
-                new_positions = self.strain_fields[0](new_positions)
-            else:
-                new_positions = self.strain_fields[1](new_positions)
+            new_positions = self.strain_fields[gname](new_positions)
 
             ret_positions.append(new_positions)
+
         return ret_positions
 
-    def ws2_elastic_loss(self, lambda_=1.0, mu=1.0, sample_layers=("S1", "W", "S2")):
-        """
-        Elastische Energie des WS2-Verschiebungsfeldes.
-        Bewertet an den aktuellen WS2-Atompositionen.
-        """
-        coords = []
+    def group_elastic_loss(self, group_name: str, lambda_=1.0, mu=1.0):
+        """Elastische Energie des Verschiebungsfeldes einer Gruppe."""
 
-        for name in sample_layers:
-            idx = self._IDX[name]
-            pos = self.get_positions()[idx].detach()
-            coords.append(pos)
+        indices = self.layer_indices(group_name)
+        if not indices:
+            return torch.zeros((), device=self.device)
 
-        coords = torch.cat(coords, dim=0)
-
-        # Für autograd auf den Koordinaten:
+        positions = self.get_positions()
+        coords = torch.cat([positions[i].detach() for i in indices], dim=0)
         coords = coords.clone().detach().requires_grad_(True)
 
-        W = self.ws2_displacement.elastic_energy_density(coords, lambda_=lambda_, mu=mu)
-        return W.mean()
+        energy = self.strain_fields[group_name].elastic_energy_density(
+            coords, lambda_=lambda_, mu=mu)
+        return energy.mean()
 
+    def occupy_layers_in_area(self, mask, layers=None):
+        """Setzt die Occupancy aller Atome innerhalb ``mask`` auf ~0.
 
-    def occupy_layers_in_area(self, mask, layers):
-        pad = 100
-        for l in layers:
-            pos = self.get_positions()[l]#self.tunable_parameters.positions[l]
-            xs, ys = pos[:,0], pos[:,1]
+        ``layers`` sind Schicht-Indizes oder -Namen; ohne Angabe alle Schichten.
+        """
+
+        if layers is None:
+            layers = range(self.N_l)
+        indices = [self.layer_names.index(l) if isinstance(l, str) else int(l) for l in layers]
+
+        positions = self.get_positions()
+        for l in indices:
+            pos = positions[l]
+            xs, ys = pos[:, 0], pos[:, 1]
             for i in range(pos.shape[0]):
                 x, y = int(xs[i]), int(ys[i])
-                if x >= 0 and x < self.H and y >= 0 and y < self.W:
+                if 0 <= x < self.H and 0 <= y < self.W:
                     if mask[x, y]:
                         self.tunable_parameters.occupancies[l][i] = -100
 
-
-    def get_positions_old(self):
-        ret_positions = []
-        for i in range(self.N_l):
-            if i == self._IDX["Gr"]:
-                idx_s_r = 0
-            else:
-                idx_s_r = 1
-
-            # Rotation um den Mittelpunkt der Graphen-Positionen
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_rotation.enabled)):
-                center = torch.tensor((self.H/2, self.W/2), device=self.device)
-                theta = self.rotations_[idx_s_r]
-                if self.max_rotations is not None:
-                    if i == self._IDX["Gr"]:
-                        theta = torch.clamp(theta, 0.0, self.max_rotations[0])
-                    else:
-                        theta = torch.clamp(theta, 0.0, self.max_rotations[0])
-                cos_theta = torch.cos(theta)
-                sin_theta = torch.sin(theta)
-            else:
-                center = torch.zeros(2, device=self.device)
-
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_shift.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_shift.enabled)):
-                shift = torch.clamp(self.shifts_[idx_s_r], -self.max_shifts[0],
-                                    self.max_shifts[0]) if self.max_shifts is not None else self.shifts_[idx_s_r]
-                shifted_positions = self.positions_[i] - center + shift
-            else:
-                shifted_positions = self.positions_[i] - center
-
-            if ((i == self._IDX["Gr"] and self.train_methods.graphen_rotation.enabled) or
-                    (i != self._IDX["Gr"] and self.train_methods.WS2_rotation.enabled)):
-                rotated_positions = torch.zeros_like(shifted_positions)
-                rotated_positions[:, 0] = cos_theta * shifted_positions[:, 0] - sin_theta * shifted_positions[:, 1]
-                rotated_positions[:, 1] = sin_theta * shifted_positions[:, 0] + cos_theta * shifted_positions[:, 1]
-            else:
-                center = torch.zeros(2, device=self.device)
-                rotated_positions = shifted_positions
-
-            new_positions = rotated_positions + center
-
-            ret_positions.append(new_positions)
-        return ret_positions
-
+    # -- Intensitaeten --------------------------------------------------------
     def get_intensities(self):
+        tp = self.tunable_parameters
+        tm = self.train_methods
+
         intensities = []
         vacancies = []
-        for i in range(self.N_l):
-            if ((i == self._IDX["Gr"] and self.train_methods.train_graphen_intensities.enabled) or
-                    (i == self._IDX["S1"] and self.train_methods.train_S1_intensities.enabled) or
-                    (i == self._IDX["W"] and self.train_methods.train_W_intensities.enabled) or
-                    (i == self._IDX["S2"] and self.train_methods.train_S2_intensities.enabled)):
-                intensities.append(self.tunable_parameters.intensities[i])
+        for i, layer in enumerate(self.layers):
+            if tm.layer_enabled(layer.name, "intensities"):
+                intensities.append(tp.intensities[i])
             else:
-                intensities.append(self.tunable_parameters.intensities[i].detach())
+                intensities.append(tp.intensities[i].detach())
 
-            if ((i == self._IDX["Gr"] and self.train_methods.train_graphen_occupancies.enabled) or
-                    (i == self._IDX["S1"] and self.train_methods.train_S1_occupancies.enabled) or
-                    (i == self._IDX["W"] and self.train_methods.train_W_occupancies.enabled) or
-                    (i == self._IDX["S2"] and self.train_methods.train_S2_occupancies.enabled)):
-                vacancies.append(self.tunable_parameters.occupancies[i].sigmoid())
+            if tm.layer_enabled(layer.name, "occupancies"):
+                vacancies.append(tp.occupancies[i].sigmoid())
             else:
-                vacancies.append(self.tunable_parameters.occupancies[i].sigmoid().detach())
-
+                vacancies.append(tp.occupancies[i].sigmoid().detach())
 
         return [intensities[i] * vacancies[i] for i in range(self.N_l)]
 
     def get_intensities_raw(self):
-        return self.tunable_parameters.intensities #* torch.sigmoid(self.occupancies_)
+        return self.tunable_parameters.intensities
 
-
-        if False:
-            if self.train_methods.intensity_classes == "classes":
-                raise NotImplementedError("Classes not implemented yet")
-                # Softmax → Gewichtung über Klassen
-                weights = F.softmax(self.intensities_, dim=1)  # shape (N, K)
-                q = torch.sum(weights * self.classes, dim=1)  # gewichteter Mittelwert
-                ret_intensities = q.unsqueeze(1)  # shape (N, 1)
-                return ret_intensities
-            elif (self.train_methods.intensity_classes == "free" or self.train_methods.intensity_classes == "fixed" or
-                  self.train_methods.intensity_classes == "vacancies_WS2"):
-                return self.intensities_
-            elif self.train_methods.intensity_classes == "vacancies":
-                raise NotImplementedError("Vacancies not implemented yet")
-                return [self.init_intensities_Gr,
-                        self.vacanciesS1.sigmoid() * 16.,
-                        self.vacanciesW.sigmoid() * 74.,
-                        self.vacanciesS2.sigmoid() * 16.
-                        ]
-
+    def _layer_index(self, layer):
+        return self.layer_names.index(layer) if isinstance(layer, str) else int(layer)
 
     def get_pos_and_ints(self, pos_idx, filter_by_area=False, occ_cutoff=0.5):
+        pos_idx = self._layer_index(pos_idx)
 
         intensities = self.get_intensities_raw()[pos_idx].detach().clone().cpu().numpy()
-        occ = self.occupancies[pos_idx].sigmoid().detach().cpu().numpy()
+        occ = self.tunable_parameters.occupancies[pos_idx].sigmoid().detach().cpu().numpy()
         occ_neg_mask = occ < occ_cutoff
-        intensities[occ_neg_mask] = None # TODO
-        positions = self.get_positions()[pos_idx].cpu().detach().cpu().numpy()
-        if filter_by_area:
-            idx = self.train_method.only_train_small_area
-            #x_min, y_min, x_max, y_max = self.train_methods.train_small_area_squares[idx]
-            #mask = ((positions[:, 0] >= x_min) & (positions[:, 0] <= x_max) &
-            #        (positions[:, 1] >= y_min) & (positions[:, 1] <= y_max))
-            mask_img = self.train_methods.area_masks[idx]
-            mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)]
-            positions = positions[mask]
-            intensities = intensities[mask]
-            #pos_idx = mask.nonzero(as_tuple=True)[0]
+        intensities[occ_neg_mask] = None
+        positions = self.get_positions()[pos_idx].cpu().detach().numpy()
 
-        return (positions[:,0], positions[:,1]), intensities
+        if filter_by_area:
+            mask_img = self.train_methods.mask_for(self.train_methods.active_group)
+            if mask_img is not None:
+                mask_img = mask_img.cpu().numpy()
+                inside = ((positions[:, 0] >= 0) & (positions[:, 0] < mask_img.shape[0]) &
+                          (positions[:, 1] >= 0) & (positions[:, 1] < mask_img.shape[1]))
+                positions = positions[inside]
+                intensities = intensities[inside]
+                mask = mask_img[positions[:, 0].astype(int), positions[:, 1].astype(int)] > 0
+                positions = positions[mask]
+                intensities = intensities[mask]
+
+        return (positions[:, 0], positions[:, 1]), intensities
+
+    def _occupied_mask(self, i, occ_cutoff, positions=None):
+        occ = self.tunable_parameters.occupancies[i].sigmoid().detach().cpu().numpy()
+        occ_mask = occ > occ_cutoff
+        if positions is None:
+            positions = self.get_positions()[i].cpu().detach().numpy()
+        pad = self.config.padding
+        limit_mask = ((positions[:, 0] >= pad) & (positions[:, 0] < self.H + pad) &
+                      (positions[:, 1] >= pad) & (positions[:, 1] < self.W + pad))
+        return occ_mask & limit_mask, positions
 
     def occupied_free_shifts(self, occ_cutoff=0.5):
         shifts = []
         pos_list = []
         for i in range(self.N_l):
-            occ = self.occupancies[i].sigmoid().detach().cpu().numpy()
-            occ_mask = occ > occ_cutoff
-            positions = self.get_positions()[i].cpu().detach().cpu().numpy()
-            pad = self.config.padding
-            limit_mask = ((positions[:, 0] >= pad) & (positions[:, 0] < self.H + pad) &
-                          (positions[:, 1] >= pad) & (positions[:, 1] < self.W + pad))
-            mask = occ_mask & limit_mask
-
+            mask, positions = self._occupied_mask(i, occ_cutoff)
             shi = self.tunable_parameters.position_shifts[i]
             shifts.append(shi.cpu().detach().numpy()[mask])
             pos_list.append(positions[mask])
 
-        return pos_list,shifts
+        return pos_list, shifts
 
-    def occupied_positions_A(self, occ_cutoff=0.5, include_graphene=False):
+    def occupied_positions_A(self, occ_cutoff=0.5, groups=None, exclude_groups=()):
+        """Besetzte Atompositionen in Angstroem (fuer den XYZ-Export).
+
+        ``groups``: nur diese Gruppen exportieren (None = alle).
+        ``exclude_groups``: diese Gruppen ueberspringen.
+        """
+
         pos_list = []
         Z_list = []
-        for i in range(self.N_l):
-            if (i == self._IDX["Gr"] and not include_graphene):
+        for i, layer in enumerate(self.layers):
+            if groups is not None and layer.group not in groups:
                 continue
-            occ = self.occupancies[i].sigmoid().detach().cpu().numpy()
-            occ_mask = occ > occ_cutoff
-            positions = self.get_positions()[i].cpu().detach().cpu().numpy()
-            pad = self.config.padding
-            limit_mask = ((positions[:, 0] >= pad) & (positions[:, 0] < self.H + pad) &
-                          (positions[:, 1] >= pad) & (positions[:, 1] < self.W + pad))
-            mask = occ_mask & limit_mask
+            if layer.group in exclude_groups:
+                continue
+
+            mask, positions = self._occupied_mask(i, occ_cutoff)
 
             filtered_positions = positions[mask] * self.config.pixel_size_nm * 10
-            z_pos_A = self.config.z_positions_nm[i] * 10
+            z_pos_A = float(layer.z_nm) * 10
             z_poses = np.full(filtered_positions.shape[0], z_pos_A)
             full_positions = np.hstack((filtered_positions, z_poses[:, np.newaxis]))
             pos_list.append(full_positions)
             Z_list.append(self.get_intensities_raw()[i][mask].cpu().detach().numpy())
+
+        if not pos_list:
+            return np.zeros((0, 3)), np.zeros((0,))
         return np.concatenate(pos_list), np.concatenate(Z_list)
 
-    def get_intensities_old(self):
-        if self.train_methods.intensity_classes == "classes":
-            # Softmax → Gewichtung über Klassen
-            weights = F.softmax(self.intensities_, dim=1)  # shape (N, K)
-            q = torch.sum(weights * self.classes, dim=1)  # gewichteter Mittelwert
-            ret_intensities = q.unsqueeze(1)  # shape (N, 1)
-            return ret_intensities
-        elif self.train_methods.intensity_classes == "free":
-            return self.intensities_
-        elif self.intensity_classes == "free_ws2":
-            ret_intensities = [self.init_intensities_Gr]
-            for i in range(len(self.intensities_)):
-                ret_intensities.append(self.intensities_[i])
-            return ret_intensities
-        elif self.train_methods.intensity_classes == "vacancies":
-            raise NotImplementedError("Vacancies not implemented yet")
-            return [self.init_intensities_Gr,
-                    self.vacanciesS1.sigmoid() * 16.,
-                    self.vacanciesW.sigmoid() * 74.,
-                    self.vacanciesS2.sigmoid() * 16.
-                    ]
-        elif self.train_methods.intensity_classes == "fixed":
-            return self.intensities_
-
-
+    # -- Loss / Forward -------------------------------------------------------
     def aux_loss(self):
+        tm = self.train_methods
 
         entropies = []
-        ps = [self.tunable_parameters.occupancies[i].sigmoid() for i in range(self.N_l)
-              ]
-        for i in range(1, len(ps)):
-            p = ps[i]
-            entropy = -(p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).mean()
-            entropies.append(entropy)
-        entropy = torch.mean(torch.stack(entropies))
+        for i, layer in enumerate(self.layers):
+            if not layer.occ_entropy:
+                continue
+            p = self.tunable_parameters.occupancies[i].sigmoid()
+            entropies.append(-(p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).mean())
+        entropy = torch.mean(torch.stack(entropies)) if entropies else 0.0
 
-        if self.train_methods.position_shifts_regularization_a > 0.0:
-            pos_shift_reg_stack = []
-            for i in range(self.N_l):
-                if (i == self._IDX["Gr"] and self.train_methods.graphen_free_positions.enabled) or \
-                        (i != self._IDX["Gr"] and self.train_methods.WS2_free_positions.enabled):
-                    pos_shift_reg_stack.append(torch.abs(self.tunable_parameters.position_shifts[i]).mean())
-            if len(pos_shift_reg_stack) > 0:
-                pos_shift_reg = torch.mean(torch.stack(pos_shift_reg_stack))
-            else:
-                pos_shift_reg = 0.0
+        if tm.position_shifts_regularization_a > 0.0:
+            pos_shift_reg_stack = [
+                torch.abs(self.tunable_parameters.position_shifts[i]).mean()
+                for i, layer in enumerate(self.layers)
+                if tm.layer_enabled(layer.name, "free_positions")
+            ]
+            pos_shift_reg = torch.mean(torch.stack(pos_shift_reg_stack)) if pos_shift_reg_stack else 0.0
         else:
             pos_shift_reg = 0.0
 
-        if self.train_methods.strain_energy_a > 0.0 and self.train_methods.WS2_strain_field.enabled:
-            strain_energy = self.ws2_elastic_loss(lambda_=self.train_methods.strain_energy_lambda, mu=self.train_methods.strain_energy_mu)
+        if tm.strain_energy_a > 0.0:
+            energies = [
+                self.group_elastic_loss(group.name,
+                                        lambda_=tm.strain_energy_lambda,
+                                        mu=tm.strain_energy_mu)
+                for group in self.groups
+                if tm.group_enabled(group.name, "strain_field")
+            ]
+            strain_energy = torch.mean(torch.stack(energies)) if energies else 0.0
         else:
             strain_energy = 0.0
 
-        return (self.train_methods.occ_entropy_a * entropy +
-                self.train_methods.position_shifts_regularization_a * pos_shift_reg +
-                self.train_methods.strain_energy_a * strain_energy)
-        if self.train_methods.intensity_classes == "classes":
-            weights = F.softmax(self.intensities_, dim=1)
-            entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()
-        elif self.train_methods.intensity_classes == "free":
-            entropy = 0.0
-        elif self.train_methods.intensity_classes == "vacancies":
-            entropies = []
-            ps = [self.vacanciesS1.sigmoid(),
-                    self.vacanciesW.sigmoid(),
-                    self.vacanciesS2.sigmoid()
-                    ]
-            for i in range(1, len(ps)):
-               p = ps[i]
-               entropy = -(p * torch.log(p + 1e-8) + (1-p) * torch.log(1-p + 1e-8)).mean()
-               entropies.append(entropy)
-            entropy = torch.mean(torch.stack(entropies))
-        else:
-            entropy = 0.0
-        return entropy
+        return (tm.occ_entropy_a * entropy +
+                tm.position_shifts_regularization_a * pos_shift_reg +
+                tm.strain_energy_a * strain_energy)
 
+    def active_layer_mask(self):
+        """Welche Schichten tragen aktuell zum Potential bei?
+
+        Ist eine Gruppe aktiv, die ``isolate_when_active`` gesetzt hat, werden
+        alle uebrigen Schichten auf Null gesetzt (frueher: hart verdrahtet auf
+        ``only_train_small_area == 0`` -> nur Graphen).
+        """
+
+        active = getattr(self.train_methods, "active_group", None)
+        if active is None or active not in self.groups_by_name:
+            return [True] * self.N_l
+        if not self.groups_by_name[active].isolate_when_active:
+            return [True] * self.N_l
+        return [layer.group == active for layer in self.layers]
 
     def forward(self, _):
-
-        potential_list = []
         positions = self.get_positions()
         occupancies = self.tunable_parameters.occupancies
+        contributes = self.active_layer_mask()
 
-        for i in range(self.N_l):
-            if int(self.train_methods.only_train_small_area) == 0 and i > 0:
-                potential_i = torch.zeros((self.H+self.potential_pad*2, self.W+self.potential_pad*2), dtype=torch.float32, device=self.device)
+        potential_list = []
+        for i, layer in enumerate(self.layers):
+            if not contributes[i]:
+                potential_i = torch.zeros(
+                    (self.H + self.potential_pad * 2, self.W + self.potential_pad * 2),
+                    dtype=torch.float32, device=self.device)
             else:
-                #potential_i = self.projected_slice_potential_lobato(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
-                potential_i = self.projected_slice_potential_kirkland(positions[i], occupancies[i].sigmoid(), atom_type=self.atom_names_by_layer[i])
+                potential_i = self.projected_slice_potential_kirkland(
+                    positions[i], occupancies[i].sigmoid(), atom_type=layer.element)
 
-            if i == self._IDX["Gr"]:
-                potential_i = potential_i * self.tunable_parameters.graphene_potential_factor
-            else:
-                potential_i = potential_i * self.tunable_parameters.ws2_potential_factor
+            potential_i = potential_i * self.tunable_parameters.potential_factors[layer.group]
             potential_list.append(potential_i)
-
-        potential_list = potential_list[::-1]
 
         return potential_list, self.aux_loss()
 
     def get_potential_images(self):
+        """Potentialbilder in Schicht-Reihenfolge (``config.layers``)."""
+
         pot_list, _ = self(None)
         pad = self.potential_pad
-        pot_images = [p.detach().cpu().numpy()[pad:self.H+pad, pad:self.W+pad] for p in pot_list[::-1]]
-        return pot_images
-
-
+        return [p.detach().cpu().numpy()[pad:self.H + pad, pad:self.W + pad] for p in pot_list]
 
     def rasterize_atoms_bilinear(self, H, W, positions_xy, weights):
         rho = torch.zeros((H, W), dtype=torch.float32, device=self.device)

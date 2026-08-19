@@ -169,6 +169,7 @@ class KirklandPrecalcPotential:
         supersample_radius_px: float = 2.0,
         supersample_factor: int = 8,
         softcore_fraction: float = 0.001,
+        atom_types=("C", "S", "W"),
     ):
         self.H = H
         self.W = W
@@ -179,25 +180,16 @@ class KirklandPrecalcPotential:
         self.supersample_factor = supersample_factor
         self.softcore_fraction = softcore_fraction
 
+        # Nur die tatsaechlich gebrauchten Kernel vorberechnen - bei einer
+        # reinen Graphen-Simulation ist das nur "C" statt C/S/W.
         self.kernels = {
-            "C": projected_atomic_potential_kernel_kirkland(
-                H, W, "C", pixel_size_nm, device,
+            atom_type: projected_atomic_potential_kernel_kirkland(
+                H, W, atom_type, pixel_size_nm, device,
                 supersample_radius_px=supersample_radius_px,
                 supersample_factor=supersample_factor,
                 softcore_fraction=softcore_fraction,
-            ),
-            "S": projected_atomic_potential_kernel_kirkland(
-                H, W, "S", pixel_size_nm, device,
-                supersample_radius_px=supersample_radius_px,
-                supersample_factor=supersample_factor,
-                softcore_fraction=softcore_fraction,
-            ),
-            "W": projected_atomic_potential_kernel_kirkland(
-                H, W, "W", pixel_size_nm, device,
-                supersample_radius_px=supersample_radius_px,
-                supersample_factor=supersample_factor,
-                softcore_fraction=softcore_fraction,
-            ),
+            )
+            for atom_type in atom_types
         }
 
     def projected_slice_potential_kirkland(self, rho, atom_type: str, pixel_size_nm=None, device=None):

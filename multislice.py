@@ -64,8 +64,15 @@ def propagate_fresnel(wave, dz_nm, pixel_size_nm, wavelength_nm):
 
 
 
+#: Prueft nach jedem Slice, ob die Phase den sinnvollen Bereich verlaesst.
+#: Kostet pro Schritt eine GPU->CPU Kopie je Schicht - zum Trainieren gern aus.
+CHECK_PHASE = True
+
+
 class PhysicalPhaseObjectLayer(nn.Module):
-    def __init__(self, H, W, pixel_size_nm, voltage_kV, device):
+    """Transmission durch beliebig viele Schichten inkl. Fresnel-Propagation."""
+
+    def __init__(self, H, W, pixel_size_nm, voltage_kV, device, layers=None):
         super().__init__()
         self.H = H
         self.W = W
@@ -76,40 +83,53 @@ class PhysicalPhaseObjectLayer(nn.Module):
         self.lambda_nm = electron_wavelength_nm(voltage_kV)
         self.sigma = interaction_parameter_rad_per_Vnm(voltage_kV)
 
-        self.layer_names = ["Gr", "S1", "W", "S2"]
-        self.atom_names_by_layer = ["C", "S", "W", "S"]
+        self.layers = list(layers or [])
+        self.layer_names = [l.name for l in self.layers]
+        self.atom_names_by_layer = [l.element for l in self.layers]
 
-    def forward(self, potential_slices, z_positions_nm):
+    def forward(self, potential_slices, z_positions_nm, reverse=False):
         """
-        positions: Liste [Gr, S1, W, S2], each Tensor (N,2)
-        occupancies: Liste [Gr, S1, W, S2], each Tensor (N,)
-        z_positions_nm: z-Koordinaten der vier Ebenen in nm, z.B. [0.0, 0.55, 0.70, 0.85]
+        potential_slices: Liste (H,W) - eine pro Schicht, in Config-Reihenfolge
+        z_positions_nm:   z-Koordinate je Schicht in nm, gleiche Reihenfolge
+        reverse:          Strahl laeuft von der hoechsten zur niedrigsten
+                          z-Position (statt umgekehrt)
+
+        Die Slices werden anhand ihrer eigenen z-Position sortiert, jede Schicht
+        behaelt also ihren Abstand zur naechsten. (Frueher wurde die Liste vor
+        dem Aufruf umgedreht, waehrend die z-Werte aufsteigend blieben - dadurch
+        bekamen die Schichten die Abstaende der jeweils anderen Seite.)
         """
 
-        order = torch.argsort(torch.tensor(z_positions_nm, device=self.device))
-        z_sorted = [z_positions_nm[i] for i in order.tolist()]
+        if len(potential_slices) != len(z_positions_nm):
+            raise ValueError(
+                f"{len(potential_slices)} Potential-Slices, aber "
+                f"{len(z_positions_nm)} z-Positionen.")
+
+        order = sorted(range(len(z_positions_nm)), key=lambda i: z_positions_nm[i])
+        if reverse:
+            order = order[::-1]
 
         wave = torch.ones((self.H, self.W), dtype=torch.complex64, device=self.device)
 
-        for i in range(len(z_sorted)):
-            V_slice = potential_slices[i]
+        for k, idx in enumerate(order):
+            V_slice = potential_slices[idx]
 
             phase = self.sigma * V_slice
 
-            phase_np = self.sigma * V_slice.detach().cpu().numpy()
-            mask_outside = (phase_np < 2 * -np.pi) | (phase_np > 2 * np.pi)
-            if mask_outside.any():
-                print("PHASE too high:")
-                print(phase_np[mask_outside])
-                positions = np.argwhere(mask_outside)
-                print(positions)
-
+            if CHECK_PHASE:
+                phase_np = phase.detach().cpu().numpy()
+                mask_outside = (phase_np < 2 * -np.pi) | (phase_np > 2 * np.pi)
+                if mask_outside.any():
+                    name = self.layer_names[idx] if idx < len(self.layer_names) else idx
+                    print(f"PHASE too high (Schicht {name}):")
+                    print(phase_np[mask_outside])
+                    print(np.argwhere(mask_outside))
 
             T = torch.exp(1j * phase)
             wave = wave * T
 
-            if i < len(z_sorted) - 1:
-                dz_nm = z_sorted[i + 1] - z_sorted[i]
+            if k < len(order) - 1:
+                dz_nm = abs(z_positions_nm[order[k + 1]] - z_positions_nm[idx])
                 wave = propagate_fresnel(
                     wave=wave,
                     dz_nm=dz_nm,
@@ -123,41 +143,32 @@ class PhysicalPhaseObjectLayer(nn.Module):
 class DifferentiableMultislice(nn.Module):
     def __init__(self, config, train_method, device):
         super().__init__()
-        #self.slices_V = [v.to(device) for v in slices_V]  # Liste komplexer Slices (H,W)
-        #self.dz = dz
 
-        self.z_positions_nm = config.z_positions_nm
-        # TODO self.z_positions_nm = z_positions_nm
+        self.layers = list(config.layers)
+        self.z_positions_nm = [float(l.z_nm) for l in self.layers]
+        self.reverse = str(getattr(config, "beam_direction", "+z")).strip() == "-z"
 
         self.pixel_size_nm = config.pixel_size_nm
         self.wavelength_nm = relativistic_wavelength_nm(config.voltage_kV)
         self.device = device
 
         self.H, self.W = config.shape
-        #fx = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.H, device=device))
-        #fy = torch.fft.fftshift(torch.linspace(-0.5 / pixel_size_nm, 0.5 / pixel_size_nm, self.W, device=device))
-
-        # kx, ky = torch.meshgrid(fx, fy, indexing='xy')
-        #H_prop = torch.exp(-1j * torch.pi * self.wavelength_nm * self.dz* (kx ** 2 + ky ** 2))
-        #self.register_buffer("H_prop", H_prop)
-
 
         self.train_method = train_method
         pad = config.padding
-        self.phase_object_layer = PhysicalPhaseObjectLayer(self.H + 2*pad, self.W + 2*pad, config.pixel_size_nm, config.voltage_kV, device)
-
-
+        self.phase_object_layer = PhysicalPhaseObjectLayer(
+            self.H + 2 * pad, self.W + 2 * pad,
+            config.pixel_size_nm, config.voltage_kV, device,
+            layers=self.layers,
+        )
 
     def forward(self, input):
         potential_list, pot_aux_loss = input
 
-
         exit_wave = self.phase_object_layer(
             potential_slices=potential_list,
             z_positions_nm=self.z_positions_nm,
+            reverse=self.reverse,
         )
 
         return exit_wave, pot_aux_loss
-
-
-

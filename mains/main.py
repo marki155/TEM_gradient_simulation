@@ -18,9 +18,15 @@ import json
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from matplotlib import pyplot as plt
-from nn import NN_particles, ParticlesConfig
+from layers import LayerConfig, LayerGroupConfig
+from nn import NN_particles, ParticlesConfig, CONFIG_CLASS_REGISTRY
 from testing import show_init_positions
-from training_parameter import TrainMethod, save_train_methods, load_train_method
+from training_parameter import (
+    TrainMethod,
+    load_group_data,
+    load_train_method,
+    save_train_methods,
+)
 from gui_qt import launch_gui_qt
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -90,7 +96,7 @@ def init_config(image, config_path):
     if os.path.exists(config_save_path) and LOAD_CONFIGS:
         with open(config_save_path, "r") as f:
             config_json = json.load(f)
-            config = deserialize(config_json, {"ParticlesConfig": ParticlesConfig})
+            config = deserialize(config_json, CONFIG_CLASS_REGISTRY)
 
     else:
         H, W = image.shape
@@ -228,14 +234,46 @@ def init_config(image, config_path):
             'use_detector': False,
         }
 
+        # --- Schichten und Struktur-Gruppen ---------------------------------
+        # Eine Gruppe bewegt sich als starre Einheit (Shift/Rotation/Scale/Strain),
+        # eine Schicht ist ein Multislice-Slice. Hier: Graphen + dreilagiges WS2.
+        groups = [
+            LayerGroupConfig(
+                name="Gr",
+                control_points=[10, 10],
+                max_shift=max_shift_graphen,
+                max_rotation=max_rot_graphen,
+                init_scale=[1.12, 1.14], init_rotation=0.025, init_shift=[-9.5, -11.0],
+                mask_file="gr_mask.tif",
+                target_file="target_no_ws2.tif",
+                isolate_when_active=True,   # aktiv -> nur Graphen wird simuliert
+            ),
+            LayerGroupConfig(
+                name="WS2",
+                control_points=[20, 20],
+                max_shift=max_shift_ws2,
+                max_rotation=max_rot_ws2,
+                init_scale=[1.05, 1.09], init_rotation=0.0, init_shift=[15.9, -5.0],
+                mask_file="ws2_mask.tif",
+                isolate_when_active=False,
+            ),
+        ]
+
+        layers = [
+            LayerConfig(name="Gr", element="C", z_nm=z_positions_nm[0], group="Gr",
+                        init_occupancy=100.0, occ_entropy=False),
+            LayerConfig(name="S1", element="S", z_nm=z_positions_nm[1], group="WS2"),
+            LayerConfig(name="W", element="W", z_nm=z_positions_nm[2], group="WS2"),
+            LayerConfig(name="S2", element="S", z_nm=z_positions_nm[3], group="WS2"),
+        ]
+
         config = ParticlesConfig(init_positions=init_positions, init_intensities=init_intensities,
                                  shape=(H, W), pixel_size_nm=pixel_size_nm,
-                                 z_positions_nm=z_positions_nm, voltage_kV=VOLTAGE_KV,
+                                 voltage_kV=VOLTAGE_KV,
                                  init_aberrations=aberrations, init_ctf_env_params=env_params,
                                  init_amp_contrast=amp_contrast, ctf_alpha_max_mrad=50.,
-                                 padding=100, control_points_graphen=[10, 10], control_points_ws2=[20, 20],
-                                 max_shifts=(max_shift_graphen, max_shift_ws2),
-                                 max_rotations=(max_rot_graphen, max_rot_ws2)
+                                 padding=100,
+                                 layers=layers, groups=groups,
                                  )
 
 
@@ -279,17 +317,20 @@ def init_config(image, config_path):
 
 
 
-def init_train_method(save_path) -> TrainMethod:
+def init_train_method(save_path, config) -> TrainMethod:
+    """TrainMethod laden (oder neu anlegen) und die Gruppendaten dazu holen.
+
+    Maske und Zielbild je Gruppe stehen in der Config (``mask_file`` /
+    ``target_file``) und werden hier aus dem Datensatz-Ordner geladen.
+    """
+
     if os.path.exists(save_path) and LOAD_CONFIGS:
-        return load_train_method(save_path)
+        train_method = load_train_method(save_path, config)
+        load_group_data(train_method, config, base_dir=path)
+        return train_method
 
-    gr_mask = torch.tensor(tifffile.imread(os.path.join(path, "gr_mask.tif")) > 0)
-    ws2_mask = torch.tensor(tifffile.imread(os.path.join(path, "ws2_mask.tif")) > 0)
-    image_gr = tifffile.imread(os.path.join(path, "target_no_ws2.tif"))
-    image_gr[np.where(image_gr == 0.0)] = np.median(image_gr)
-    target_gr = torch.tensor(image_gr, dtype=torch.float32)
-
-    train_method = TrainMethod(area_masks=[gr_mask, ws2_mask], target_gr=target_gr)
+    train_method = TrainMethod().ensure_for_config(config)
+    load_group_data(train_method, config, base_dir=path)
     save_train_methods(train_method, save_path)
     return train_method
 
@@ -299,7 +340,7 @@ if __name__ == '__main__':
     image[np.where(image == 0.0)] = np.median(image)
 
     config, target = init_config(image, os.path.join(path, "config"))
-    train_method = init_train_method(os.path.join(path, "config", "train_method.json"))
+    train_method = init_train_method(os.path.join(path, "config", "train_method.json"), config)
 
 
     model = NN_particles(

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from scipy.spatial import ConvexHull
 
 from mains.main import deserialize
-from nn import ParticlesConfig, ParticlesTunableParameters
+from nn import ParticlesConfig, ParticlesTunableParameters, CONFIG_CLASS_REGISTRY
 from parameter_frame import serialize
 from potential import DifferentiablePotential
 from training_parameter import TrainMethod
@@ -51,16 +51,17 @@ if __name__ == "__main__":
 
     with open(config_file, "r") as f:
         config_json = json.load(f)
-        config = deserialize(config_json, {"ParticlesConfig": ParticlesConfig})
+        config = deserialize(config_json, CONFIG_CLASS_REGISTRY)
 
 
     params = ParticlesTunableParameters(**params_json)
 
     pixel_size_nm = config.pixel_size_nm
 
-    train_method = TrainMethod(area_masks=[None,None], target_gr=None)
+    train_method = TrainMethod().ensure_for_config(config)
     pot_layer = DifferentiablePotential.from_config_and_parameters(config, train_method, params.potential_parameters)
-    positions_occ, Zs = pot_layer.occupied_positions_A(occ_cutoff=0.5, include_graphene=False)
+    # Graphen nicht exportieren - nur die uebrigen Gruppen
+    positions_occ, Zs = pot_layer.occupied_positions_A(occ_cutoff=0.5, exclude_groups=("Gr",))
 
     atoms = Atoms(numbers=Zs, positions=positions_occ)
     atoms.write(path+'structure.xyz')

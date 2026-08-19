@@ -357,21 +357,22 @@ class ParametersFrame(QFrame):
     def trigger_parameter_changed(self):
         self.parameter_tuned.emit()
 
-    def reset_occupancies_ws2(self):
+    def _reset_by_labels(self, prefix: str, layer_indices):
+        """Setzt alle Editoren ``<prefix>[i]`` fuer die gegebenen Schicht-Indizes auf 0."""
+
+        wanted = {f"{prefix}[{int(i)}]" for i in layer_indices}
         for editor in self._tensor_editors:
-            if "occupancies[1]" in editor.label_text or "occupancies[2]" in editor.label_text or "occupancies[3]" in editor.label_text:
+            if any(label in editor.label_text for label in wanted):
                 with torch.no_grad():
                     editor.tensor.fill_(0.0)
                 editor.refresh_from_tensor()
         self.trigger_parameter_changed()
 
-    def reset_free_positions_ws2(self):
-        for editor in self._tensor_editors:
-            if "positions[1]" in editor.label_text or "positions[2]" in editor.label_text or "positions[3]" in editor.label_text:
-                with torch.no_grad():
-                    editor.tensor.fill_(0.0)
-                editor.refresh_from_tensor()
-        self.trigger_parameter_changed()
+    def reset_occupancies(self, layer_indices):
+        self._reset_by_labels("occupancies", layer_indices)
+
+    def reset_free_positions(self, layer_indices):
+        self._reset_by_labels("position_shifts", layer_indices)
 
     def save_parameters(self):
         # Speichern
@@ -504,6 +505,18 @@ class ParametersFrame(QFrame):
                 self._tensor_editors.append(editor)
                 section.content_layout.addWidget(editor)
             return
+
+        # dict / Liste von Dataclasses (z.B. strain_fields je Gruppe)
+        if isinstance(value, (dict, list, tuple)) and len(value) > 0:
+            items = value.items() if isinstance(value, dict) else enumerate(value)
+            items = list(items)
+            if all(is_dataclass(v) or isinstance(v, nn.Parameter) for _, v in items):
+                section = CollapsibleSection(name, expanded=False)
+                layout.addWidget(section)
+                for key, item in items:
+                    self._build_value(section.content_layout, name=str(key), value=item,
+                                      path=f"{path}[{key}]")
+                return
 
         # Fallback: nur anzeigen
         row = QHBoxLayout()

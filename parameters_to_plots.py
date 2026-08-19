@@ -9,7 +9,7 @@ from scipy.spatial import ConvexHull
 import tifffile
 
 from mains.main import deserialize
-from nn import ParticlesConfig, ParticlesTunableParameters
+from nn import ParticlesConfig, ParticlesTunableParameters, CONFIG_CLASS_REGISTRY
 from parameter_frame import serialize
 from potential import DifferentiablePotential
 from training_parameter import TrainMethod
@@ -43,33 +43,21 @@ def load_json(path=None):
 
     return data
 
-def get_pos_and_ints(target_img, pot_positions, pot_intensities, train_method):
+def get_pos_and_ints(target_img, pot_positions, pot_intensities, config, group=None):
+    """Positionen/Intensitaeten einer Gruppe (oder aller Schichten)."""
 
-    idx = train_method.only_train_small_area
-
-
-
-    _idx = idx if idx >= 0 else 1
+    if group is None:
+        indices = list(range(len(pot_positions)))
+    else:
+        indices = config.layer_indices(group)
 
     x_min = 0
     y_min = 0
     x_max = target_img.shape[0]
     y_max = target_img.shape[1]
 
-
-    if _idx == 0:
-        pos = pot_positions[_idx]
-        ints = pot_intensities[_idx]
-    elif _idx == 1:
-        poses = []
-        intss = []
-        for i in range(1,4):
-            pos = pot_positions[i]
-            ints = pot_intensities[i]
-            poses.append(pos)
-            intss.append(ints)
-        pos = np.concatenate(poses, axis=0)
-        ints = np.concatenate(intss, axis=0)
+    pos = np.concatenate([pot_positions[i] for i in indices], axis=0)
+    ints = np.concatenate([pot_intensities[i] for i in indices], axis=0)
 
     mask_borders = ((pos[:, 0] >= x_min) & (pos[:, 0] <= x_max) &
             (pos[:, 1] >= y_min) & (pos[:, 1] <= y_max))
@@ -95,19 +83,18 @@ if __name__ == "__main__":
 
     with open(config_file, "r") as f:
         config_json = json.load(f)
-        config = deserialize(config_json, {"ParticlesConfig": ParticlesConfig})
+        config = deserialize(config_json, CONFIG_CLASS_REGISTRY)
 
 
     params = ParticlesTunableParameters(**params_json)
 
     pixel_size_nm = config.pixel_size_nm
 
-    train_method = TrainMethod(area_masks=[None, None], target_gr=None)
+    train_method = TrainMethod().ensure_for_config(config)
     pot_layer = DifferentiablePotential.from_config_and_parameters(config, train_method, params.potential_parameters)
 
+    layer_names = config.layer_names
     pot_imgs = pot_layer.get_potential_images()
-
-    pot_imgs.append(pot_imgs[1] + pot_imgs[3])
 
     import matplotlib.colors as mcolors
 
@@ -126,43 +113,43 @@ if __name__ == "__main__":
         "seismic_lower",
         colors_lower[::-1])
 
-    names = ["Gr", "S1", "W", "S2", "all_S", "WS2"]
-    colors = ["Greys", red, blue, red, red]
-    for i, pot_img in enumerate(pot_imgs):
+    # Farbschema nach Element - laeuft damit fuer beliebige Schichten
+    element_colors = {"C": "Greys", "S": red, "W": blue}
+
+    def normed(img):
+        return (img - np.min(img)) / (np.max(img) - np.min(img))
+
+    def save_map(img, name, cmap):
         plt.figure()
-        pot_img = (pot_img - np.min(pot_img)) / (np.max(pot_img) - np.min(pot_img))
-        plt.imshow(pot_img,cmap=colors[i], origin="lower")
-        plt.title("Potential Image " + names[i])
-        #plt.colorbar(label="Potential Value")
+        plt.imshow(normed(img), cmap=cmap, origin="lower")
+        plt.title("Potential Image " + name)
         plt.xticks([])
         plt.yticks([])
-        save_img_file = param_file.replace(".json", "_" + names[i] + ".png")
-        plt.savefig(save_img_file, dpi=300)
+        plt.savefig(param_file.replace(".json", "_" + name + ".png"), dpi=300)
 
+    for i, layer in enumerate(config.layers):
+        save_map(pot_imgs[i], layer.name, element_colors.get(layer.element, "viridis"))
 
-    map_S = pot_imgs[1] + pot_imgs[3]
-    map_S = (map_S - np.min(map_S)) / (np.max(map_S) -np.min(map_S))
-    map_W = pot_imgs[2]
-    map_W = (map_W - np.min(map_W)) / (np.max(map_W) -np.min(map_W))
+    # Summenbild je Gruppe
+    for group in config.groups:
+        indices = config.layer_indices(group.name)
+        if len(indices) < 2:
+            continue
+        save_map(sum(pot_imgs[i] for i in indices), group.name + "_sum", "seismic")
 
+    # Klassischer WS2-Kontrast (S-Summe minus W), sofern die Schichten existieren
+    if all(n in layer_names for n in ("S1", "S2", "W")):
+        map_S = normed(pot_imgs[layer_names.index("S1")] + pot_imgs[layer_names.index("S2")])
+        map_W = normed(pot_imgs[layer_names.index("W")])
 
-    plt.figure()
-
-    comb_map = map
-
-    plt.imshow(np.abs(map_S) - np.abs(map_W), cmap="seismic", origin="lower")
-
-
-    plt.title("Potential Image " + "WS2")
-    #plt.colorbar(label="Potential Value")
-    #plt.xlabel("Pixel")
-    #plt.ylabel("Pixel")
-    save_img_file = param_file.replace(".json", "_" + "WS2" + ".png")
-    plt.savefig(save_img_file, dpi=300)
+        plt.figure()
+        plt.imshow(np.abs(map_S) - np.abs(map_W), cmap="seismic", origin="lower")
+        plt.title("Potential Image " + "WS2")
+        plt.savefig(param_file.replace(".json", "_" + "WS2" + ".png"), dpi=300)
 
     pot_positions = []
     pot_intensities = []
-    for i in range(4):
+    for i in range(len(config.layers)):
         (px, py), ints = pot_layer.get_pos_and_ints(i)
         pos = np.column_stack([px, py]).astype(np.float32)
         ints = np.asarray(ints, dtype=np.float32)
@@ -170,7 +157,7 @@ if __name__ == "__main__":
         pot_intensities.append(ints)
 
     target_img = tifffile.imread(os.path.join(path, "target_div-b.tif"))
-    pos, ints = get_pos_and_ints(target_img, pot_positions, pot_intensities, train_method)
+    pos, ints = get_pos_and_ints(target_img, pot_positions, pot_intensities, config)
 
     plt.imshow(target_img, cmap="grey", origin="lower")
     plt.scatter(pos[1], pos[0], c=ints, cmap="Wistia", s=0.5)
@@ -186,7 +173,7 @@ if __name__ == "__main__":
 
 
 
-    for i in range(4):
+    for i in range(len(config.layers)):
         poses, shifts = pot_layer.occupied_free_shifts()
         pos = poses[i]
         shift = shifts[i]
@@ -207,11 +194,11 @@ if __name__ == "__main__":
         plt.xlabel("x")
         plt.ylabel("y")
         plt.title("Vektormap / Shift-Field")
-        save_img_file = param_file.replace(".json", "_" + "vector_map_"+names[i] + ".png")
+        save_img_file = param_file.replace(".json", "_" + "vector_map_"+layer_names[i] + ".png")
         plt.savefig(save_img_file, dpi=300)
 
 
-    for i in range(1,4):
+    for i in range(len(config.layers)):
         plt.figure()
         pad = pot_layer.config.padding
         positions = pot_layer.get_positions()[i].cpu().detach().cpu().numpy()
@@ -219,19 +206,19 @@ if __name__ == "__main__":
                       (positions[:, 1] >= pad) & (positions[:, 1] < pot_layer.W + pad))
         occ = pot_layer.occupancies[i].sigmoid().detach().cpu().numpy()[limit_mask]
         plt.hist(occ, bins= 100)
-        plt.title("Occupancy Histogram " + names[i])
+        plt.title("Occupancy Histogram " + layer_names[i])
         plt.xlabel("Occupancy Value")
         plt.ylabel("Frequency")
         plt.yticks([])
-        save_img_file = param_file.replace(".json", "_" + "occ_hist_" + names[i] + ".png")
+        save_img_file = param_file.replace(".json", "_" + "occ_hist_" + layer_names[i] + ".png")
         plt.savefig(save_img_file, dpi=300)
 
         plt.figure()
         plt.scatter(positions[limit_mask][:, 1], positions[limit_mask][:, 0], c=occ, cmap=blue, s=0.5)
         plt.colorbar(label="Occupancy Value")
-        plt.title("Occupancy Scatter " + names[i])
+        plt.title("Occupancy Scatter " + layer_names[i])
         plt.xticks([])
         plt.yticks([])
-        save_img_file = param_file.replace(".json", "_" + "occ_scatter_" + names[i] + ".png")
+        save_img_file = param_file.replace(".json", "_" + "occ_scatter_" + layer_names[i] + ".png")
         plt.savefig(save_img_file, dpi=300)
 
