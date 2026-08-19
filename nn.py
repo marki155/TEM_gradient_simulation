@@ -193,15 +193,6 @@ class NN_free_potential(nn.Module):
                                                     brightness=brightness,
                                                    contrast=constrast, background=self.background, amplify=self.amplify)
 
-    def clamp_parameters(self):
-        self.model[1].aberr_params['C10'] = torch.clamp(self.model[1].aberr_params['C10'], -100, 0)
-        self.model[1].aberr_params['C12'] = torch.clamp(self.model[1].aberr_params['C12'], 0, 10)
-        self.model[1].aberr_params['C23'] = torch.clamp(self.model[1].aberr_params['C23'], -100, 100)
-        self.model[1].aberr_params['C21'] = torch.clamp(self.model[1].aberr_params['C21'], -100, 100)
-        self.model[1].aberr_params['C30'] = torch.clamp(self.model[1].aberr_params['C30'], -1000, 1000)
-        self.model[1].aberr_params['C34'] = torch.clamp(self.model[1].aberr_params['C34'], -1000, 1000)
-        self.model[1].aberr_params['C45'] = torch.clamp(self.model[1].aberr_params['C45'], -1000, 1000)
-
     def laplacian(self):
         V_pad = F.pad(self.potential.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode='replicate')
         lap = V_pad[:, :, :-2, 1:-1] + V_pad[:, :, 2:, 1:-1] + \
@@ -450,19 +441,6 @@ class NN_particles(nn.Module):
 
     def get_tunable_parameters(self):
         return self.tunable_parameters
-
-
-    def clamp_parameters(self):
-        self.model[1].aberr_params['C10'] = torch.clamp(self.model[1].aberr_params['C10'], -100, 0)
-        self.model[1].aberr_params['C12'] = torch.clamp(self.model[1].aberr_params['C12'], 0, 10)
-        self.model[1].aberr_params['C23'] = torch.clamp(self.model[1].aberr_params['C23'], -100, 100)
-        self.model[1].aberr_params['C21'] = torch.clamp(self.model[1].aberr_params['C21'], -100, 100)
-        self.model[1].aberr_params['C30'] = torch.clamp(self.model[1].aberr_params['C30'], -1000, 1000)
-        self.model[1].aberr_params['C34'] = torch.clamp(self.model[1].aberr_params['C34'], -1000, 1000)
-        self.model[1].aberr_params['C45'] = torch.clamp(self.model[1].aberr_params['C45'], -1000, 1000)
-
-        #self.intensities = torch.clamp(self.intensities, 0.00, 1000.0)
-
 
 
     def calc_energy(self):
