@@ -25,6 +25,11 @@ multislice.CHECK_PHASE = False
 
 from layers import LayerConfig, LayerGroupConfig, graphene_only
 from nn import CONFIG_CLASS_REGISTRY, NN_particles, ParticlesConfig
+from ctf import (
+    cartesian_to_polar_aberrations,
+    polar_to_cartesian_aberrations,
+    zernike_phase,
+)
 from potential import is_legacy_potential_parameters, migrate_serialized_potential_parameters
 from training_parameter import TrainMethod, load_train_method
 
@@ -154,29 +159,77 @@ def test_ctf_aberration_switches():
     model = build_model(config, tm)
     ctf = model.model[2]
 
-    # Startwerte kommen aus der Config (nicht aus den Defaults von make_param_dict)
+    # Startwerte kommen aus der Config (nicht aus den Defaults von make_param_dict).
+    # Gespeichert wird kartesisch, zum Vergleich zurueckrechnen.
+    stored = cartesian_to_polar_aberrations(
+        {k: float(v) for k, v in ctf.tunable_parameters.aberrations.items()})
     for key, value in aberrations.items():
-        assert abs(float(ctf.tunable_parameters.aberrations[key]) - value) < 1e-6, key
+        assert abs(stored[key] - value) < 1e-5, (key, stored[key], value)
     assert abs(float(ctf.tunable_parameters.amp_contrast) - 0.1) < 1e-6
 
     step_and_report(model, tm)
-    angles = {k: v for k, v in ctf.tunable_parameters.aberrations.items() if k.startswith("phi")}
+    # die Winkel-Freiheitsgrade (kartesisch: die b-Komponenten) muessen laufen
+    angles = {k: v for k, v in ctf.tunable_parameters.aberrations.items()
+              if k.startswith("phi") or (k[0] == "b" and k[1:].isdigit())}
     assert angles, "Testkonfiguration ohne Winkel"
     for key, param in angles.items():
         assert param.grad is not None and float(param.grad) != 0.0, f"{key} bekommt keinen Gradienten"
 
     # einzelne Ordnung abschalten -> Betrag und Winkel zusammen
     tm.train_aberrations["C12"] = False
-    assert not ctf.aberration_is_trainable("C12")
-    assert not ctf.aberration_is_trainable("phi12")
-    assert ctf.aberration_is_trainable("phi23")
+    for key in ("C12", "phi12", "a12", "b12"):
+        assert not ctf.aberration_is_trainable(key), key
+    assert ctf.aberration_is_trainable("b23")
     tm.train_aberrations["C12"] = True
 
     # CTF komplett aus
     tm.train_ctf_aberrations.enabled = False
-    assert not ctf.aberration_is_trainable("C10")
-    assert not ctf.aberration_is_trainable("phi12")
+    for key in ("C10", "phi12", "a12", "b23"):
+        assert not ctf.aberration_is_trainable(key), key
     print("  CTF: Winkel bekommen Gradienten, Startwerte aus der Config uebernommen")
+
+
+def test_ctf_parametrizations_are_equivalent():
+    """polar (C, phi) und kartesisch (a, b) beschreiben dieselbe Phase."""
+
+    polar = {"C10": -13.0, "C12": 1.0, "phi12": 0.3, "C21": 2.0, "phi21": 0.1,
+             "C23": 2.0, "phi23": 0.2, "C30": 4.0, "C34": 0.02, "phi34": 0.4,
+             "C45": 0.05, "phi45": 0.5}
+    cartesian = polar_to_cartesian_aberrations(polar)
+
+    # Hin- und Rueckrechnung
+    back = cartesian_to_polar_aberrations(cartesian)
+    for key, value in polar.items():
+        assert abs(back[key] - value) < 1e-6, (key, back[key], value)
+
+    torch.manual_seed(0)
+    alpha = torch.rand(64, 64) * 0.05
+    phi = (torch.rand(64, 64) - 0.5) * 2 * np.pi
+
+    phase_polar = zernike_phase(alpha, phi, {k: torch.tensor(v) for k, v in polar.items()})
+    phase_cart = zernike_phase(alpha, phi, {k: torch.tensor(v) for k, v in cartesian.items()})
+    difference = float((phase_polar - phase_cart).abs().max())
+    assert difference < 1e-6, difference
+
+    # beide Schreibweisen im vollen Modell trainierbar
+    for parametrization, angle_keys in (("polar", ["phi12", "phi23"]),
+                                        ("cartesian", ["a12", "b12", "a23", "b23"])):
+        layers, groups = graphene_only(max_shift=20.0, max_rotation=0.35)
+        config = make_config(layers, groups)
+        config.init_aberrations = polar
+        config.ctf_parametrization = parametrization
+
+        tm = TrainMethod().ensure_for_config(config)
+        tm.train_ctf_aberrations.enabled = True
+
+        model = build_model(config, tm)
+        step_and_report(model, tm)
+        aberrations = model.model[2].tunable_parameters.aberrations
+        for key in angle_keys:
+            assert key in aberrations, (parametrization, key)
+            assert aberrations[key].grad is not None, (parametrization, key)
+
+    print(f"  polar == kartesisch (max. Phasendifferenz {difference:.2e}), beide trainierbar")
 
 
 def test_legacy_migration(dataset="platelet_11"):
@@ -220,6 +273,8 @@ if __name__ == "__main__":
     test_multiple_groups_and_isolation()
     print("test_ctf_aberration_switches")
     test_ctf_aberration_switches()
+    print("test_ctf_parametrizations_are_equivalent")
+    test_ctf_parametrizations_are_equivalent()
     print("test_legacy_migration")
     test_legacy_migration()
     print("\nalle Tests durch")

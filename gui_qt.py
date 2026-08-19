@@ -764,7 +764,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         layout.addLayout(right, stretch=1)
 
 
-        self.parameter_frame = ParametersFrame(self.model.get_tunable_parameters())
+        self.parameter_frame = ParametersFrame(self.model.get_tunable_parameters(),
+                                              config=self.model.config)
         self.parameter_frame.parameter_tuned.connect(self._trigger_heavy_refresh)
         left.addWidget(self.parameter_frame, stretch=0)
 

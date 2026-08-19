@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import fields, is_dataclass, asdict
 from functools import partial
 from typing import Any, Type
@@ -187,6 +188,126 @@ class TensorEditor(QFrame):
 
         self._building = False
 
+from ctf import (
+    ABERRATION_TERMS,
+    PARAMETRIZATION_CARTESIAN,
+    PARAMETRIZATION_POLAR,
+    cartesian_keys,
+    migrate_serialized_ctf_parameters,
+)
+from potential import migrate_serialized_potential_parameters
+
+
+class AberrationEditor(QWidget):
+    """Aberrationen als Betrag + Winkel, gespeichert wird kartesisch (a, b).
+
+    Intern optimiert das Modell a = C*cos(m*phi) und b = C*sin(m*phi); von Hand
+    einstellen will man aber C und phi. Dieses Widget rechnet in beide
+    Richtungen um.
+    """
+
+    value_changed = Signal()
+
+    def __init__(self, params, parent: QWidget | None = None, decimals: int = 6):
+        super().__init__(parent)
+        self.label_text = "aberrations"
+        self.params = params
+        self.rows = {}
+        self._building = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("<b>aberrations</b>"))
+
+        grid = QGridLayout()
+        grid.setContentsMargins(12, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
+        layout.addLayout(grid)
+
+        row = 0
+        for magnitude, (_power, _pref, _scale, m) in ABERRATION_TERMS.items():
+            a_key, b_key = cartesian_keys(magnitude)
+
+            if m and a_key in params and b_key in params:
+                spin_c = self._make_spinbox(decimals)
+                spin_phi = self._make_spinbox(decimals)
+                grid.addWidget(QLabel(magnitude), row, 0)
+                grid.addWidget(spin_c, row, 1)
+                grid.addWidget(QLabel(f"phi{magnitude[1:]} [rad]"), row, 2)
+                grid.addWidget(spin_phi, row, 3)
+                spin_c.valueChanged.connect(partial(self._write_polar, magnitude))
+                spin_phi.valueChanged.connect(partial(self._write_polar, magnitude))
+                self.rows[magnitude] = {"kind": "polar", "m": m,
+                                        "C": spin_c, "phi": spin_phi,
+                                        "a": params[a_key], "b": params[b_key]}
+                row += 1
+
+            elif m == 0 and magnitude in params:
+                spin_c = self._make_spinbox(decimals)
+                grid.addWidget(QLabel(magnitude), row, 0)
+                grid.addWidget(spin_c, row, 1)
+                spin_c.valueChanged.connect(partial(self._write_scalar, magnitude))
+                self.rows[magnitude] = {"kind": "scalar", "C": spin_c,
+                                        "param": params[magnitude]}
+                row += 1
+
+        self.refresh_from_tensor()
+
+    @staticmethod
+    def has_cartesian_aberrations(params) -> bool:
+        return any(cartesian_keys(magnitude)[0] in params
+                   for magnitude, term in ABERRATION_TERMS.items() if term[3])
+
+    def _make_spinbox(self, decimals: int) -> QDoubleSpinBox:
+        sb = QDoubleSpinBox()
+        sb.setDecimals(decimals)
+        sb.setRange(-1e12, 1e12)
+        sb.setSingleStep(0.01)
+        sb.setKeyboardTracking(False)
+        sb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        return sb
+
+    def _write_polar(self, magnitude, _value=None):
+        if self._building:
+            return
+        row = self.rows[magnitude]
+        c = float(row["C"].value())
+        phi = float(row["phi"].value())
+        m = row["m"]
+        with torch.no_grad():
+            row["a"].copy_(torch.tensor(c * math.cos(m * phi), dtype=row["a"].dtype))
+            row["b"].copy_(torch.tensor(c * math.sin(m * phi), dtype=row["b"].dtype))
+        self.value_changed.emit()
+
+    def _write_scalar(self, magnitude, _value=None):
+        if self._building:
+            return
+        row = self.rows[magnitude]
+        with torch.no_grad():
+            row["param"].copy_(torch.tensor(float(row["C"].value()), dtype=row["param"].dtype))
+        self.value_changed.emit()
+
+    def refresh_from_tensor(self):
+        self._building = True
+        for row in self.rows.values():
+            if row["kind"] == "scalar":
+                row["C"].blockSignals(True)
+                row["C"].setValue(float(row["param"].detach().cpu()))
+                row["C"].blockSignals(False)
+                continue
+
+            a = float(row["a"].detach().cpu())
+            b = float(row["b"].detach().cpu())
+            for widget, value in ((row["C"], math.hypot(a, b)),
+                                  (row["phi"], math.atan2(b, a) / row["m"])):
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+        self._building = False
+
+
 def serialize(obj):
     # --- Tensor ---
     if isinstance(obj, torch.Tensor):
@@ -293,6 +414,35 @@ def update_from_serialized(target: Any, source: Any):
 
     # Fallback für einfache skalare Attribute:
     # hier kann nicht "in place" aktualisiert werden, also ignorieren oder separat behandeln
+def migrate_parameters_dict(data, params_root, config=None):
+    """Bringt eine gespeicherte Parameter-Datei auf die aktuelle Struktur.
+
+    Alte Dateien haben Gr/WS2-Felder im Potential und polare Aberrationen -
+    beides wird hier auf die Form umgerechnet, die ``params_root`` erwartet.
+    """
+
+    if not isinstance(data, dict):
+        return data
+
+    data = dict(data)
+
+    potential = data.get("potential_parameters")
+    if isinstance(potential, dict) and config is not None:
+        data["potential_parameters"] = migrate_serialized_potential_parameters(
+            potential, config)
+
+    ctf_parameters = data.get("ctf_parameters")
+    if isinstance(ctf_parameters, dict):
+        target = params_root.ctf_parameters.aberrations
+        parametrization = (PARAMETRIZATION_CARTESIAN
+                           if AberrationEditor.has_cartesian_aberrations(target)
+                           else PARAMETRIZATION_POLAR)
+        data["ctf_parameters"] = migrate_serialized_ctf_parameters(
+            ctf_parameters, parametrization)
+
+    return data
+
+
 # -----------------------------
 # Dynamisch generiertes Root-Frame
 # -----------------------------
@@ -308,13 +458,15 @@ class ParametersFrame(QFrame):
     parameter_tuned = Signal()
 
 
-    def __init__(self, params_root: Any, parent: QWidget | None = None):
+    def __init__(self, params_root: Any, parent: QWidget | None = None, config: Any = None):
         super().__init__(parent)
 
         if not is_dataclass(params_root):
             raise TypeError("params_root muss eine Dataclass-Instanz sein.")
 
         self.params_root = params_root
+        #: ParticlesConfig - wird zum Migrieren aelterer Parameter-Dateien gebraucht
+        self.config = config
         self._tensor_editors: list[TensorEditor] = []
 
         self.setFrameShape(QFrame.StyledPanel)
@@ -405,14 +557,17 @@ class ParametersFrame(QFrame):
         with open("parameters.json", "r") as f:
             data = json.load(f)
 
-        update_from_serialized(self.params_root, data)
+        update_from_serialized(self.params_root, self.migrate_loaded_dict(data))
         print("parameters loaded:", f.name)
         self.refresh_from_params()
+
+    def migrate_loaded_dict(self, data):
+        return migrate_parameters_dict(data, self.params_root, self.config)
 
     def load_dataclass_json(self, path: str, cls):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return update_from_serialized(self.params_root, data)
+        return update_from_serialized(self.params_root, self.migrate_loaded_dict(data))
 
     def load_parameters(self, selected_fields: list[str] | None = None):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -490,6 +645,15 @@ class ParametersFrame(QFrame):
                 editor.value_changed.connect(self.trigger_parameter_changed)
                 self._tensor_editors.append(editor)
                 section.content_layout.addWidget(editor)
+            return
+
+        # Aberrationen: kartesisch gespeichert, als Betrag + Winkel anzeigen
+        if (isinstance(value, nn.ParameterDict) and name == "aberrations"
+                and AberrationEditor.has_cartesian_aberrations(value)):
+            editor = AberrationEditor(value)
+            editor.value_changed.connect(self.trigger_parameter_changed)
+            self._tensor_editors.append(editor)
+            layout.addWidget(editor)
             return
 
         # ParameterDict

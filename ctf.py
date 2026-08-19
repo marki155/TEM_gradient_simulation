@@ -70,74 +70,201 @@ def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, C
 
 
 
+#: Aberrations-Terme: key -> (Potenz von alpha, Vorfaktor, Einheiten-Skalierung,
+#: Multiplizitaet m des Azimutterms).  m = 0 heisst rotationssymmetrisch (kein
+#: Winkel).  Die Werte sind exakt die, die vorher ausgeschrieben im Code standen
+#: (C30/C34/C45 stehen in um, deshalb die 1e3).
+ABERRATION_TERMS = {
+    "C10": (2, 0.5, 1.0, 0),      # Defokus
+    "C12": (2, 0.5, 1.0, 2),      # 2-zaehliger Astigmatismus
+    "C21": (3, 1 / 3, 1.0, 1),    # Koma
+    "C23": (3, 1 / 3, 1.0, 3),    # 3-zaehliger Astigmatismus
+    "C30": (4, 0.25, 1e3, 0),     # Spaerische Aberration
+    "C32": (4, 0.25, 1.0, 2),
+    "C34": (4, 0.25, 1e3, 4),
+    "C41": (5, 0.2, 1.0, 1),
+    "C43": (5, 0.2, 1.0, 3),
+    "C45": (5, 0.2, 1e3, 5),
+    "C50": (6, 1 / 6, 1.0, 0),
+    "C52": (6, 1 / 6, 1.0, 2),
+    "C54": (6, 1 / 6, 1.0, 4),
+    "C56": (6, 1 / 6, 1.0, 6),
+}
+
+#: Wertebereiche, die frueher direkt in zernike_phase geklammert wurden
+ABERRATION_CLAMPS = {"C10": (-1000., 1000.), "C30": (-20., 20.)}
+
+PARAMETRIZATION_POLAR = "polar"
+PARAMETRIZATION_CARTESIAN = "cartesian"
+
+
+def angle_key(magnitude: str) -> str:
+    """``C12`` -> ``phi12``"""
+
+    return "phi" + magnitude[1:]
+
+
+def cartesian_keys(magnitude: str):
+    """``C12`` -> ``('a12', 'b12')``"""
+
+    return "a" + magnitude[1:], "b" + magnitude[1:]
+
+
+def is_angle_key(key: str) -> bool:
+    """``phi12`` & Co. sind die Azimutwinkel der polaren Schreibweise."""
+
+    return key.startswith("phi")
+
+
+def magnitude_key(key: str) -> str:
+    """Jeder Aberrations-Key auf seinen ``C..``-Key abgebildet.
+
+    ``phi12`` / ``a12`` / ``b12`` gehoeren alle zu ``C12``.
+    """
+
+    if is_angle_key(key):
+        return "C" + key[3:]
+    if key[0] in ("a", "b") and key[1:].isdigit():
+        return "C" + key[1:]
+    return key
+
+
+def polar_to_cartesian_aberrations(coeffs: dict) -> dict:
+    """{'C12': C, 'phi12': phi} -> {'a12': C*cos(m*phi), 'b12': C*sin(m*phi)}
+
+    Rotationssymmetrische Terme (C10, C30, ...) bleiben unveraendert.
+    """
+
+    out = {}
+    for key, value in coeffs.items():
+        if is_angle_key(key):
+            continue
+        term = ABERRATION_TERMS.get(key)
+        if term is None or term[3] == 0:
+            out[key] = value
+            continue
+        m = term[3]
+        phi = float(coeffs.get(angle_key(key), 0.0))
+        c = float(value)
+        a_key, b_key = cartesian_keys(key)
+        out[a_key] = c * math.cos(m * phi)
+        out[b_key] = c * math.sin(m * phi)
+    return out
+
+
+def cartesian_to_polar_aberrations(coeffs: dict) -> dict:
+    """Umkehrung: {'a12': a, 'b12': b} -> {'C12': hypot(a,b), 'phi12': atan2(b,a)/m}"""
+
+    out = {}
+    for key, value in coeffs.items():
+        if key[0] in ("a", "b") and key[1:].isdigit():
+            continue
+        out[key] = value
+
+    for magnitude, (_power, _pref, _scale, m) in ABERRATION_TERMS.items():
+        if m == 0:
+            continue
+        a_key, b_key = cartesian_keys(magnitude)
+        if a_key not in coeffs or b_key not in coeffs:
+            continue
+        a = float(coeffs[a_key])
+        b = float(coeffs[b_key])
+        out[magnitude] = math.hypot(a, b)
+        out[angle_key(magnitude)] = math.atan2(b, a) / m
+    return out
+
+
+def convert_aberrations(coeffs: dict, parametrization: str) -> dict:
+    """Bringt ein Aberrations-Dict in die gewuenschte Schreibweise."""
+
+    if parametrization == PARAMETRIZATION_CARTESIAN:
+        return polar_to_cartesian_aberrations(coeffs)
+    if parametrization == PARAMETRIZATION_POLAR:
+        return cartesian_to_polar_aberrations(coeffs)
+    raise ValueError(f"Unbekannte Parametrisierung: {parametrization!r}")
+
+
 def zernike_phase(alpha, phi, coeffs, device='cpu'):
-    """
-    Berechnet die Zernike-Phasenfunktion für gegebene Aberrationskoeffizienten.
+    """Aberrationsphase chi(alpha, phi) / (2 pi / lambda).
 
-    Parameters:
-    - alpha: Radialer Abstand im k-Raum (Tensor, shape HxW)
-    - phi: Azimutwinkel im k-Raum (Tensor, shape HxW)
-    - coeffs: dict mit Aberrationen, z.B. {'C10': ..., 'C12': ..., 'phi12': ...}
+    Versteht beide Schreibweisen:
 
-    Returns:
-    - complex CTF Tensor: exp(-i * chi(alpha, phi))
+    * polar     ``C12 * cos(m * (phi - phi12))``
+    * kartesisch ``a12 * cos(m * phi) + b12 * sin(m * phi)``
+
+    Beides ist dieselbe Funktion (a = C cos(m phi12), b = C sin(m phi12)) - die
+    kartesische Form ist nur besser zu optimieren: der Gradient nach dem Winkel
+    skaliert in der polaren Form mit dem Betrag und verschwindet, wenn der
+    Betrag klein wird.
     """
+
     phase = torch.zeros_like(alpha, dtype=torch.float32, device=device)
 
-    # ---- 2. Ordnung ----
-    if "C10" in coeffs:  # Defokus
-        phase += 0.5 * torch.clamp(coeffs["C10"], min=-1000., max=1000.) * alpha**2
-    if "C12" in coeffs and "phi12" in coeffs:  # Astigmatismus 2. Ordnung
-        phase += 0.5 * coeffs["C12"] * alpha**2 * torch.cos(2 * (phi - coeffs["phi12"]))
+    for magnitude, (power, prefactor, scale, m) in ABERRATION_TERMS.items():
+        radial = prefactor * scale * alpha ** power
 
-    # ---- 3. Ordnung ----
-    if "C21" in coeffs and "phi21" in coeffs:  # Koma
-        phase += (1/3) * coeffs["C21"] * alpha**3 * torch.cos(phi - coeffs["phi21"])
-    if "C23" in coeffs and "phi23" in coeffs:  # 3-fach Astigmatismus
-        phase += (1/3) * coeffs["C23"] * alpha**3 * torch.cos(3 * (phi - coeffs["phi23"]))
+        if m == 0:
+            if magnitude not in coeffs:
+                continue
+            value = coeffs[magnitude]
+            clamp = ABERRATION_CLAMPS.get(magnitude)
+            if clamp is not None:
+                value = torch.clamp(value, min=clamp[0], max=clamp[1])
+            phase = phase + radial * value
+            continue
 
-    # ---- 4. Ordnung ----
-    if "C30" in coeffs:  # Sphärische Aberration
-        phase += 0.25 * torch.clamp(coeffs["C30"], min=-20.0, max=20.0) * 1e3 * alpha**4
-    if "C32" in coeffs and "phi32" in coeffs:
-        phase += 0.25 * coeffs["C32"] * alpha**4 * torch.cos(2 * (phi - coeffs["phi32"]))
-    if "C34" in coeffs and "phi34" in coeffs:
-        phase += 0.25 * coeffs["C34"] * 1e3 *  alpha**4 * torch.cos(4 * (phi - coeffs["phi34"]))
-
-    # ---- 5. Ordnung ----
-    if "C41" in coeffs and "phi41" in coeffs:
-        phase += 0.2 * coeffs["C41"] * alpha**5 * torch.cos(phi - coeffs["phi41"])
-    if "C43" in coeffs and "phi43" in coeffs:
-        phase += 0.2 * coeffs["C43"] * alpha**5 * torch.cos(3 * (phi - coeffs["phi43"]))
-    if "C45" in coeffs and "phi45" in coeffs:
-        phase += 0.2 * coeffs["C45"] * 1e3 * alpha**5 * torch.cos(5 * (phi - coeffs["phi45"]))
-
-    # ---- 6. Ordnung ----
-    if "C50" in coeffs:  # Sphärisch 2. Ordnung
-        phase += (1/6) * coeffs["C50"] * alpha**6
-    if "C52" in coeffs and "phi52" in coeffs:
-        phase += (1/6) * coeffs["C52"] * alpha**6 * torch.cos(2 * (phi - coeffs["phi52"]))
-    if "C54" in coeffs and "phi54" in coeffs:
-        phase += (1/6) * coeffs["C54"] * alpha**6 * torch.cos(4 * (phi - coeffs["phi54"]))
-    if "C56" in coeffs and "phi56" in coeffs:
-        phase += (1/6) * coeffs["C56"] * alpha**6 * torch.cos(6 * (phi - coeffs["phi56"]))
+        a_key, b_key = cartesian_keys(magnitude)
+        if a_key in coeffs and b_key in coeffs:
+            phase = phase + radial * (coeffs[a_key] * torch.cos(m * phi)
+                                      + coeffs[b_key] * torch.sin(m * phi))
+        elif magnitude in coeffs and angle_key(magnitude) in coeffs:
+            phase = phase + radial * coeffs[magnitude] * torch.cos(
+                m * (phi - coeffs[angle_key(magnitude)]))
 
     return phase
 
-def make_param_dict(a=None):
+
+DEFAULT_ABERRATIONS = {
+    "C10": -13.07,
+    'C12': 0.35, "phi12": 0.,
+    'C23': 0.17, 'phi23': 0.,
+    'C21': 3.71, 'phi21': 0.,
+    "C30": 4.16,  # um
+    'C34': -0.2, 'phi34': 0.,  # um
+    'C45': 0.25, 'phi45': 0.,
+}
+
+
+def make_param_dict(a=None, parametrization=PARAMETRIZATION_CARTESIAN):
     if a is None:
-        a = {"C10": -13.07,
-                               'C12': 0.35, "phi12": 0.,
-                               'C23': 0.17, 'phi23': 0.,
-                               'C21': 3.71, 'phi21': 0.,
-                               "C30": 4.16, #um
-                               'C34': -0.2, 'phi34': 0., #um
-                               'C45': 0.25, 'phi45': 0.}
+        a = DEFAULT_ABERRATIONS
+
+    a = convert_aberrations(a, parametrization)
 
     return nn.ParameterDict({
-        k: nn.Parameter(torch.tensor(v, dtype=torch.float32))
+        k: nn.Parameter(torch.tensor(float(v), dtype=torch.float32))
         for k, v in a.items()
     })
+
+
+def migrate_serialized_ctf_parameters(source, parametrization=PARAMETRIZATION_CARTESIAN):
+    """Rechnet die Aberrationen einer gespeicherten Parameter-Datei um.
+
+    Alte Dateien stehen in polarer Form (C12/phi12), neue in kartesischer
+    (a12/b12) - je nach ``parametrization`` wird in die passende umgerechnet.
+    """
+
+    if not isinstance(source, dict):
+        return source
+
+    aberrations = source.get("aberrations")
+    if not isinstance(aberrations, dict):
+        return source
+
+    out = dict(source)
+    out["aberrations"] = convert_aberrations(aberrations, parametrization)
+    return out
+
 
 @dataclass
 class TunableCTFParameters:
@@ -148,20 +275,7 @@ class TunableCTFParameters:
         default_factory=lambda: nn.Parameter(torch.tensor(0.45, dtype=torch.float32)))
     Cc_um: nn.Parameter = field(
         default_factory=lambda: nn.Parameter(torch.tensor(1.e3, dtype=torch.float32)))
-    aberrations: nn.ParameterDict = field(default_factory=make_param_dict)  # um
-
-
-def is_angle_key(key: str) -> bool:
-    """``phi12`` & Co. sind die Azimutwinkel der Aberrationen."""
-
-    return key.startswith("phi")
-
-
-def magnitude_key(key: str) -> str:
-    """``phi12`` -> ``C12``; fuer alles andere der Schluessel selbst."""
-
-    return "C" + key[3:] if is_angle_key(key) else key
-
+    aberrations: nn.ParameterDict = field(default_factory=make_param_dict)  # nm bzw. um
 
 
 class CTFLayer(nn.Module):
@@ -179,12 +293,14 @@ class CTFLayer(nn.Module):
         self.alpha_max_mrad = config.ctf_alpha_max_mrad
         self.device = device
         self.train_method = train_method
+        self.parametrization = getattr(config, "ctf_parametrization", PARAMETRIZATION_CARTESIAN)
 
         self.tunable_parameters = TunableCTFParameters(
             amp_contrast=nn.Parameter(torch.tensor(config.init_amp_contrast, dtype=torch.float32)),
             deltaE = nn.Parameter(torch.tensor(self.envelope_params["deltaE"], dtype=torch.float32)),
             Cc_um = nn.Parameter(torch.tensor(self.envelope_params["Cc_um"], dtype=torch.float32)),
-            aberrations = nn.ParameterDict(make_param_dict(config.init_aberrations))
+            aberrations = nn.ParameterDict(make_param_dict(
+                config.init_aberrations, self.parametrization))
         )
 
         pad = config.padding

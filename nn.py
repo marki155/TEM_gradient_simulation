@@ -265,6 +265,10 @@ class ParticlesConfig:
     #: "+z" = Strahl laeuft von der kleinsten zur groessten z-Position
     beam_direction: str = "+z"
 
+    #: Schreibweise der Aberrationen: "cartesian" (a/b, besser zu optimieren)
+    #: oder "polar" (C/phi wie frueher). Die Physik ist identisch.
+    ctf_parametrization: str = "cartesian"
+
     # --- Legacy-Felder (nur noch fuer die Migration alter configs) -----------
     z_positions_nm: Optional[List[float]] = None
     control_points_graphen: Optional[List[int]] = None
