@@ -238,6 +238,38 @@ def test_element_mixture():
     print("  Elementmischung: I=5/6/7/8 exakt B/C/N/O, dazwischen linear, Gradient laeuft")
 
 
+def test_debye_waller():
+    """Thermische Verschmierung: Spitze runter, Flaechenintegral unveraendert."""
+
+    group = LayerGroupConfig("Gr", max_shift=20., max_rotation=0.35)
+
+    def potential(u_rms):
+        layer = LayerConfig("Gr", "C", 0.0, "Gr", init_occupancy=100.0,
+                            occ_entropy=False, debye_waller_u=u_rms)
+        config = make_config([layer], [group], n_atoms=1)
+        # genau auf eine Pixelmitte setzen, sonst verteilt schon die bilineare
+        # Rasterung die Spitze auf vier Pixel
+        config.init_positions = [np.array([[48.0, 48.0]], dtype=np.float64)]
+        tm = TrainMethod().ensure_for_config(config)
+        model = build_model(config, tm)
+        return model.model[0].get_potential_images()[0]
+
+    static = potential(0.0)
+    smeared = potential(0.06)
+
+    assert smeared.max() < 0.6 * static.max(), (static.max(), smeared.max())
+
+    # eine normierte Faltung erhaelt das Flaechenintegral
+    relative = abs(smeared.sum() - static.sum()) / abs(static.sum())
+    assert relative < 1e-3, relative
+
+    # u = 0 aendert nichts
+    assert np.abs(potential(0.0) - static).max() == 0.0
+
+    print(f"  Debye-Waller: Spitze {static.max():.1f} -> {smeared.max():.1f}, "
+          f"Integral gleich (Abweichung {relative:.1e})")
+
+
 def test_isolated_group_skips_empty_slices():
     """Uebersprungene Schichten aendern die Welle nicht (nur die Rechenzeit)."""
 
@@ -406,6 +438,8 @@ if __name__ == "__main__":
     test_atom_weights_use_intensities()
     print("test_element_mixture")
     test_element_mixture()
+    print("test_debye_waller")
+    test_debye_waller()
     print("test_isolated_group_skips_empty_slices")
     test_isolated_group_skips_empty_slices()
     print("test_ctf_aberration_switches")

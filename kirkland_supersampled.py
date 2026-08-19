@@ -170,7 +170,17 @@ class KirklandPrecalcPotential:
         supersample_factor: int = 8,
         softcore_fraction: float = 0.001,
         atom_types=("C", "S", "W"),
+        debye_waller=None,
     ):
+        """``debye_waller``: dict Element -> u_rms in nm (eindimensional).
+
+        Der Kirkland-Kernel ist das Potential eines ruhenden Atoms. Reale Atome
+        schwingen thermisch; das verschmiert das projizierte Potential mit einer
+        Gauss-Funktion der Breite u_rms, im k-Raum also ein Faktor
+        exp(-2 pi^2 u^2 k^2) (entspricht exp(-B s^2) mit B = 8 pi^2 u^2).
+        Das Flaechenintegral bleibt dabei erhalten, nur die Spitze wird
+        niedriger - und zwar unabhaengig von der Pixelgroesse.
+        """
         self.H = H
         self.W = W
         self.pixel_size_nm = pixel_size_nm
@@ -192,11 +202,24 @@ class KirklandPrecalcPotential:
             for atom_type in atom_types
         }
 
+        self.debye_waller = dict(debye_waller or {})
+
         # Die Fouriertransformierte des Kernels aendert sich nie - einmal
         # vorberechnen statt bei jedem Aufruf (das war der teuerste Teil der
         # Faltung). rfft2 statt fft2, weil rho und Kernel reell sind.
-        self.kernels_ft = {name: torch.fft.rfft2(kernel)
-                           for name, kernel in self.kernels.items()}
+        # Die thermische Verschmierung ist im k-Raum ein Faktor und wird hier
+        # gleich mit eingebacken: zur Laufzeit kostet sie dadurch nichts.
+        fy = torch.fft.fftfreq(H, d=pixel_size_nm, device=device)
+        fx = torch.fft.rfftfreq(W, d=pixel_size_nm, device=device)
+        k_squared = fy[:, None] ** 2 + fx[None, :] ** 2
+
+        self.kernels_ft = {}
+        for name, kernel in self.kernels.items():
+            spectrum = torch.fft.rfft2(kernel)
+            u_nm = float(self.debye_waller.get(name, 0.0))
+            if u_nm > 0:
+                spectrum = spectrum * torch.exp(-2 * math.pi ** 2 * u_nm ** 2 * k_squared)
+            self.kernels_ft[name] = spectrum
 
     def projected_slice_potential_kirkland(self, rho, atom_type: str, pixel_size_nm=None, device=None):
         kernel_ft = self.kernels_ft[atom_type]

@@ -18,7 +18,7 @@ import json
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from matplotlib import pyplot as plt
-from layers import LayerConfig, LayerGroupConfig
+from layers import LayerConfig, LayerGroupConfig, TYPICAL_DEBYE_WALLER_U
 from nn import NN_particles, ParticlesConfig, CONFIG_CLASS_REGISTRY
 from testing import show_init_positions
 from training_parameter import (
@@ -259,12 +259,19 @@ def init_config(image, config_path):
             ),
         ]
 
+        # debye_waller_u: thermische Auslenkung (u_rms in A). Ohne sie ist das
+        # projizierte Potential das eines ruhenden Atoms - die Spitze wird zu
+        # hoch und haengt an der Pixelgroesse.
         layers = [
             LayerConfig(name="Gr", element="C", z_nm=z_positions_nm[0], group="Gr",
-                        init_occupancy=100.0, occ_entropy=False),
-            LayerConfig(name="S1", element="S", z_nm=z_positions_nm[1], group="WS2"),
-            LayerConfig(name="W", element="W", z_nm=z_positions_nm[2], group="WS2"),
-            LayerConfig(name="S2", element="S", z_nm=z_positions_nm[3], group="WS2"),
+                        init_occupancy=100.0, occ_entropy=False,
+                        debye_waller_u=TYPICAL_DEBYE_WALLER_U["C"]),
+            LayerConfig(name="S1", element="S", z_nm=z_positions_nm[1], group="WS2",
+                        debye_waller_u=TYPICAL_DEBYE_WALLER_U["S"]),
+            LayerConfig(name="W", element="W", z_nm=z_positions_nm[2], group="WS2",
+                        debye_waller_u=TYPICAL_DEBYE_WALLER_U["W"]),
+            LayerConfig(name="S2", element="S", z_nm=z_positions_nm[3], group="WS2",
+                        debye_waller_u=TYPICAL_DEBYE_WALLER_U["S"]),
         ]
 
         config = ParticlesConfig(init_positions=init_positions, init_intensities=init_intensities,

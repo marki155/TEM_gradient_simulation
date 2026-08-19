@@ -369,7 +369,8 @@ class DifferentiablePotential(nn.Module):
             self.W + 2 * self.potential_pad,
             self.pixel_size_nm, self.device,
             atom_types=sorted({s for symbols in self.layer_elements for s in symbols},
-                              key=lambda s: atomic_numbers[s]))
+                              key=lambda s: atomic_numbers[s]),
+            debye_waller=self._collect_debye_waller())
 
         self.apply_trainable_selection()
 
@@ -392,6 +393,29 @@ class DifferentiablePotential(nn.Module):
 
     def get_tunable_parameters(self):
         return self.tunable_parameters
+
+    def _collect_debye_waller(self):
+        """Thermische Auslenkung je Element (u_rms in nm) aus den Schichten.
+
+        Die Kernel werden pro Element vorberechnet, deshalb muss ein Element,
+        das in mehreren Schichten vorkommt, dort dieselbe Auslenkung haben.
+        """
+
+        per_element = {}
+        for layer, symbols in zip(self.layers, self.layer_elements):
+            u_A = float(getattr(layer, "debye_waller_u", 0.0) or 0.0)
+            if u_A < 0:
+                raise ValueError(f"Schicht {layer.name}: debye_waller_u darf nicht negativ sein")
+            for symbol in symbols:
+                previous = per_element.get(symbol)
+                if previous is not None and abs(previous - u_A) > 1e-12:
+                    raise ValueError(
+                        f"Element {symbol} bekommt in verschiedenen Schichten "
+                        f"unterschiedliche debye_waller_u ({previous} vs {u_A} A). "
+                        f"Der Kernel wird pro Element vorberechnet, das geht nicht.")
+                per_element[symbol] = u_A
+
+        return {symbol: u_A / 10.0 for symbol, u_A in per_element.items() if u_A > 0}
 
     @staticmethod
     def _resolve_elements(layer):

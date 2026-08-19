@@ -73,10 +73,28 @@ class LayerConfig:
     #: skaliert nur seine Amplitude.
     elements: List[str] = field(default_factory=list)
 
+    #: Thermische Auslenkung (Debye-Waller), u_rms in Angstroem, eindimensional.
+    #: 0 = aus (ruhendes Atom wie bisher). Typische Werte bei Raumtemperatur
+    #: stehen in TYPICAL_DEBYE_WALLER_U.
+    debye_waller_u: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Legacy-Definition (Gr / S1 / W / S2)
 # ---------------------------------------------------------------------------
+
+#: Typische eindimensionale thermische Auslenkungen u_rms bei Raumtemperatur
+#: in Angstroem. Grobe Richtwerte - im Zweifel fuer die eigene Probe pruefen
+#: (u_rms = sqrt(B / (8 pi^2)) aus einem Debye-Waller-Faktor B).
+TYPICAL_DEBYE_WALLER_U = {
+    "B": 0.070,
+    "C": 0.060,   # Graphen, in der Ebene
+    "N": 0.060,
+    "O": 0.070,
+    "S": 0.070,   # WS2
+    "W": 0.055,
+}
+
 
 #: Namen der vier fest verdrahteten Schichten der alten Implementierung.
 LEGACY_LAYER_NAMES: Tuple[str, ...] = ("Gr", "S1", "W", "S2")
