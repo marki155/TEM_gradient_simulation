@@ -141,10 +141,26 @@ def make_param_dict(a=None):
 
 @dataclass
 class TunableCTFParameters:
-    amp_contrast: nn.Parameter = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
-    deltaE: nn.Parameter = nn.Parameter(torch.tensor(0.45, dtype=torch.float32))
-    Cc_um: nn.Parameter = nn.Parameter(torch.tensor(1.e3, dtype=torch.float32))
-    aberrations: nn.ParameterDict = field(default_factory=make_param_dict)#um
+    # default_factory, sonst teilen sich alle Instanzen dieselben Parameter
+    amp_contrast: nn.Parameter = field(
+        default_factory=lambda: nn.Parameter(torch.tensor(1.0, dtype=torch.float32)))
+    deltaE: nn.Parameter = field(
+        default_factory=lambda: nn.Parameter(torch.tensor(0.45, dtype=torch.float32)))
+    Cc_um: nn.Parameter = field(
+        default_factory=lambda: nn.Parameter(torch.tensor(1.e3, dtype=torch.float32)))
+    aberrations: nn.ParameterDict = field(default_factory=make_param_dict)  # um
+
+
+def is_angle_key(key: str) -> bool:
+    """``phi12`` & Co. sind die Azimutwinkel der Aberrationen."""
+
+    return key.startswith("phi")
+
+
+def magnitude_key(key: str) -> str:
+    """``phi12`` -> ``C12``; fuer alles andere der Schluessel selbst."""
+
+    return "C" + key[3:] if is_angle_key(key) else key
 
 
 
@@ -170,8 +186,6 @@ class CTFLayer(nn.Module):
             Cc_um = nn.Parameter(torch.tensor(self.envelope_params["Cc_um"], dtype=torch.float32)),
             aberrations = nn.ParameterDict(make_param_dict(config.init_aberrations))
         )
-
-        self.tunable_parameters = TunableCTFParameters()
 
         pad = config.padding
         self.pad = pad
@@ -218,6 +232,29 @@ class CTFLayer(nn.Module):
     def get_tunable_parameters(self):
         return self.tunable_parameters
 
+    def aberration_is_trainable(self, key: str) -> bool:
+        """Wird dieser Aberrations-Parameter gerade mitoptimiert?
+
+        Betraege (``C..``) haengen an ``train_ctf_aberrations``, die Winkel
+        (``phi..``) zusaetzlich an ``train_ctf_angles``.  Welche Ordnungen
+        ueberhaupt freigegeben sind, steht in ``train_aberrations``; ein Winkel
+        folgt dabei seinem Betrag (``phi12`` <- ``C12``).
+        """
+
+        tm = self.train_method
+        if tm is None:
+            return True
+
+        if not tm.train_ctf_aberrations.enabled:
+            return False
+
+        if is_angle_key(key):
+            angles = getattr(tm, "train_ctf_angles", None)
+            if angles is None or not angles.enabled:
+                return False
+
+        return bool(tm.train_aberrations.get(magnitude_key(key), False))
+
 
 
     def _build_ctf(self, kx=None, ky=None):
@@ -228,13 +265,7 @@ class CTFLayer(nn.Module):
 
         aberrations = {}
         for k, v in self.tunable_parameters.aberrations.items():
-            if self.train_method is not None and self.train_method.train_ctf_aberrations.enabled:
-                if k in self.train_method.train_aberrations and self.train_method.train_aberrations[k]:
-                    aberrations[k] = v
-                else:
-                    aberrations[k] = v.detach()  # nicht trainierbar
-            else:
-                aberrations[k] = v.detach()
+            aberrations[k] = v if self.aberration_is_trainable(k) else v.detach()
         #aberrations = {k: v for k, v in self.aberr_params.items()}
         lam = self.lam  # in nm
 

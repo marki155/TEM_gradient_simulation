@@ -683,12 +683,13 @@ class MplCanvas(FigureCanvasQTAgg):
         c10 = None
         c30 = None
         if ctf_layer is not None:
+            aberrations = ctf_layer.tunable_parameters.aberrations
             try:
-                c10 = float(ctf_layer.aberr_params["C10"].detach().cpu().numpy())
+                c10 = float(aberrations["C10"].detach().cpu())
             except Exception:
                 pass
             try:
-                c30 = float(ctf_layer.aberr_params["C30"].detach().cpu().numpy())
+                c30 = float(aberrations["C30"].detach().cpu())
             except Exception:
                 pass
 

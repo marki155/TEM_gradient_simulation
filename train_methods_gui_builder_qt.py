@@ -33,6 +33,8 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
         self._build_group_sections()
         self._build_layer_sections()
         self._build_global_section()
+        self._build_flag_dict_section("Aberrationen (Betrag + Winkel)", "train_aberrations")
+        self._build_flag_dict_section("Envelope-Parameter", "train_env_params")
 
     # ------------------------------------------------------------------
     # Aufbau
@@ -153,6 +155,40 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
                 self.widgets[name] = {"kind": "lineedit", "widget": w}
 
         self.root.addWidget(box)
+
+    def _build_flag_dict_section(self, title: str, attr_name: str):
+        """Baut eine Checkbox je Eintrag eines bool-Dicts (Klassenattribut)."""
+
+        flags = getattr(self.train_method, attr_name, None)
+        if not isinstance(flags, dict) or not flags:
+            return
+
+        box = QtWidgets.QGroupBox(title)
+        form = QtWidgets.QFormLayout(box)
+
+        angles = set()
+        if attr_name == "train_aberrations":
+            aberrations = getattr(self.config, "init_aberrations", None) or {}
+            angles = {k for k in aberrations if k.startswith("phi")}
+
+        for key, value in flags.items():
+            chk = QtWidgets.QCheckBox()
+            chk.setChecked(bool(value))
+            chk.stateChanged.connect(
+                lambda _=None, a=attr_name, k=key, w=chk: self._update_flag_dict(a, k, w.isChecked())
+            )
+            label = key
+            if f"phi{key[1:]}" in angles:
+                label = f"{key} (+ phi{key[1:]})"
+            form.addRow(label, chk)
+            self.widgets[f"{attr_name}:{key}"] = {
+                "kind": "flag", "attr": attr_name, "key": key, "widget": chk}
+
+        self.root.addWidget(box)
+
+    def _update_flag_dict(self, attr_name, key, value):
+        getattr(self.train_method, attr_name)[key] = bool(value)
+        self.changed.emit()
 
     def _make_trainparam_row(self, key: str) -> QtWidgets.QWidget:
         train_param = self.train_method.get_train_param(key)
@@ -277,6 +313,13 @@ class TrainMethodEditor(QtWidgets.QGroupBox):
                 info["lr"].blockSignals(True)
                 info["lr"].setValue(float(value.lr))
                 info["lr"].blockSignals(False)
+                continue
+
+            if info["kind"] == "flag":
+                w = info["widget"]
+                w.blockSignals(True)
+                w.setChecked(bool(getattr(self.train_method, info["attr"])[info["key"]]))
+                w.blockSignals(False)
                 continue
 
             value = getattr(self.train_method, key, None)
