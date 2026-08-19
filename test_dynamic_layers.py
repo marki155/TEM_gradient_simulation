@@ -180,6 +180,64 @@ def test_atom_weights_use_intensities():
     print("  Intensitaeten wirken aufs Potential und bekommen Gradienten")
 
 
+def test_element_mixture():
+    """Intensitaet als kontinuierliche Ordnungszahl: I=7 ist wirklich Stickstoff."""
+
+    elements = ["B", "C", "N", "O"]
+    group = LayerGroupConfig("Gr", max_shift=20., max_rotation=0.35, isolate_when_active=True)
+
+    def build(layer_elements, element="C"):
+        layer = LayerConfig("Gr", element, 0.0, "Gr", init_occupancy=100.0,
+                            occ_entropy=False, elements=list(layer_elements))
+        config = make_config([layer], [group])
+        tm = TrainMethod().ensure_for_config(config)
+        return build_model(config, tm), tm
+
+    (mix_model, mix_tm) = build(elements)
+    mix_pot = mix_model.model[0]
+    assert mix_pot.layer_elements[0] == elements, mix_pot.layer_elements[0]
+
+    def potential(intensity):
+        with torch.no_grad():
+            mix_pot.tunable_parameters.intensities[0].fill_(intensity)
+        return mix_pot.get_potential_images()[0]
+
+    # reine Elemente als Referenz
+    reference = {}
+    for symbol in elements:
+        model, _tm = build([], element=symbol)
+        pot = model.model[0]
+        with torch.no_grad():
+            pot.tunable_parameters.intensities[0].fill_(float(pot.get_init_intensities(0)[0]))
+        reference[symbol] = pot.get_potential_images()[0]
+
+    def deviation(a, b):
+        # bis auf einen konstanten Offset vergleichen: das Potential wird um
+        # seinen Median zentriert, und der Median ist nicht linear. Ein
+        # konstanter Potentialoffset ist eine globale Phase und damit im Bild
+        # ohnehin nicht sichtbar.
+        difference = a - b
+        return np.abs(difference - difference.mean()).max() / np.abs(b).max()
+
+    for intensity, symbol in ((5.0, "B"), (6.0, "C"), (7.0, "N"), (8.0, "O")):
+        assert deviation(potential(intensity), reference[symbol]) < 1e-5, symbol
+
+    # dazwischen linear gemischt
+    for intensity, share in ((6.5, 0.5), (6.3, 0.3)):
+        expected = (1 - share) * reference["C"] + share * reference["N"]
+        assert deviation(potential(intensity), expected) < 1e-5, intensity
+
+    # Gradient auch genau auf einem Stuetzpunkt (Knick der Zeltfunktion)
+    with torch.no_grad():
+        mix_pot.tunable_parameters.intensities[0].fill_(6.0)
+    mix_tm.layer("Gr").intensities.enabled = True
+    mix_pot.apply_trainable_selection()
+    _loss, with_grad = step_and_report(mix_model, mix_tm)
+    assert "layers.Gr.intensities" in with_grad, with_grad
+
+    print("  Elementmischung: I=5/6/7/8 exakt B/C/N/O, dazwischen linear, Gradient laeuft")
+
+
 def test_isolated_group_skips_empty_slices():
     """Uebersprungene Schichten aendern die Welle nicht (nur die Rechenzeit)."""
 
@@ -346,6 +404,8 @@ if __name__ == "__main__":
     test_multiple_groups_and_isolation()
     print("test_atom_weights_use_intensities")
     test_atom_weights_use_intensities()
+    print("test_element_mixture")
+    test_element_mixture()
     print("test_isolated_group_skips_empty_slices")
     test_isolated_group_skips_empty_slices()
     print("test_ctf_aberration_switches")

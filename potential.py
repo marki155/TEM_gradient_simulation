@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+from ase.data import atomic_numbers
 from matplotlib import pyplot as plt
 
 from displacement_field import SplineDisplacementField2D, StrainTunableParameters
@@ -354,11 +355,21 @@ class DifferentiablePotential(nn.Module):
             potential_factors=factors_,
         )
 
+        # Elemente je Schicht: entweder genau eins oder eine Mischreihe
+        self.layer_elements = [self._resolve_elements(layer) for layer in self.layers]
+        self.layer_atomic_numbers = [
+            torch.tensor([float(atomic_numbers[s]) for s in symbols],
+                         dtype=torch.float32, device=device)
+            for symbols in self.layer_elements
+        ]
+
         self.potential_pad = config.padding
-        self.kirkland_precalc_pot = KirklandPrecalcPotential(self.H + 2 * self.potential_pad,
-                                                             self.W + 2 * self.potential_pad,
-                                                             self.pixel_size_nm, self.device,
-                                                             atom_types=sorted({l.element for l in self.layers}))
+        self.kirkland_precalc_pot = KirklandPrecalcPotential(
+            self.H + 2 * self.potential_pad,
+            self.W + 2 * self.potential_pad,
+            self.pixel_size_nm, self.device,
+            atom_types=sorted({s for symbols in self.layer_elements for s in symbols},
+                              key=lambda s: atomic_numbers[s]))
 
         self.apply_trainable_selection()
 
@@ -381,6 +392,65 @@ class DifferentiablePotential(nn.Module):
 
     def get_tunable_parameters(self):
         return self.tunable_parameters
+
+    @staticmethod
+    def _resolve_elements(layer):
+        """Elemente einer Schicht, nach Ordnungszahl sortiert."""
+
+        symbols = list(getattr(layer, "elements", None) or [])
+        if not symbols:
+            return [layer.element]
+
+        if layer.element not in symbols:
+            raise ValueError(
+                f"Schicht {layer.name}: element={layer.element!r} muss in "
+                f"elements={symbols} enthalten sein (es liefert den Startwert "
+                f"der Intensitaeten).")
+
+        unknown = [s for s in symbols if s not in atomic_numbers]
+        if unknown:
+            raise ValueError(f"Schicht {layer.name}: unbekannte Elemente {unknown}")
+
+        return sorted(set(symbols), key=lambda s: atomic_numbers[s])
+
+    def mixes_elements(self, i: int) -> bool:
+        return len(self.layer_elements[i]) > 1
+
+    def element_mixture_weights(self, i: int, intensities):
+        """Zerlegt die Intensitaet (= kontinuierliche Ordnungszahl) auf die Elemente.
+
+        Stueckweise lineare Zeltfunktionen ueber die Ordnungszahlen: bei I = Z_k
+        bekommt Element k das Gewicht 1, dazwischen wird linear gemischt.  Die
+        Gewichte summieren sich immer zu 1, die Gesamtzahl der Atome bleibt also
+        erhalten - anders als beim blossen Skalieren der Amplitude.
+        """
+
+        numbers = self.layer_atomic_numbers[i]
+        clamped = torch.clamp(intensities, float(numbers[0]), float(numbers[-1]))
+
+        weights = []
+        for k in range(len(numbers)):
+            left = (torch.ones_like(clamped) if k == 0
+                    else (clamped - numbers[k - 1]) / (numbers[k] - numbers[k - 1]))
+            right = (torch.ones_like(clamped) if k == len(numbers) - 1
+                     else (numbers[k + 1] - clamped) / (numbers[k + 1] - numbers[k]))
+            weights.append(torch.clamp(torch.minimum(left, right), 0.0, 1.0))
+
+        return weights
+
+    def _warn_intensities_out_of_range(self, i, intensities):
+        if not hasattr(self, "_range_warned"):
+            self._range_warned = set()
+        numbers = self.layer_atomic_numbers[i]
+        name = self.layers[i].name
+        outside = bool(((intensities < numbers[0]) | (intensities > numbers[-1])).any())
+        if outside and name not in self._range_warned:
+            print(f"[Warnung] Schicht {name}: Intensitaeten liegen ausserhalb von "
+                  f"[{float(numbers[0]):.0f}, {float(numbers[-1]):.0f}] und werden geklemmt - "
+                  f"dort ist der Gradient null. Elementliste erweitern?")
+            self._range_warned.add(name)
+        elif not outside:
+            self._range_warned.discard(name)
 
     def group_for_layer(self, i: int):
         return self.group_of_layer[i]
@@ -619,6 +689,12 @@ class DifferentiablePotential(nn.Module):
             if not tm.layer_enabled(layer.name, "occupancies"):
                 occupancy = occupancy.detach()
 
+            if self.mixes_elements(i):
+                # dort waehlt die Intensitaet das Element aus (Summe der
+                # Mischgewichte ist 1), sie skaliert nicht die Amplitude
+                weights.append(occupancy)
+                continue
+
             relative = tp.intensities[i] / self.get_init_intensities(i)
             if not tm.layer_enabled(layer.name, "intensities"):
                 relative = relative.detach()
@@ -761,6 +837,49 @@ class DifferentiablePotential(nn.Module):
             return [True] * self.N_l
         return [layer.group == active for layer in self.layers]
 
+    def layer_potential(self, i, positions_i, weight_i):
+        """Projiziertes Potential einer Schicht.
+
+        Ohne Elementliste wie bisher: ein Kernel, die Intensitaet skaliert
+        seine Amplitude.  Mit Elementliste wird die Intensitaet als
+        kontinuierliche Ordnungszahl gelesen und auf die Nachbarelemente
+        aufgeteilt - jedes mit seinem eigenen Kirkland-Kernel.
+        """
+
+        layer = self.layers[i]
+
+        if not self.mixes_elements(i):
+            return self.projected_slice_potential_kirkland(
+                positions_i, weight_i, atom_type=layer.element)
+
+        tp = self.tunable_parameters
+        intensities = tp.intensities[i]
+        trains_intensities = self.train_methods.layer_enabled(layer.name, "intensities")
+        if not trains_intensities:
+            intensities = intensities.detach()
+
+        self._warn_intensities_out_of_range(i, intensities.detach())
+        mixture = self.element_mixture_weights(i, intensities)
+
+        potential = None
+        for symbol, share in zip(self.layer_elements[i], mixture):
+            weight = share * weight_i
+            # Elemente ohne Beitrag ueberspringen - aber nur, wenn die
+            # Intensitaeten fest sind: sonst faehrt man sich den Gradienten weg,
+            # mit dem die Mischung ueberhaupt erst in Bewegung kommt
+            if not trains_intensities and not bool(torch.any(weight > 0)):
+                continue
+            part = self.projected_slice_potential_kirkland(
+                positions_i, weight, atom_type=symbol, subtract_median=False)
+            potential = part if potential is None else potential + part
+
+        if potential is None:
+            return torch.zeros((self.H + self.potential_pad * 2,
+                                self.W + self.potential_pad * 2),
+                               dtype=torch.float32, device=self.device)
+
+        return potential - potential.median()
+
     def forward(self, _):
         positions = self.get_positions()
         weights = self.get_atom_weights()
@@ -774,8 +893,7 @@ class DifferentiablePotential(nn.Module):
                 potential_list.append(None)
                 continue
 
-            potential_i = self.projected_slice_potential_kirkland(
-                positions[i], weights[i], atom_type=layer.element)
+            potential_i = self.layer_potential(i, positions[i], weights[i])
             potential_i = potential_i * self.tunable_parameters.potential_factors[layer.group]
             potential_list.append(potential_i)
 
@@ -864,7 +982,8 @@ class DifferentiablePotential(nn.Module):
         V = V - V.median()
         return V
 
-    def projected_slice_potential_kirkland(self, positions_xy, occupancies, atom_type):
+    def projected_slice_potential_kirkland(self, positions_xy, occupancies, atom_type,
+                                           subtract_median=True):
         pad = self.potential_pad#max(self.H // 2, self.W // 2)
         Hp = self.H + 2 * pad
         Wp = self.W + 2 * pad
@@ -881,7 +1000,10 @@ class DifferentiablePotential(nn.Module):
 
         Vp = self.kirkland_precalc_pot.projected_slice_potential_kirkland(rho, atom_type, self.pixel_size_nm, self.device)
         V = Vp#[pad:pad + self.H, pad:pad + self.W]
-        V = V - V.median()
+        if subtract_median:
+            # konstanter Offset - physikalisch irrelevant (globale Phase), haelt
+            # aber die Zahlen klein. Bei einer Elementmischung erst am Ende.
+            V = V - V.median()
 
         return V
 

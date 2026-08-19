@@ -65,6 +65,14 @@ class LayerConfig:
     init_occupancy: float = 2.0  # Logit, wird spaeter durch sigmoid() geschickt
     occ_entropy: bool = True     # Occupancy-Entropie-Regularisierung anwenden?
 
+    #: Elemente, zwischen denen die Atom-Intensitaet interpolieren darf,
+    #: z.B. ["B", "C", "N", "O"]. Die Intensitaet ist dann die (kontinuierliche)
+    #: Ordnungszahl: 6 -> reines C, 7 -> reines N, 6.5 -> halb C halb N, und
+    #: jedes Element bringt sein eigenes Kirkland-Potential mit.
+    #: Leer = altes Verhalten: ein Kernel (``element``), die Intensitaet
+    #: skaliert nur seine Amplitude.
+    elements: List[str] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Legacy-Definition (Gr / S1 / W / S2)
