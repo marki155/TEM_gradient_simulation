@@ -427,6 +427,12 @@ class DifferentiablePotential(nn.Module):
         intensities_ = nn.ParameterList(
             [torch.tensor(I, dtype=torch.float32, device=self.device) for I in init_intensities])
 
+        # Startwerte merken: die Intensitaeten wirken relativ dazu (siehe
+        # get_atom_weights), damit der Startzustand Gewicht = Occupancy bleibt.
+        for i, I in enumerate(init_intensities):
+            self.register_buffer(f"init_intensities_{i}",
+                                 torch.tensor(I, dtype=torch.float32, device=self.device))
+
         occupancies_ = nn.ParameterList([
             torch.ones(init_intensities[i].shape, dtype=torch.float32, device=self.device)
             * float(self.layers[i].init_occupancy)
@@ -438,10 +444,15 @@ class DifferentiablePotential(nn.Module):
     def get_init_positions(self, i):
         return getattr(self, f"init_positions_{i}")
 
+    def get_init_intensities(self, i):
+        return getattr(self, f"init_intensities_{i}")
+
     # -- Trainierbarkeit ------------------------------------------------------
     def apply_trainable_selection(self):
         tp = self.tunable_parameters
         tm = self.train_methods
+
+        self._warn_degenerate_weights()
 
         for i, layer in enumerate(self.layers):
             tp.intensities[i].requires_grad = tm.layer_enabled(layer.name, "intensities")
@@ -456,6 +467,27 @@ class DifferentiablePotential(nn.Module):
             strain_enabled = tm.group_enabled(group.name, "strain_field")
             for p in self.strain_fields[group.name].parameters():
                 p.requires_grad = strain_enabled
+
+    def _warn_degenerate_weights(self):
+        """Intensitaet und Occupancy multiplizieren dasselbe Gewicht.
+
+        Beide gleichzeitig freizugeben ist exakt entartet - sie koennen sich
+        beliebig gegeneinander verschieben, ohne dass sich das Bild aendert.
+        """
+
+        if not hasattr(self, "_degenerate_warned"):
+            self._degenerate_warned = set()
+
+        for layer in self.layers:
+            both = (self.train_methods.layer_enabled(layer.name, "intensities")
+                    and self.train_methods.layer_enabled(layer.name, "occupancies"))
+            if both and layer.name not in self._degenerate_warned:
+                print(f"[Warnung] Schicht {layer.name}: intensities UND occupancies sind "
+                      f"trainierbar - beide skalieren dasselbe Gewicht (I * occ) und sind "
+                      f"gegeneinander entartet. Besser nur eins davon freigeben.")
+                self._degenerate_warned.add(layer.name)
+            elif not both:
+                self._degenerate_warned.discard(layer.name)
 
     def zero_grads_for_frozen(self):
         tp = self.tunable_parameters
@@ -565,24 +597,38 @@ class DifferentiablePotential(nn.Module):
                         self.tunable_parameters.occupancies[l][i] = -100
 
     # -- Intensitaeten --------------------------------------------------------
-    def get_intensities(self):
+    def get_atom_weights(self):
+        """Gewicht je Atom fuer die Rasterung des Potentials.
+
+        ``Gewicht = (I / I_start) * sigmoid(occupancy)``
+
+        Die Elementstaerke steckt bereits im Kirkland-Kernel der Schicht,
+        deshalb wirkt die Intensitaet *relativ* zu ihrem Startwert (typisch der
+        Ordnungszahl): am Anfang ist der Quotient exakt 1, das Gewicht also
+        genau die Occupancy wie bisher.  Ein Wert von 6 -> 7 heisst dann
+        "streut wie Stickstoff statt Kohlenstoff" - so lassen sich Fremdatome
+        modellieren, ohne die Skalierung des ganzen Potentials zu verschieben.
+        """
+
         tp = self.tunable_parameters
         tm = self.train_methods
 
-        intensities = []
-        vacancies = []
+        weights = []
         for i, layer in enumerate(self.layers):
-            if tm.layer_enabled(layer.name, "intensities"):
-                intensities.append(tp.intensities[i])
-            else:
-                intensities.append(tp.intensities[i].detach())
+            occupancy = tp.occupancies[i].sigmoid()
+            if not tm.layer_enabled(layer.name, "occupancies"):
+                occupancy = occupancy.detach()
 
-            if tm.layer_enabled(layer.name, "occupancies"):
-                vacancies.append(tp.occupancies[i].sigmoid())
-            else:
-                vacancies.append(tp.occupancies[i].sigmoid().detach())
+            relative = tp.intensities[i] / self.get_init_intensities(i)
+            if not tm.layer_enabled(layer.name, "intensities"):
+                relative = relative.detach()
 
-        return [intensities[i] * vacancies[i] for i in range(self.N_l)]
+            weights.append(relative * occupancy)
+
+        return weights
+
+    #: alter Name
+    get_intensities = get_atom_weights
 
     def get_intensities_raw(self):
         return self.tunable_parameters.intensities
@@ -717,7 +763,7 @@ class DifferentiablePotential(nn.Module):
 
     def forward(self, _):
         positions = self.get_positions()
-        occupancies = self.tunable_parameters.occupancies
+        weights = self.get_atom_weights()
         contributes = self.active_layer_mask()
 
         potential_list = []
@@ -729,7 +775,7 @@ class DifferentiablePotential(nn.Module):
                 continue
 
             potential_i = self.projected_slice_potential_kirkland(
-                positions[i], occupancies[i].sigmoid(), atom_type=layer.element)
+                positions[i], weights[i], atom_type=layer.element)
             potential_i = potential_i * self.tunable_parameters.potential_factors[layer.group]
             potential_list.append(potential_i)
 

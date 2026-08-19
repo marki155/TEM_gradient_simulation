@@ -436,7 +436,8 @@ class NN_particles(nn.Module):
         self.tunable_parameters = ParticlesTunableParameters(
             potential_parameters=self.model[0].get_tunable_parameters(),
             ctf_parameters=self.model[2].get_tunable_parameters(),
-            normalisation_parameters = nn.Parameter(torch.tensor([0.0,0.0]), requires_grad=True)
+            normalisation_parameters = nn.Parameter(
+                torch.tensor([0.0, 0.0], device=self.device), requires_grad=True)
         )
 
         for name, value in vars(self.tunable_parameters).items():

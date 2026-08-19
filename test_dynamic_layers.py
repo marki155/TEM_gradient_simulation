@@ -33,6 +33,10 @@ from ctf import (
 from potential import is_legacy_potential_parameters, migrate_serialized_potential_parameters
 from training_parameter import TrainMethod, load_train_method
 
+#: potential.py setzt beim Import das Default-Device; hier dasselbe benutzen,
+#: sonst liegen Modell und Testdaten auf verschiedenen Geraeten
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 ABERRATIONS = {"C10": -13., 'C12': 1.0, "phi12": 0., 'C23': 2., 'phi23': 0.,
                'C21': 2., 'phi21': 0., "C30": 4., 'C34': .02, 'phi34': 0.,
                'C45': .05, 'phi45': 0.}
@@ -55,7 +59,7 @@ def make_config(layers, groups, shape=(96, 96), n_atoms=40):
 def build_model(config, train_method):
     model = NN_particles(config=config, pixel_size_nm=config.pixel_size_nm,
                          voltage_kV=config.voltage_kV, train_method=train_method,
-                         device="cpu", train_methods=train_method)
+                         device=DEVICE, train_methods=train_method)
     model.build_multislice()
     return model
 
@@ -140,6 +144,40 @@ def test_multiple_groups_and_isolation():
                                 "train_ctf_aberrations",
                                 "train_normalisation_parameters"]), with_grad
     print(f"  5 Schichten / 3 Gruppen: loss={loss:.4f}, Gradienten fuer {with_grad}")
+
+
+def test_atom_weights_use_intensities():
+    """Gewicht = (I / I_start) * sigmoid(occ): Start unveraendert, I wirkt."""
+
+    layers, groups = graphene_only(max_shift=20.0, max_rotation=0.35)
+    config = make_config(layers, groups)
+    tm = TrainMethod().ensure_for_config(config)
+
+    model = build_model(config, tm)
+    pot_layer = model.model[0]
+
+    # Startzustand: relative Intensitaet ist exakt 1, Gewicht also die Occupancy
+    weights = pot_layer.get_atom_weights()[0]
+    occupancy = pot_layer.tunable_parameters.occupancies[0].sigmoid()
+    assert torch.allclose(weights, occupancy), "Startgewicht muss die Occupancy sein"
+
+    potential_before = pot_layer.get_potential_images()[0].copy()
+
+    # doppelte Intensitaet -> doppeltes Potential
+    with torch.no_grad():
+        pot_layer.tunable_parameters.intensities[0].mul_(2.0)
+    potential_after = pot_layer.get_potential_images()[0]
+    ratio = np.abs(potential_after).max() / max(np.abs(potential_before).max(), 1e-12)
+    assert abs(ratio - 2.0) < 1e-3, ratio
+    with torch.no_grad():
+        pot_layer.tunable_parameters.intensities[0].div_(2.0)
+
+    # freigegeben -> Gradient
+    tm.layer("Gr").intensities.enabled = True
+    pot_layer.apply_trainable_selection()
+    _loss, with_grad = step_and_report(model, tm)
+    assert "layers.Gr.intensities" in with_grad, with_grad
+    print("  Intensitaeten wirken aufs Potential und bekommen Gradienten")
 
 
 def test_isolated_group_skips_empty_slices():
@@ -306,6 +344,8 @@ if __name__ == "__main__":
     test_single_graphene_layer()
     print("test_multiple_groups_and_isolation")
     test_multiple_groups_and_isolation()
+    print("test_atom_weights_use_intensities")
+    test_atom_weights_use_intensities()
     print("test_isolated_group_skips_empty_slices")
     test_isolated_group_skips_empty_slices()
     print("test_ctf_aberration_switches")

@@ -267,7 +267,9 @@ def zernike_phase(alpha, phi, coeffs, device='cpu', basis=None):
     if basis is None:
         basis = aberration_basis_maps(alpha, phi, coeffs.keys())
 
-    phase = torch.zeros_like(alpha, dtype=torch.float32, device=device)
+    # Device von alpha uebernehmen - der device-Parameter ist historisch und
+    # stand per Default auf "cpu", was auf der GPU zu Mischbetrieb gefuehrt hat
+    phase = torch.zeros_like(alpha, dtype=torch.float32)
 
     for magnitude, (_power, _prefactor, _scale, m) in ABERRATION_TERMS.items():
         if m == 0:
@@ -312,14 +314,14 @@ DEFAULT_ABERRATIONS = {
 }
 
 
-def make_param_dict(a=None, parametrization=PARAMETRIZATION_CARTESIAN):
+def make_param_dict(a=None, parametrization=PARAMETRIZATION_CARTESIAN, device=None):
     if a is None:
         a = DEFAULT_ABERRATIONS
 
     a = convert_aberrations(a, parametrization)
 
     return nn.ParameterDict({
-        k: nn.Parameter(torch.tensor(float(v), dtype=torch.float32))
+        k: nn.Parameter(torch.tensor(float(v), dtype=torch.float32, device=device))
         for k, v in a.items()
     })
 
@@ -372,12 +374,17 @@ class CTFLayer(nn.Module):
         self.train_method = train_method
         self.parametrization = getattr(config, "ctf_parametrization", PARAMETRIZATION_CARTESIAN)
 
+        # device explizit mitgeben: potential.py setzt beim Import ein globales
+        # Default-Device, das nicht zwingend das dieses Layers ist
         self.tunable_parameters = TunableCTFParameters(
-            amp_contrast=nn.Parameter(torch.tensor(config.init_amp_contrast, dtype=torch.float32)),
-            deltaE = nn.Parameter(torch.tensor(self.envelope_params["deltaE"], dtype=torch.float32)),
-            Cc_um = nn.Parameter(torch.tensor(self.envelope_params["Cc_um"], dtype=torch.float32)),
-            aberrations = nn.ParameterDict(make_param_dict(
-                config.init_aberrations, self.parametrization))
+            amp_contrast=nn.Parameter(torch.tensor(config.init_amp_contrast,
+                                                   dtype=torch.float32, device=device)),
+            deltaE=nn.Parameter(torch.tensor(self.envelope_params["deltaE"],
+                                             dtype=torch.float32, device=device)),
+            Cc_um=nn.Parameter(torch.tensor(self.envelope_params["Cc_um"],
+                                            dtype=torch.float32, device=device)),
+            aberrations=nn.ParameterDict(make_param_dict(
+                config.init_aberrations, self.parametrization, device=device)),
         )
 
         pad = config.padding
