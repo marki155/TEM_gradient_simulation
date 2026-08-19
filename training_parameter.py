@@ -147,11 +147,8 @@ class TrainMethod:
     layers: Dict[str, LayerTrainParams] = field(default_factory=dict)
 
     train_amplitude_contrast: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
+    #: Aberrationen inkl. ihrer Azimutwinkel (C12 und phi12 gehoeren zusammen)
     train_ctf_aberrations: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-5))
-    #: Azimutwinkel der Aberrationen (phi12, phi21, ...). Unterschalter von
-    #: train_ctf_aberrations, aber mit eigener Lernrate - die Winkel stehen in
-    #: rad, die Betraege in nm bzw. um.
-    train_ctf_angles: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-4))
     train_env_parameters: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
     train_normalisation_parameters: TrainParam = field(default_factory=lambda: TrainParam(True, 1e-5))
 

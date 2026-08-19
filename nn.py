@@ -13,7 +13,7 @@ from loss_functions import *
 from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
 
-from ctf import CTFLayer, TunableCTFParameters, is_angle_key
+from ctf import CTFLayer, TunableCTFParameters
 
 from layers import (
     LayerConfig,
@@ -98,10 +98,7 @@ def get_trainmethod_param_registry(params: ParticlesTunableParameters,
     registry = {
         # CTF
         "train_amplitude_contrast": lambda: [ctf.amp_contrast],
-        "train_ctf_aberrations": lambda: [v for k, v in ctf.aberrations.items()
-                                          if not is_angle_key(k)],
-        "train_ctf_angles": lambda: [v for k, v in ctf.aberrations.items()
-                                     if is_angle_key(k)],
+        "train_ctf_aberrations": lambda: list(ctf.aberrations.values()),
         "train_env_parameters": lambda: [ctf.deltaE, ctf.Cc_um],
 
         # Normalisation

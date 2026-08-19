@@ -235,10 +235,9 @@ class CTFLayer(nn.Module):
     def aberration_is_trainable(self, key: str) -> bool:
         """Wird dieser Aberrations-Parameter gerade mitoptimiert?
 
-        Betraege (``C..``) haengen an ``train_ctf_aberrations``, die Winkel
-        (``phi..``) zusaetzlich an ``train_ctf_angles``.  Welche Ordnungen
-        ueberhaupt freigegeben sind, steht in ``train_aberrations``; ein Winkel
-        folgt dabei seinem Betrag (``phi12`` <- ``C12``).
+        Betrag und Azimutwinkel einer Ordnung gehoeren zusammen: ``phi12``
+        folgt der Freigabe von ``C12`` in ``train_aberrations``, das Ganze
+        haengt am Schalter ``train_ctf_aberrations``.
         """
 
         tm = self.train_method
@@ -247,11 +246,6 @@ class CTFLayer(nn.Module):
 
         if not tm.train_ctf_aberrations.enabled:
             return False
-
-        if is_angle_key(key):
-            angles = getattr(tm, "train_ctf_angles", None)
-            if angles is None or not angles.enabled:
-                return False
 
         return bool(tm.train_aberrations.get(magnitude_key(key), False))
 

@@ -132,13 +132,13 @@ def test_multiple_groups_and_isolation():
     pot_layer.apply_trainable_selection()
     loss, with_grad = step_and_report(model, tm)
     assert with_grad == sorted(["groups.Gr2.shift", "layers.S1.occupancies",
-                                "train_ctf_aberrations", "train_ctf_angles",
+                                "train_ctf_aberrations",
                                 "train_normalisation_parameters"]), with_grad
     print(f"  5 Schichten / 3 Gruppen: loss={loss:.4f}, Gradienten fuer {with_grad}")
 
 
 def test_ctf_aberration_switches():
-    """CTF: Betraege und Winkel folgen ihren Schaltern, Startwerte aus der Config."""
+    """CTF: Betraege UND Winkel werden mitoptimiert, Startwerte aus der Config."""
 
     aberrations = dict(ABERRATIONS)
     aberrations.update({"phi12": 0.3, "phi21": 0.1, "phi23": 0.2, "phi34": 0.4, "phi45": 0.5})
@@ -150,7 +150,6 @@ def test_ctf_aberration_switches():
 
     tm = TrainMethod().ensure_for_config(config)
     tm.train_ctf_aberrations.enabled = True
-    tm.train_ctf_angles.enabled = True
 
     model = build_model(config, tm)
     ctf = model.model[2]
@@ -160,29 +159,24 @@ def test_ctf_aberration_switches():
         assert abs(float(ctf.tunable_parameters.aberrations[key]) - value) < 1e-6, key
     assert abs(float(ctf.tunable_parameters.amp_contrast) - 0.1) < 1e-6
 
-    _loss, with_grad = step_and_report(model, tm)
-    assert "train_ctf_angles" in with_grad, with_grad
-    assert "train_ctf_aberrations" in with_grad, with_grad
+    step_and_report(model, tm)
+    angles = {k: v for k, v in ctf.tunable_parameters.aberrations.items() if k.startswith("phi")}
+    assert angles, "Testkonfiguration ohne Winkel"
+    for key, param in angles.items():
+        assert param.grad is not None and float(param.grad) != 0.0, f"{key} bekommt keinen Gradienten"
 
-    # Winkel abschalten -> nur noch die Betraege bekommen Gradienten
-    tm.train_ctf_angles.enabled = False
-    for p in ctf.tunable_parameters.aberrations.values():
-        p.grad = None
-    _loss, with_grad = step_and_report(model, tm)
-    assert "train_ctf_angles" not in with_grad, with_grad
-    assert "train_ctf_aberrations" in with_grad, with_grad
-
-    # einzelne Ordnung abschalten (gilt fuer C12 und phi12 zusammen)
+    # einzelne Ordnung abschalten -> Betrag und Winkel zusammen
     tm.train_aberrations["C12"] = False
     assert not ctf.aberration_is_trainable("C12")
     assert not ctf.aberration_is_trainable("phi12")
+    assert ctf.aberration_is_trainable("phi23")
     tm.train_aberrations["C12"] = True
 
-    # alles aus -> auch die Winkel sind aus
+    # CTF komplett aus
     tm.train_ctf_aberrations.enabled = False
-    tm.train_ctf_angles.enabled = True
+    assert not ctf.aberration_is_trainable("C10")
     assert not ctf.aberration_is_trainable("phi12")
-    print("  CTF-Winkel schaltbar, Startwerte aus der Config uebernommen")
+    print("  CTF: Winkel bekommen Gradienten, Startwerte aus der Config uebernommen")
 
 
 def test_legacy_migration(dataset="platelet_11"):
