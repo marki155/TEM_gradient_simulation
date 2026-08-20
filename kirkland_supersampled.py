@@ -39,11 +39,16 @@ def _evaluate_kirkland_projected_potential_from_radius(R_A, atom_type: str):
     p = _get_kirkland_projected_parameters(atom_type)
     a, b, c, d = p[0], p[1], p[2], p[3]
 
-    V = np.zeros_like(R_A, dtype=np.float64)
+    # torch.special.modified_bessel_k0 statt scipy.special.k0: bitgleiches
+    # Ergebnis, aber auf einem Megapixel-Gitter rund 14x schneller
+    # device explizit: potential.py setzt global ein Default-Device, und der
+    # Kernel wird hier auf der CPU in numpy gebaut
+    radius = torch.as_tensor(np.asarray(R_A), dtype=torch.float64, device="cpu")
+    V = torch.zeros_like(radius)
     for j in range(3):
-        V += 2.0 * a[j] * k0(b[j] * R_A)
-        V += math.sqrt(math.pi / d[j]) * c[j] * np.exp(-d[j] * R_A**2)
-    return V
+        V += 2.0 * a[j] * torch.special.modified_bessel_k0(b[j] * radius)
+        V += math.sqrt(math.pi / d[j]) * c[j] * torch.exp(-d[j] * radius ** 2)
+    return V.numpy()
 
 
 def _supersampled_pixel_average_kirkland(
@@ -139,8 +144,17 @@ def projected_atomic_potential_kernel_kirkland(
         x_centers_A = ((np.arange(H, dtype=np.float64) - H // 2) * pixel_size_A)
         y_centers_A = ((np.arange(W, dtype=np.float64) - W // 2) * pixel_size_A)
 
-        for i, xc_A in enumerate(x_centers_A):
-            for j, yc_A in enumerate(y_centers_A):
+        # nur das Fenster um das Zentrum ablaufen - der Radius ist ein paar
+        # Pixel gross, ueber das ganze Gitter zu iterieren kostete bei
+        # 2213x2156 rund 5 Sekunden pro Element
+        reach = int(math.ceil(supersample_radius_px)) + 1
+        i_range = range(max(0, H // 2 - reach), min(H, H // 2 + reach + 1))
+        j_range = range(max(0, W // 2 - reach), min(W, W // 2 + reach + 1))
+
+        for i in i_range:
+            xc_A = x_centers_A[i]
+            for j in j_range:
+                yc_A = y_centers_A[j]
                 if math.hypot(xc_A, yc_A) <= radius_A:
                     V[i, j] = _supersampled_pixel_average_kirkland(
                         xc_A=xc_A,
