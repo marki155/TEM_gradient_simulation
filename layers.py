@@ -186,6 +186,28 @@ def legacy_layers_and_groups(
 # Helfer
 # ---------------------------------------------------------------------------
 
+#: Felder, die frueher anders hiessen - configs von vor der Umbenennung sollen
+#: weiter laden. Schluessel ist der Klassenname.
+RENAMED_FIELDS = {
+    "LayerGroupConfig": {"init_potential_factor": "init_contrast_factor"},
+}
+
+
+def _apply_renames(data: dict, cls) -> dict:
+    renames = RENAMED_FIELDS.get(cls.__name__, {})
+    hits = [old for old in renames if old in data]
+    if not hits:
+        return data
+
+    data = dict(data)
+    for old in hits:
+        new = renames[old]
+        data.setdefault(new, data.pop(old))
+    print(f"[config] {cls.__name__}: umbenannte Felder uebernommen "
+          f"({', '.join(f'{o} -> {renames[o]}' for o in hits)})")
+    return data
+
+
 def _as_dataclass(value, cls):
     if isinstance(value, cls):
         return value
@@ -195,6 +217,7 @@ def _as_dataclass(value, cls):
         # Serialisierte Form aus main.serialize() ({"__type__": "dataclass", ...})
         if value.get("__type__") == "dataclass":
             value = value["data"]
+        value = _apply_renames(value, cls)
         known = {f for f in cls.__dataclass_fields__}
         unknown = set(value) - known
         if unknown:

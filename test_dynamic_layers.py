@@ -461,6 +461,30 @@ def test_spatial_coherence_envelope():
           f"5 mrad -> {float(strong.min()):.4f}")
 
 
+def test_renamed_config_fields():
+    """Configs von vor der Umbenennung muessen weiter laden."""
+
+    from layers import coerce_groups
+
+    stored = {"name": "Gr", "control_points": [10, 10], "max_shift": 49.3,
+              "max_rotation": 0.349, "init_shift": [-9.5, -11.0], "init_rotation": 0.025,
+              "init_scale": [1.12, 1.14], "init_potential_factor": 0.7,   # alter Feldname
+              "mask_file": None, "target_file": None, "isolate_when_active": True}
+
+    group = coerce_groups([stored])[0]
+    assert abs(group.init_contrast_factor - 0.7) < 1e-12, group.init_contrast_factor
+
+    # echter Tippfehler soll weiterhin auffliegen
+    try:
+        coerce_groups([{**stored, "init_kontrast": 1.0}])
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("unbekannte Felder muessen weiterhin einen Fehler geben")
+
+    print("  alter Feldname init_potential_factor wird uebernommen")
+
+
 def test_legacy_migration(dataset="platelet_11"):
     config_file = os.path.join(dataset, "config", "config.json")
     if not os.path.exists(config_file):
@@ -516,6 +540,8 @@ if __name__ == "__main__":
     test_contrast_factor()
     print("test_spatial_coherence_envelope")
     test_spatial_coherence_envelope()
+    print("test_renamed_config_fields")
+    test_renamed_config_fields()
     print("test_legacy_migration")
     test_legacy_migration()
     print("\nalle Tests durch")
