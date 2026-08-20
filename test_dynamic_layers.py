@@ -26,6 +26,7 @@ multislice.CHECK_PHASE = False
 from layers import LayerConfig, LayerGroupConfig, graphene_only
 from nn import CONFIG_CLASS_REGISTRY, NN_particles, ParticlesConfig
 from ctf import (
+    build_ctf_envelope_on_k,
     cartesian_to_polar_aberrations,
     polar_to_cartesian_aberrations,
     zernike_phase,
@@ -395,6 +396,71 @@ def test_ctf_parametrizations_are_equivalent():
     print(f"  polar == kartesisch (max. Phasendifferenz {difference:.2e}), beide trainierbar")
 
 
+def test_contrast_factor():
+    """Der Kontrastfaktor ist ein eigener, trainierbarer Gruppenparameter."""
+
+    layers, groups = graphene_only(max_shift=20.0, max_rotation=0.35)
+    config = make_config(layers, groups)
+    tm = TrainMethod().ensure_for_config(config)
+
+    model = build_model(config, tm)
+    pot_layer = model.model[0]
+    contrast = pot_layer.tunable_parameters.contrast_factors["Gr"]
+
+    assert abs(float(contrast) - 1.0) < 1e-9, "Start ist das physikalische Potential"
+
+    before = np.abs(pot_layer.get_potential_images()[0]).max()
+    with torch.no_grad():
+        contrast.fill_(0.25)
+    after = np.abs(pot_layer.get_potential_images()[0]).max()
+    assert abs(after / before - 0.25) < 1e-3, (before, after)
+    with torch.no_grad():
+        contrast.fill_(1.0)
+
+    tm.group("Gr").contrast.enabled = True
+    pot_layer.apply_trainable_selection()
+    _loss, with_grad = step_and_report(model, tm)
+    assert "groups.Gr.contrast" in with_grad, with_grad
+
+    print("  Kontrastfaktor: skaliert das Potential, eigener Trainingsschalter")
+
+
+def test_spatial_coherence_envelope():
+    """Raeumliche Kohaerenz daempft ueber den Gradienten der Aberrationsfunktion."""
+
+    lam = 0.00418
+    k = torch.linspace(0.01, 12.0, 200).reshape(-1, 1)
+    zeros = torch.zeros_like(k)
+    defocus = torch.tensor(-13.0)
+    cs_nm = torch.tensor(4000.0)
+
+    def envelope(alpha_mrad):
+        params = {"source_size": alpha_mrad * 1e-3,
+                  "use_chromatic": False, "use_instability": False}
+        return build_ctf_envelope_on_k(k, zeros, 80, lam, params, cache={},
+                                       defocus_nm=defocus, cs_nm=cs_nm)
+
+    # kleine Quelle -> praktisch keine Daempfung
+    assert float(envelope(0.1).min()) > 0.99
+
+    # grosse Quelle -> deutliche Daempfung bei hohen Frequenzen
+    strong = envelope(5.0)
+    assert float(strong.min()) < 0.5, float(strong.min())
+
+    # ohne Quelle gar keine
+    assert torch.allclose(envelope(0.0), torch.ones_like(k))
+
+    # und sie haengt am Defokus (frueher gar nicht)
+    other = build_ctf_envelope_on_k(
+        k, zeros, 80, lam, {"source_size": 5e-3, "use_chromatic": False,
+                            "use_instability": False},
+        cache={}, defocus_nm=torch.tensor(-60.0), cs_nm=cs_nm)
+    assert float(other.min()) < float(strong.min()), "mehr Defokus muss staerker daempfen"
+
+    print(f"  Kohaerenz-Envelope: 0.1 mrad -> {float(envelope(0.1).min()):.4f}, "
+          f"5 mrad -> {float(strong.min()):.4f}")
+
+
 def test_legacy_migration(dataset="platelet_11"):
     config_file = os.path.join(dataset, "config", "config.json")
     if not os.path.exists(config_file):
@@ -446,6 +512,10 @@ if __name__ == "__main__":
     test_ctf_aberration_switches()
     print("test_ctf_parametrizations_are_equivalent")
     test_ctf_parametrizations_are_equivalent()
+    print("test_contrast_factor")
+    test_contrast_factor()
+    print("test_spatial_coherence_envelope")
+    test_spatial_coherence_envelope()
     print("test_legacy_migration")
     test_legacy_migration()
     print("\nalle Tests durch")

@@ -37,6 +37,9 @@ class GroupTrainParams:
     rotation: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-5))
     scale: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-4))
     strain_field: TrainParam = field(default_factory=lambda: TrainParam(False, 0.1))
+    #: empirischer Kontrastfaktor der Gruppe (Stobbs-Faktor). Skaliert dasselbe
+    #: wie die Occupancy - immer nur eins von beidem freigeben.
+    contrast: TrainParam = field(default_factory=lambda: TrainParam(False, 1e-3))
 
 
 @dataclass

@@ -17,13 +17,22 @@ def scherzer_defocus(C30_um, lam_nm):
     return - 1.2 * math.sqrt(C30_nm * lam_nm)
 
 def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, Cc_um=None,
-                            cache=None):
+                            cache=None, defocus_nm=None, cs_nm=None):
     """Gauss-Envelopes im k-Raum.
 
-    ``cache``: optionales dict. Alles was nur am Gitter haengt (k, k2, die
-    raeumliche und die Instabilitaets-Envelope) wird dort abgelegt und beim
-    naechsten Aufruf wiederverwendet - nur die chromatische Envelope haengt an
-    den trainierbaren deltaE/Cc und wird jedes Mal neu berechnet.
+    ``cache``: optionales dict. Alles was nur am Gitter haengt (k, k2, k3, die
+    Instabilitaets-Envelope) wird dort abgelegt und beim naechsten Aufruf
+    wiederverwendet.  Die chromatische Envelope haengt an deltaE/Cc, die
+    raeumliche an Defokus und Cs - beide werden jedes Mal neu berechnet.
+
+    ``defocus_nm`` / ``cs_nm``: fuer die raeumliche Kohaerenz. Sie daempft ueber
+    den Gradienten der Aberrationsfunktion,
+
+        E_s(k) = exp[ -(pi*alpha/lam)^2 * (Cs*lam^3*k^3 + df*lam*k)^2 ]
+
+    mit alpha als Quell-Halbwinkel in rad.  (Frueher stand hier
+    exp(-(pi*alpha*k)^2), was alpha wie eine Laenge in nm behandelt hat - bei
+    0.1 mrad war die Daempfung damit exakt 1, die Envelope also wirkungslos.)
     """
 
     if params is None:
@@ -39,12 +48,22 @@ def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, C
         cache["k2"], cache["k"] = k2, k
     eV = voltage_kV * 1e3
 
-    # Spatial (source size / convergence)  [rad]
-    E_spatial = cache.get("E_spatial", 1.0)
-    if "E_spatial" not in cache and params.get('use_spatial', True):
-        alpha = float(params.get('source_size', 0.0))
-        E_spatial = torch.exp(- (math.pi * alpha * k)**2)
-        cache["E_spatial"] = E_spatial
+    # Spatial (source size / convergence), alpha als Halbwinkel in rad
+    E_spatial = 1.0
+    alpha = float(params.get('source_size', 0.0)) if params.get('use_spatial', True) else 0.0
+    if alpha > 0:
+        k3 = cache.get("k3")
+        if k3 is None:
+            k3 = k ** 3
+            cache["k3"] = k3
+
+        gradient = torch.zeros_like(k)
+        if defocus_nm is not None:
+            gradient = gradient + defocus_nm * lam * k
+        if cs_nm is not None:
+            gradient = gradient + cs_nm * lam ** 3 * k3
+
+        E_spatial = torch.exp(-((math.pi * alpha / lam) ** 2) * gradient ** 2)
 
     # Chromatic (temporal) via defocus spread Δf = Cc * ΔE / E0
     E_chrom = 1.0
@@ -81,8 +100,11 @@ def build_ctf_envelope_on_k(kx, ky, voltage_kV, lam, params=None, deltaE=None, C
             E_det = torch.ones_like(k)
         cache["E_det"] = E_det
 
-    env = torch.clamp(E_spatial * E_chrom * E_inst * E_det, 0.0, 1.0)
-    return env
+    env = E_spatial * E_chrom * E_inst * E_det
+    if not torch.is_tensor(env):
+        # alle Envelopes abgeschaltet -> konstante Eins in Gitterform
+        env = torch.full_like(k, float(env))
+    return torch.clamp(env, 0.0, 1.0)
 
 
 
@@ -512,8 +534,19 @@ class CTFLayer(nn.Module):
         # zentrieren
         env = None
         if self.envelope_params is not None:
+            # die raeumliche Kohaerenz haengt an Defokus und Cs (in nm)
+            defocus_nm = aberrations.get("C10")
+            if defocus_nm is not None:
+                low, high = ABERRATION_CLAMPS["C10"]
+                defocus_nm = torch.clamp(defocus_nm, min=low, max=high)
+            cs_nm = aberrations.get("C30")
+            if cs_nm is not None:
+                low, high = ABERRATION_CLAMPS["C30"]
+                cs_nm = torch.clamp(cs_nm, min=low, max=high) * ABERRATION_TERMS["C30"][2]
+
             env = build_ctf_envelope_on_k(kx, ky, self.voltage_kV, self.lam, self.envelope_params,
-                                          deltaE=deltaE, Cc_um=Cc_um, cache=envelope_cache)
+                                          deltaE=deltaE, Cc_um=Cc_um, cache=envelope_cache,
+                                          defocus_nm=defocus_nm, cs_nm=cs_nm)
             ctf = ctf * env.to(ctf.device).type(ctf.dtype)
         # ctf = torch.fft.fftshift(ctf)
         return ctf, env

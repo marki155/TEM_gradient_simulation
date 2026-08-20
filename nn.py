@@ -109,6 +109,7 @@ def get_trainmethod_param_registry(params: ParticlesTunableParameters,
         registry[f"groups.{gname}.shift"] = lambda g=gname: [pot.shifts[g]]
         registry[f"groups.{gname}.rotation"] = lambda g=gname: [pot.rotations[g]]
         registry[f"groups.{gname}.scale"] = lambda g=gname: [pot.scales[g]]
+        registry[f"groups.{gname}.contrast"] = lambda g=gname: [pot.contrast_factors[g]]
         registry[f"groups.{gname}.strain_field"] = (
             lambda g=gname: _collect_strain_params(pot.strain_fields[g]))
 

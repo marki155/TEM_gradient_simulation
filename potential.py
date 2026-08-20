@@ -198,7 +198,7 @@ class TunablePotentialParameters:
     Pro Schicht (Reihenfolge = ``config.layers``): ``position_shifts``,
     ``intensities``, ``occupancies``.
     Pro Gruppe (Schluessel = Gruppenname): ``shifts``, ``rotations``,
-    ``scales``, ``potential_factors``, ``strain_fields``.
+    ``scales``, ``contrast_factors``, ``strain_fields``.
     """
 
     strain_fields: Dict[str, StrainTunableParameters]
@@ -210,7 +210,8 @@ class TunablePotentialParameters:
     shifts: nn.ParameterDict
     rotations: nn.ParameterDict
     scales: nn.ParameterDict
-    potential_factors: nn.ParameterDict
+    #: empirischer Kontrastfaktor je Gruppe (Stobbs-Faktor), siehe LayerGroupConfig
+    contrast_factors: nn.ParameterDict
 
 
 # ---------------------------------------------------------------------------
@@ -225,13 +226,16 @@ LEGACY_PARAMETER_FIELDS = {
     "scale_WS2": ("scales", "WS2"),
     "rotation_WS2": ("rotations", "WS2"),
     "shift_WS2": ("shifts", "WS2"),
-    "graphene_potential_factor": ("potential_factors", "Gr"),
-    "ws2_potential_factor": ("potential_factors", "WS2"),
+    "graphene_potential_factor": ("contrast_factors", "Gr"),
+    "ws2_potential_factor": ("contrast_factors", "WS2"),
 }
 
 
 def is_legacy_potential_parameters(source) -> bool:
-    return isinstance(source, dict) and any(k in source for k in LEGACY_PARAMETER_FIELDS)
+    if not isinstance(source, dict):
+        return False
+    # "potential_factors" hiess der Kontrastfaktor in einer Zwischenversion
+    return any(k in source for k in LEGACY_PARAMETER_FIELDS) or "potential_factors" in source
 
 
 def migrate_serialized_potential_parameters(source, config):
@@ -249,8 +253,14 @@ def migrate_serialized_potential_parameters(source, config):
     layer_names_new = [l.name for l in config.layers]
 
     out = dict(source)
+
+    # Zwischenversion: der Kontrastfaktor hiess potential_factors
+    if "potential_factors" in out:
+        renamed = out.pop("potential_factors")
+        out.setdefault("contrast_factors", renamed)
+
     buckets: Dict[str, Dict[str, object]] = {
-        "scales": {}, "rotations": {}, "shifts": {}, "potential_factors": {}}
+        "scales": {}, "rotations": {}, "shifts": {}, "contrast_factors": {}}
 
     for old_key, (bucket, gname) in LEGACY_PARAMETER_FIELDS.items():
         if old_key in out:
@@ -352,7 +362,7 @@ class DifferentiablePotential(nn.Module):
             shifts=shifts_,
             rotations=rotations_,
             scales=scales_,
-            potential_factors=factors_,
+            contrast_factors=factors_,
         )
 
         # Elemente je Schicht: entweder genau eins oder eine Mischreihe
@@ -496,7 +506,7 @@ class DifferentiablePotential(nn.Module):
             scales[group.name] = nn.Parameter(
                 torch.tensor(list(group.init_scale), dtype=torch.float32, device=self.device))
             factors[group.name] = nn.Parameter(
-                torch.tensor(float(group.init_potential_factor), dtype=torch.float32, device=self.device))
+                torch.tensor(float(group.init_contrast_factor), dtype=torch.float32, device=self.device))
 
         return shifts, rotations, scales, factors
 
@@ -557,6 +567,7 @@ class DifferentiablePotential(nn.Module):
             tp.shifts[group.name].requires_grad = tm.group_enabled(group.name, "shift")
             tp.rotations[group.name].requires_grad = tm.group_enabled(group.name, "rotation")
             tp.scales[group.name].requires_grad = tm.group_enabled(group.name, "scale")
+            tp.contrast_factors[group.name].requires_grad = tm.group_enabled(group.name, "contrast")
 
             strain_enabled = tm.group_enabled(group.name, "strain_field")
             for p in self.strain_fields[group.name].parameters():
@@ -572,15 +583,26 @@ class DifferentiablePotential(nn.Module):
         if not hasattr(self, "_degenerate_warned"):
             self._degenerate_warned = set()
 
+        tm = self.train_methods
         for layer in self.layers:
-            both = (self.train_methods.layer_enabled(layer.name, "intensities")
-                    and self.train_methods.layer_enabled(layer.name, "occupancies"))
-            if both and layer.name not in self._degenerate_warned:
-                print(f"[Warnung] Schicht {layer.name}: intensities UND occupancies sind "
-                      f"trainierbar - beide skalieren dasselbe Gewicht (I * occ) und sind "
-                      f"gegeneinander entartet. Besser nur eins davon freigeben.")
+            if self.mixes_elements(self.layer_names.index(layer.name)):
+                # dort waehlt die Intensitaet das Element, sie skaliert nicht
+                conflicts = []
+            else:
+                conflicts = [("intensities", "occupancies")] if (
+                    tm.layer_enabled(layer.name, "intensities")
+                    and tm.layer_enabled(layer.name, "occupancies")) else []
+
+            if tm.group_enabled(layer.group, "contrast") and tm.layer_enabled(layer.name, "occupancies"):
+                conflicts.append((f"Gruppe {layer.group}: contrast", "occupancies"))
+
+            if conflicts and layer.name not in self._degenerate_warned:
+                for a, b in conflicts:
+                    print(f"[Warnung] Schicht {layer.name}: {a} UND {b} sind gleichzeitig "
+                          f"trainierbar - beide skalieren dasselbe Potential und sind "
+                          f"gegeneinander entartet. Besser nur eins davon freigeben.")
                 self._degenerate_warned.add(layer.name)
-            elif not both:
+            elif not conflicts:
                 self._degenerate_warned.discard(layer.name)
 
     def zero_grads_for_frozen(self):
@@ -602,6 +624,8 @@ class DifferentiablePotential(nn.Module):
                 tp.rotations[group.name].grad = None
             if not tm.group_enabled(group.name, "scale"):
                 tp.scales[group.name].grad = None
+            if not tm.group_enabled(group.name, "contrast"):
+                tp.contrast_factors[group.name].grad = None
             if not tm.group_enabled(group.name, "strain_field"):
                 for p in self.strain_fields[group.name].parameters():
                     p.grad = None
@@ -918,7 +942,10 @@ class DifferentiablePotential(nn.Module):
                 continue
 
             potential_i = self.layer_potential(i, positions[i], weights[i])
-            potential_i = potential_i * self.tunable_parameters.potential_factors[layer.group]
+            contrast = self.tunable_parameters.contrast_factors[layer.group]
+            if not self.train_methods.group_enabled(layer.group, "contrast"):
+                contrast = contrast.detach()
+            potential_i = potential_i * contrast
             potential_list.append(potential_i)
 
         return potential_list, self.aux_loss()

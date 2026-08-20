@@ -43,7 +43,12 @@ class LayerGroupConfig:
     init_shift: List[float] = field(default_factory=lambda: [0.0, 0.0])
     init_rotation: float = 0.0
     init_scale: List[float] = field(default_factory=lambda: [1.0, 1.0])
-    init_potential_factor: float = 1.0
+    #: Empirischer Kontrastfaktor dieser Gruppe (Stobbs-Faktor): gemessene
+    #: HRTEM-Bilder zeigen systematisch weniger Kontrast als die Simulation.
+    #: 1.0 = physikalisches Potential unveraendert. Das ist KEINE Korrektur des
+    #: Atompotentials - das ist korrekt - sondern ein dokumentierter Fudge, der
+    #: die Diskrepanz sichtbar macht statt sie in der Occupancy zu verstecken.
+    init_contrast_factor: float = 1.0
 
     # Datenquellen fuer diese Gruppe (Pfade relativ zum Datensatz-Ordner)
     mask_file: Optional[str] = None
