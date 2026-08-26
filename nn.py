@@ -14,6 +14,7 @@ from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
 
 from ctf import CTFLayer, TunableCTFParameters
+from stem import DifferentiableHAADF
 
 from layers import (
     LayerConfig,
@@ -266,6 +267,16 @@ class ParticlesConfig:
     #: "+z" = Strahl laeuft von der kleinsten zur groessten z-Position
     beam_direction: str = "+z"
 
+    # --- Abbildung -----------------------------------------------------------
+    #: "tem" = Multislice + CTF (wie bisher), "stem_haadf" = Sonde x Objekt
+    imaging_mode: str = "tem"
+    #: Konvergenzwinkel der Sonde (Halbwinkel, mrad)
+    stem_convergence_mrad: float = 25.0
+    #: innerer und aeusserer Detektorwinkel des HAADF-Rings (mrad)
+    stem_detector_mrad: Tuple[float, float] = (60.0, 200.0)
+    #: endliche Quellgroesse, Gauss-Sigma in Angstroem (verschmiert die Sonde)
+    stem_source_size_A: float = 0.5
+
     #: Schreibweise der Aberrationen: "cartesian" (a/b, besser zu optimieren)
     #: oder "polar" (C/phi wie frueher). Die Physik ist identisch.
     ctf_parametrization: str = "cartesian"
@@ -414,6 +425,48 @@ class NN_particles(nn.Module):
 
         return self.config
 
+    def build(self):
+        """Modell passend zu ``config.imaging_mode`` aufbauen."""
+
+        mode = getattr(self.config, "imaging_mode", "tem")
+        if mode == "tem":
+            return self.build_multislice()
+        if mode == "stem_haadf":
+            return self.build_stem()
+        raise ValueError(f"Unbekannter imaging_mode: {mode!r}")
+
+    def build_stem(self):
+        """STEM-HAADF: Elementdichten -> Querschnitt -> Faltung mit der Sonde.
+
+        Die Sonde entsteht aus derselben Aberrationsfunktion wie die CTF, der
+        CTFLayer dient hier also als Sondenformer.
+        """
+
+        potential_layer = DifferentiablePotential(self.config, self.train_method,
+                                                  device=self.device,
+                                                  output_mode="element_density")
+        probe_layer = CTFLayer(self.config, device=self.device, train_method=self.train_method)
+        haadf_layer = DifferentiableHAADF(self.config, self.train_method,
+                                          probe_layer, device=self.device)
+
+        self.model = nn.Sequential(potential_layer, haadf_layer)
+        self.potential_layer = potential_layer
+        self.imaging_layer = haadf_layer
+        self.probe_layer = probe_layer
+
+        self.tunable_parameters = ParticlesTunableParameters(
+            potential_parameters=potential_layer.get_tunable_parameters(),
+            ctf_parameters=probe_layer.get_tunable_parameters(),
+            normalisation_parameters=nn.Parameter(
+                torch.tensor([0.0, 0.0], device=self.device), requires_grad=True)
+        )
+
+        for name, value in vars(self.tunable_parameters).items():
+            if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
+                setattr(self, name, value)
+
+        return self.model
+
     def build_multislice(self):
         potential_layer = DifferentiablePotential(self.config, self.train_method, device=self.device)
 
@@ -433,6 +486,9 @@ class NN_particles(nn.Module):
             potential_layer,
             multislice,
             ctf_layer)
+
+        self.potential_layer = potential_layer
+        self.imaging_layer = ctf_layer
 
         self.tunable_parameters = ParticlesTunableParameters(
             potential_parameters=self.model[0].get_tunable_parameters(),

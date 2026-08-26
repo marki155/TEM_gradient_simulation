@@ -483,6 +483,33 @@ class CTFLayer(nn.Module):
 
 
 
+    def gated_aberrations(self):
+        """Aberrationswerte, je nach Trainierbarkeit angehaengt oder abgeloest."""
+
+        return {k: (v if self.aberration_is_trainable(k) else v.detach())
+                for k, v in self.tunable_parameters.aberrations.items()}
+
+    def aberration_phase(self, kx=None, ky=None):
+        """chi(k) in rad auf dem eigenen Gitter.
+
+        Dieselbe Phase, die in die CTF geht - der STEM-Zweig baut daraus seine
+        Sonde, damit Defokus und Astigmatismus zwischen beiden geteilt sind.
+        """
+
+        own_grid = kx is None and ky is None
+        if own_grid:
+            alpha, phi, basis = self.alpha, self.phi, self.aberration_basis
+        else:
+            kx = self.kx if kx is None else kx
+            ky = self.ky if ky is None else ky
+            alpha = self.lam * torch.sqrt(kx ** 2 + ky ** 2)
+            phi = torch.atan2(ky, kx)
+            basis = None
+
+        aberr_phase = zernike_phase(alpha, phi, self.gated_aberrations(),
+                                    device=self.device, basis=basis)
+        return 2.0 * math.pi * aberr_phase / self.lam
+
     def _build_ctf(self, kx=None, ky=None):
         # eigenes Gitter -> vorberechnete Karten benutzen; ein uebergebenes
         # Gitter (z.B. fuer die Beugungsbild-Ansicht) wird frisch gerechnet
@@ -492,10 +519,7 @@ class CTFLayer(nn.Module):
         if ky is None:
             ky = self.ky
 
-        aberrations = {}
-        for k, v in self.tunable_parameters.aberrations.items():
-            aberrations[k] = v if self.aberration_is_trainable(k) else v.detach()
-        #aberrations = {k: v for k, v in self.aberr_params.items()}
+        aberrations = self.gated_aberrations()
         lam = self.lam  # in nm
 
         #kx = ax / lam_nm

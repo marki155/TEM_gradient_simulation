@@ -314,8 +314,14 @@ class DifferentiablePotential(nn.Module):
     ``config.groups`` - im Code ist nichts mehr auf Gr/S1/W/S2 festgelegt.
     """
 
-    def __init__(self, config, train_methods, device):
+    #: was forward() liefert: "potential" (TEM) oder "element_density" (STEM)
+    OUTPUT_MODES = ("potential", "element_density")
+
+    def __init__(self, config, train_methods, device, output_mode="potential"):
         super().__init__()
+        if output_mode not in self.OUTPUT_MODES:
+            raise ValueError(f"output_mode muss eins von {self.OUTPUT_MODES} sein")
+        self.output_mode = output_mode
         self.pixel_size_nm = config.pixel_size_nm
         self.wavelength_nm = relativistic_wavelength_nm(config.voltage_kV)
         self.device = device
@@ -885,40 +891,81 @@ class DifferentiablePotential(nn.Module):
             return [True] * self.N_l
         return [layer.group == active for layer in self.layers]
 
-    def layer_potential(self, i, positions_i, weight_i):
-        """Projiziertes Potential einer Schicht.
+    def element_density_maps(self, i, positions_i, weight_i):
+        """Gerasterte Atomdichte je Element fuer eine Schicht.
 
-        Ohne Elementliste wie bisher: ein Kernel, die Intensitaet skaliert
-        seine Amplitude.  Mit Elementliste wird die Intensitaet als
-        kontinuierliche Ordnungszahl gelesen und auf die Nachbarelemente
-        aufgeteilt - jedes mit seinem eigenen Kirkland-Kernel.
+        Das ist der gemeinsame Kern beider Zweige: der TEM-Pfad faltet die
+        Dichten mit dem Kirkland-Kernel, der STEM-Pfad gewichtet sie mit dem
+        Streuquerschnitt in den Detektorring.
         """
 
         layer = self.layers[i]
 
         if not self.mixes_elements(i):
-            return self.projected_slice_potential_kirkland(
-                positions_i, weight_i, atom_type=layer.element)
+            return {layer.element: self.rasterize_positions(positions_i, weight_i)}
 
         tp = self.tunable_parameters
         intensities = tp.intensities[i]
-        trains_intensities = self.train_methods.layer_enabled(layer.name, "intensities")
-        if not trains_intensities:
+        if not self.train_methods.layer_enabled(layer.name, "intensities"):
             intensities = intensities.detach()
 
         self._warn_intensities_out_of_range(i, intensities.detach())
         mixture = self.element_mixture_weights(i, intensities)
 
-        potential = None
+        maps = {}
         for symbol, share in zip(self.layer_elements[i], mixture):
-            weight = share * weight_i
+            maps[symbol] = self.rasterize_positions(positions_i, share * weight_i)
+        return maps
+
+    def rasterize_positions(self, positions_xy, weights):
+        """Atome auf das gepolsterte Gitter rastern (bilinear)."""
+
+        pad = self.potential_pad
+        shifted = positions_xy + torch.tensor([pad, pad], device=self.device,
+                                              dtype=positions_xy.dtype)
+        return self.rasterize_atoms_bilinear(H=self.H + 2 * pad, W=self.W + 2 * pad,
+                                             positions_xy=shifted, weights=weights)
+
+    def element_densities(self):
+        """Elementdichten aller beitragenden Schichten (STEM-Modus)."""
+
+        positions = self.get_positions()
+        weights = self.get_atom_weights()
+        contributes = self.active_layer_mask()
+
+        densities = []
+        for i, layer in enumerate(self.layers):
+            if not contributes[i]:
+                densities.append(None)
+                continue
+            maps = self.element_density_maps(i, positions[i], weights[i])
+            contrast = self.tunable_parameters.contrast_factors[layer.group]
+            if not self.train_methods.group_enabled(layer.group, "contrast"):
+                contrast = contrast.detach()
+            densities.append({el: rho * contrast for el, rho in maps.items()})
+
+        return densities
+
+    def layer_potential(self, i, positions_i, weight_i):
+        """Projiziertes Potential einer Schicht.
+
+        Benutzt dieselben Elementdichten wie der STEM-Zweig und faltet jede mit
+        dem Kirkland-Kernel ihres Elements.
+        """
+
+        layer = self.layers[i]
+        maps = self.element_density_maps(i, positions_i, weight_i)
+        trains_intensities = self.train_methods.layer_enabled(layer.name, "intensities")
+
+        potential = None
+        for symbol, density in maps.items():
             # Elemente ohne Beitrag ueberspringen - aber nur, wenn die
             # Intensitaeten fest sind: sonst faehrt man sich den Gradienten weg,
             # mit dem die Mischung ueberhaupt erst in Bewegung kommt
-            if not trains_intensities and not bool(torch.any(weight > 0)):
+            if len(maps) > 1 and not trains_intensities and not bool(torch.any(density > 0)):
                 continue
-            part = self.projected_slice_potential_kirkland(
-                positions_i, weight, atom_type=symbol, subtract_median=False)
+            part = self.kirkland_precalc_pot.projected_slice_potential_kirkland(
+                density, symbol, self.pixel_size_nm, self.device)
             potential = part if potential is None else potential + part
 
         if potential is None:
@@ -926,9 +973,14 @@ class DifferentiablePotential(nn.Module):
                                 self.W + self.potential_pad * 2),
                                dtype=torch.float32, device=self.device)
 
+        # konstanter Offset - physikalisch irrelevant (globale Phase), haelt
+        # aber die Zahlen klein. Bei einer Elementmischung erst am Ende.
         return potential - potential.median()
 
     def forward(self, _):
+        if self.output_mode == "element_density":
+            return self.element_densities(), self.aux_loss()
+
         positions = self.get_positions()
         weights = self.get_atom_weights()
         contributes = self.active_layer_mask()

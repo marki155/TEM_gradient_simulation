@@ -32,6 +32,7 @@ from ctf import (
     zernike_phase,
 )
 from potential import is_legacy_potential_parameters, migrate_serialized_potential_parameters
+from stem import haadf_cross_section
 from training_parameter import TrainMethod, load_train_method
 
 #: potential.py setzt beim Import das Default-Device; hier dasselbe benutzen,
@@ -485,6 +486,82 @@ def test_renamed_config_fields():
     print("  alter Feldname init_potential_factor wird uebernommen")
 
 
+def test_haadf_cross_sections():
+    """Der HAADF-Querschnitt muss mit Z steigen, ungefaehr wie Z^1.7."""
+
+    elements = {"B": 5, "C": 6, "N": 7, "O": 8, "Si": 14, "S": 16, "W": 74}
+    sigma = {el: haadf_cross_section(el, 60., 200., 80., u_rms_A=0.06)
+             for el in elements}
+
+    ordered = ["B", "C", "N", "O"]
+    for lighter, heavier in zip(ordered, ordered[1:]):
+        assert sigma[heavier] > sigma[lighter], (lighter, heavier, sigma)
+
+    numbers = np.array(list(elements.values()), dtype=float)
+    values = np.array([sigma[el] for el in elements])
+    exponent = np.polyfit(np.log(numbers), np.log(values), 1)[0]
+    assert 1.5 < exponent < 2.0, exponent
+
+    # groesserer Innenwinkel -> staerkere Z-Abhaengigkeit
+    inner_100 = np.array([haadf_cross_section(el, 100., 300., 80., 0.06) for el in elements])
+    exponent_100 = np.polyfit(np.log(numbers), np.log(inner_100), 1)[0]
+    assert exponent_100 > exponent, (exponent, exponent_100)
+
+    print(f"  HAADF-Querschnitte: sigma ~ Z^{exponent:.2f} (60-200 mrad), "
+          f"Z^{exponent_100:.2f} (100-300 mrad)")
+
+
+def test_stem_imaging():
+    """STEM-Zweig: normierte Sonde, Z-Kontrast in der richtigen Richtung, Gradienten."""
+
+    layers, groups = graphene_only(max_shift=20.0, max_rotation=0.35)
+    layers[0].elements = ["B", "C", "N", "O"]
+    layers[0].debye_waller_u = 0.06
+    config = make_config(layers, groups, n_atoms=60)
+    config.imaging_mode = "stem_haadf"
+    config.stem_convergence_mrad = 25.0
+    config.stem_detector_mrad = (60.0, 200.0)
+    config.stem_source_size_A = 0.4
+    config.init_aberrations = {"C10": 0.0, "C12": 0.0, "phi12": 0.0, "C30": 0.001}
+
+    tm = TrainMethod().ensure_for_config(config)
+    model = NN_particles(config=config, pixel_size_nm=config.pixel_size_nm,
+                         voltage_kV=config.voltage_kV, train_method=tm,
+                         device=DEVICE, train_methods=tm)
+    model.build()
+    haadf = model.imaging_layer
+
+    probe = haadf.probe_intensity()
+    assert abs(float(probe.sum()) - 1.0) < 1e-4, float(probe.sum())
+    assert float(probe.min()) >= 0.0
+
+    image, _aux = model.model(None)
+    image_np = image.detach().cpu().numpy()
+    assert image_np.shape == tuple(config.shape)
+    assert np.isfinite(image_np).all() and image_np.min() >= 0.0
+
+    # Substitution C -> N muss heller werden
+    intensities = model.potential_layer.tunable_parameters.intensities[0]
+    with torch.no_grad():
+        intensities[:5] = 7.0
+    brighter = model.model(None)[0].detach().cpu().numpy()
+    with torch.no_grad():
+        intensities[:5] = 6.0
+    difference = brighter - image_np
+    assert difference.max() > 0 and difference.max() > abs(difference.min()), \
+        "Stickstoff muss im HAADF heller werden"
+
+    # fittbar?
+    tm.set_active_group("Gr")
+    tm.group("Gr").shift.enabled = True
+    tm.layer("Gr").intensities.enabled = True
+    model.potential_layer.apply_trainable_selection()
+    _loss, with_grad = step_and_report(model, tm)
+    assert "groups.Gr.shift" in with_grad and "layers.Gr.intensities" in with_grad, with_grad
+
+    print("  STEM: Sonde normiert, N heller als C, Positionen und Elemente fittbar")
+
+
 def test_legacy_migration(dataset="platelet_11"):
     config_file = os.path.join(dataset, "config", "config.json")
     if not os.path.exists(config_file):
@@ -542,6 +619,10 @@ if __name__ == "__main__":
     test_spatial_coherence_envelope()
     print("test_renamed_config_fields")
     test_renamed_config_fields()
+    print("test_haadf_cross_sections")
+    test_haadf_cross_sections()
+    print("test_stem_imaging")
+    test_stem_imaging()
     print("test_legacy_migration")
     test_legacy_migration()
     print("\nalle Tests durch")
