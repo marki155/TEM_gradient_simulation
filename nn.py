@@ -651,12 +651,22 @@ class NN_particles(nn.Module):
 
 
         if method == "z":
-            sim_mean = norm_params[0] + torch.mean(sim_ref)
-            sim_std = norm_params[1] + torch.std(sim_ref)
+            # Die Korrekturen wirken RELATIV zur Streuung des Bildes. Additiv
+            # ginge das nur, solange das Bild von der Groessenordnung 1 ist:
+            # ein HAADF-Bild steht in Querschnittseinheiten (std ~ 1e-6), da
+            # wuerde ein Offset von 1e-4 den Nenner ins Negative kippen und den
+            # Loss sprengen. Bei norm_params = 0 ist es die uebliche
+            # z-Normierung, unveraendert.
+            sim_mean_raw = torch.mean(sim_ref)
+            sim_std_raw = torch.std(sim_ref)
+            sim_mean = sim_mean_raw + norm_params[0] * sim_std_raw
+            sim_std = sim_std_raw * torch.clamp(1.0 + norm_params[1], min=0.1)
             tgt_mean = torch.mean(tgt_ref)
             tgt_std = torch.std(tgt_ref)
-            simulated_image = (simulated_image - sim_mean) / (sim_std + eps)
-            target_image = (target_image - tgt_mean) / (tgt_std + eps)
+            # geklemmt statt "+ eps": ein additives eps waere bei einer
+            # Streuung von 7e-7 schon ein Fehler von gut einem Prozent.
+            simulated_image = (simulated_image - sim_mean) / torch.clamp(sim_std, min=eps)
+            target_image = (target_image - tgt_mean) / torch.clamp(tgt_std, min=eps)
 
         elif method == "minmax":
             sim_min = norm_params[0]#torch.min(sim_ref)

@@ -562,6 +562,47 @@ def test_stem_imaging():
     print("  STEM: Sonde normiert, N heller als C, Positionen und Elemente fittbar")
 
 
+def test_normalisation_is_scale_invariant():
+    """Die Normalisierungsparameter wirken relativ - sonst sprengt STEM den Loss."""
+
+    layers, groups = graphene_only()
+    config = make_config(layers, groups, n_atoms=40)
+    tm = TrainMethod().ensure_for_config(config)
+    tm.train_normalisation_parameters.enabled = True
+    model = NN_particles(config=config, pixel_size_nm=config.pixel_size_nm,
+                         voltage_kV=config.voltage_kV, train_method=tm,
+                         device=DEVICE, train_methods=tm)
+    model.build()
+
+    torch.manual_seed(3)
+    sim = torch.rand(tuple(config.shape), device=DEVICE)
+    tgt = torch.rand(tuple(config.shape), device=DEVICE)
+    norm = model.tunable_parameters.normalisation_parameters
+
+    # (a) bei 0 exakt die uebliche z-Normierung
+    with torch.no_grad():
+        norm[:] = 0.0
+    got, _ = model.normalize_images(sim, tgt)
+    want = (sim - sim.mean()) / sim.std()
+    assert torch.allclose(got, want, atol=1e-5), float((got - want).abs().max())
+
+    # (b) Korrekturen greifen und sind unabhaengig von der Bildgroessenordnung.
+    #     Ein HAADF-Bild hat eine Streuung um 1e-6 - additive Offsets wuerden
+    #     dort den Nenner ins Negative kippen.
+    with torch.no_grad():
+        norm[0], norm[1] = 0.25, -0.4
+    got, _ = model.normalize_images(sim, tgt)
+    want = (sim - (sim.mean() + 0.25 * sim.std())) / (sim.std() * 0.6)
+    assert torch.allclose(got, want, atol=1e-4), float((got - want).abs().max())
+
+    for scale in (1e-6, 1e3):
+        scaled, _ = model.normalize_images(sim * scale, tgt)
+        deviation = float((scaled - got).abs().max())
+        assert deviation < 1e-3, f"Faktor {scale:g} veraendert die Normierung um {deviation}"
+
+    print("  Normierung: bei 0 unveraendert, Korrekturen relativ, invariant von 1e-6 bis 1e3")
+
+
 def test_legacy_migration(dataset="platelet_11"):
     config_file = os.path.join(dataset, "config", "config.json")
     if not os.path.exists(config_file):
@@ -617,6 +658,8 @@ if __name__ == "__main__":
     test_contrast_factor()
     print("test_spatial_coherence_envelope")
     test_spatial_coherence_envelope()
+    print("test_normalisation_is_scale_invariant")
+    test_normalisation_is_scale_invariant()
     print("test_renamed_config_fields")
     test_renamed_config_fields()
     print("test_haadf_cross_sections")
