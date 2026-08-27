@@ -31,7 +31,7 @@ from layers import LayerConfig, LayerGroupConfig, TYPICAL_DEBYE_WALLER_U
 from nn import NN_particles, ParticlesConfig
 from training_parameter import TrainMethod, save_train_methods
 
-INIT_VERSION = 1
+INIT_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +69,10 @@ def _prepare_target(image, zero_handling="median"):
 # Config bauen
 # ---------------------------------------------------------------------------
 
-def lattice_spec_from_init(init) -> LatticeSpec:
-    entry = dict(init.get("lattice", {}))
-    basis = [tuple(b) for b in entry.get("basis", [])]
+def lattice_spec_from(entry) -> LatticeSpec:
+    """Ein Eintrag aus der init.json -> LatticeSpec."""
+
+    entry = dict(entry or {})
     return LatticeSpec(
         type=entry.get("type", "graphene"),
         a=float(entry.get("a", 2.46)),
@@ -79,10 +80,22 @@ def lattice_spec_from_init(init) -> LatticeSpec:
         gamma_deg=float(entry.get("gamma_deg", 120.0)),
         formula=entry.get("formula", "WS2"),
         file=entry.get("file"),
-        basis=basis,
+        basis=[tuple(b) for b in entry.get("basis", [])],
         rotation_deg=float(entry.get("rotation_deg", 0.0)),
         offset_px=tuple(entry.get("offset_px", (0.0, 0.0))),
     )
+
+
+def lattice_entries(init):
+    """Liste der Gitter - eine ``lattice``-Angabe wird als einzelnes gefuehrt."""
+
+    entries = init.get("lattices")
+    if entries:
+        return [dict(e) for e in entries]
+
+    single = dict(init.get("lattice", {}))
+    single.setdefault("name", init["groups"][0]["name"] if init.get("groups") else "Gitter")
+    return [single]
 
 
 def build_config(init, base_dir: str) -> ParticlesConfig:
@@ -95,21 +108,52 @@ def build_config(init, base_dir: str) -> ParticlesConfig:
     groups_raw = init["groups"]
     layers_raw = init["layers"]
 
-    max_shift = max(float(g.get("max_shift_px", 0.0)) for g in groups_raw)
-    max_rotation = max(float(g.get("max_rotation_deg", 0.0)) for g in groups_raw)
+    group_by_name = {g["name"]: g for g in groups_raw}
+    entries = lattice_entries(init)
+    default_lattice = entries[0].get("name", "Gitter")
 
-    spec = lattice_spec_from_init(init)
-    lattice_layers = build_layer_positions(spec, shape, pixel_size_nm,
-                                           max_shift_px=max_shift,
-                                           max_rotation_deg=max_rotation)
+    # Suchbereich je Gitter aus den Gruppen, die es benutzen
+    reach = {}
+    for layer in layers_raw:
+        name = layer.get("lattice", default_lattice)
+        group = group_by_name.get(layer.get("group"), {})
+        shift = float(group.get("max_shift_px", 0.0) or 0.0)
+        rotation = float(group.get("max_rotation_deg", 0.0) or 0.0)
+        previous = reach.get(name, (0.0, 0.0))
+        reach[name] = (max(previous[0], shift), max(previous[1], rotation))
 
-    if len(lattice_layers) != len(layers_raw):
-        raise ValueError(
-            f"Das Gitter liefert {len(lattice_layers)} Schichten, die init.json "
-            f"beschreibt {len(layers_raw)}. Beides muss zusammenpassen.")
+    built = {}
+    for entry in entries:
+        name = entry.get("name", default_lattice)
+        shift, rotation = reach.get(name, (0.0, 0.0))
+        built[name] = {
+            "layers": build_layer_positions(lattice_spec_from(entry), shape, pixel_size_nm,
+                                            max_shift_px=shift, max_rotation_deg=rotation),
+            "z_offset_nm": float(entry.get("z_offset_nm", 0.0)),
+        }
+
+    counters = {}
+    generated_for = []
+    for entry in layers_raw:
+        name = entry.get("lattice", default_lattice)
+        if name not in built:
+            raise ValueError(f"Schicht {entry['name']!r} verweist auf das unbekannte "
+                             f"Gitter {name!r}. Bekannt: {sorted(built)}")
+        index = entry.get("lattice_layer")
+        if index is None:
+            index = counters.get(name, 0)
+        counters[name] = index + 1
+
+        available = built[name]["layers"]
+        if index >= len(available):
+            raise ValueError(f"Gitter {name!r} hat {len(available)} Schichten, "
+                             f"Schicht {entry['name']!r} will Nummer {index}.")
+        generated = dict(available[index])
+        generated["z_nm"] = generated["z_nm"] + built[name]["z_offset_nm"]
+        generated_for.append(generated)
 
     init_positions, init_intensities, layers = [], [], []
-    for entry, generated in zip(layers_raw, lattice_layers):
+    for entry, generated in zip(layers_raw, generated_for):
         element = entry.get("element") or generated["elements"][0]
         z_nm = float(entry.get("z_nm", generated["z_nm"]))
 
@@ -166,6 +210,7 @@ def build_config(init, base_dir: str) -> ParticlesConfig:
         stem_convergence_mrad=float(stem.get("convergence_mrad", 25.0)),
         stem_detector_mrad=tuple(stem.get("detector_mrad", (60.0, 200.0))),
         stem_source_size_A=float(stem.get("source_size_A", 0.5)),
+        init_probe_aberrations=dict(stem["aberrations"]) if stem.get("aberrations") else None,
     )
     return config
 

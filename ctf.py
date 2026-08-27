@@ -380,7 +380,14 @@ class TunableCTFParameters:
 
 
 class CTFLayer(nn.Module):
-    def __init__(self, config, train_method=None,device=None):
+    """Kontrastuebertragung - und im STEM-Zweig der Sondenformer.
+
+    ``aberrations`` ueberschreibt ``config.init_aberrations``: die Sonde im STEM
+    hat andere Werte als die Abbildung im TEM (dort steht der Defokus typisch
+    bei -13 nm, die Sonde will ihn nahe null).
+    """
+
+    def __init__(self, config, train_method=None, device=None, aberrations=None):
         super().__init__()
         self.H, self.W = config.shape
         self.pixel_size_nm = config.pixel_size_nm
@@ -406,7 +413,8 @@ class CTFLayer(nn.Module):
             Cc_um=nn.Parameter(torch.tensor(self.envelope_params["Cc_um"],
                                             dtype=torch.float32, device=device)),
             aberrations=nn.ParameterDict(make_param_dict(
-                config.init_aberrations, self.parametrization, device=device)),
+                config.init_aberrations if aberrations is None else aberrations,
+                self.parametrization, device=device)),
         )
 
         pad = config.padding

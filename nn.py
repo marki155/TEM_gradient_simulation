@@ -276,6 +276,8 @@ class ParticlesConfig:
     stem_detector_mrad: Tuple[float, float] = (60.0, 200.0)
     #: endliche Quellgroesse, Gauss-Sigma in Angstroem (verschmiert die Sonde)
     stem_source_size_A: float = 0.5
+    #: eigene Aberrationen der STEM-Sonde; None -> init_aberrations
+    init_probe_aberrations: Optional[dict] = None
 
     #: Schreibweise der Aberrationen: "cartesian" (a/b, besser zu optimieren)
     #: oder "polar" (C/phi wie frueher). Die Physik ist identisch.
@@ -445,7 +447,8 @@ class NN_particles(nn.Module):
         potential_layer = DifferentiablePotential(self.config, self.train_method,
                                                   device=self.device,
                                                   output_mode="element_density")
-        probe_layer = CTFLayer(self.config, device=self.device, train_method=self.train_method)
+        probe_layer = CTFLayer(self.config, device=self.device, train_method=self.train_method,
+                               aberrations=getattr(self.config, "init_probe_aberrations", None))
         haadf_layer = DifferentiableHAADF(self.config, self.train_method,
                                           probe_layer, device=self.device)
 

@@ -38,7 +38,7 @@ except ImportError:
         sys.path.append(_here)
     from tem_sim_lattice import basis_for, layer_points, MX2_TABLE
 
-INIT_VERSION = 1
+INIT_VERSION = 2
 
 LATTICE_KINDS = ["Graphen", "hBN", "2H-MX2 (WS2, MoS2 ...)", "eigene Zelle", "aus Datei (.cif/.xyz)"]
 IMAGING_MODES = ["TEM (Multislice + CTF)", "STEM HAADF (Sonde x Objekt)"]
@@ -75,12 +75,13 @@ def power_spectrum(imp):
     return fht.getPowerSpectrum(), size
 
 
-def find_lattice_peak(spectrum, size, min_radius_px=6, max_radius_frac=0.45):
+def find_lattice_peak(spectrum, size, min_radius_px=6, max_radius_px=None,
+                      max_radius_frac=0.45):
     """Staerkster Reflex ausserhalb des Zentrums, subpixelgenau ueber den Schwerpunkt."""
 
     centre = size // 2
     best, best_value = None, -1.0
-    limit = max_radius_frac * size
+    limit = max_radius_px if max_radius_px else max_radius_frac * size
 
     for y in range(size):
         dy = y - centre
@@ -114,7 +115,7 @@ def find_lattice_peak(spectrum, size, min_radius_px=6, max_radius_frac=0.45):
             "angle_deg": math.degrees(math.atan2(dy, dx)), "value": best_value}
 
 
-def estimate_from_fft(imp, lattice_a_A, gamma_deg=120.0):
+def estimate_from_fft(imp, lattice_a_A, gamma_deg=120.0, min_radius_px=6.0, max_radius_px=None):
     """Pixelgroesse und Orientierung aus dem staerksten Gitterreflex.
 
     Bei hexagonalen Gittern liegt der erste Reflex bei d = a * sin(gamma), also
@@ -123,7 +124,7 @@ def estimate_from_fft(imp, lattice_a_A, gamma_deg=120.0):
     """
 
     spectrum, size = power_spectrum(imp)
-    peak = find_lattice_peak(spectrum, size)
+    peak = find_lattice_peak(spectrum, size, min_radius_px, max_radius_px)
     if peak is None:
         return None
 
@@ -148,40 +149,53 @@ def estimate_from_fft(imp, lattice_a_A, gamma_deg=120.0):
 # Overlay
 # ---------------------------------------------------------------------------
 
-def lattice_layers_for(params, shape, margin_px=0.0, limit=None):
-    kind = params["lattice_kind"]
-    if kind == "aus Datei (.cif/.xyz)":
+def resolve_lattice(entry):
+    """(Gitterkonstante, Basis) fuer einen Gitter-Eintrag."""
+
+    if entry["kind"] == "aus Datei (.cif/.xyz)":
+        return entry.get("a") or 0.0, []
+    a, basis = basis_for(entry["kind"], entry.get("formula", "WS2"),
+                         {"a": entry.get("a", 3.0), "basis": entry.get("custom_basis", [])})
+    if entry.get("a"):
+        a = entry["a"]
+    return a, basis
+
+
+def lattice_layers_for(entry, params, shape, margin_px=0.0, limit=None):
+    """Schichten eines einzelnen Gitters in Bildkoordinaten."""
+
+    a, basis = resolve_lattice(entry)
+    if not basis:
         return []
-    a, basis = basis_for(kind, params.get("formula", "WS2"),
-                         {"a": params.get("custom_a", 3.0), "basis": params.get("custom_basis", [])})
-    if params.get("lattice_a"):
-        a = params["lattice_a"]
-    return layer_points(a, a, params.get("gamma_deg", 120.0), basis,
-                        params["pixel_size_nm"], shape, params["rotation_deg"],
-                        params["offset_px"], margin_px=margin_px, limit=limit)
+    return layer_points(a, a, entry.get("gamma_deg", 120.0), basis,
+                        params["pixel_size_nm"], shape, entry["rotation_deg"],
+                        entry["offset_px"], margin_px=margin_px, limit=limit)
 
 
 def update_overlay(imp, params, limit=4000):
-    """Gitterpunkte als Overlay ueber das Bild legen."""
+    """Gitterpunkte aller Gitter als Overlay - eine Farbe je Gitter."""
 
     shape = (imp.getHeight(), imp.getWidth())
-    layers = lattice_layers_for(params, shape, limit=limit)
     overlay = Overlay()
     colors = [Color.yellow, Color.cyan, Color.magenta, Color.green, Color.orange]
 
-    for index, layer in enumerate(layers):
-        xs = [p[1] for p in layer["points"]]     # Spalte -> x
-        ys = [p[0] for p in layer["points"]]     # Zeile  -> y
-        if not xs:
-            continue
-        roi = PointRoi(xs, ys, len(xs))
-        roi.setStrokeColor(colors[index % len(colors)])
-        roi.setPointType(0)
-        roi.setSize(0)
-        overlay.add(roi)
+    total = 0
+    for index, entry in enumerate(params["lattices"]):
+        layers = lattice_layers_for(entry, params, shape, limit=limit)
+        for layer in layers:
+            xs = [p[1] for p in layer["points"]]     # Spalte -> x
+            ys = [p[0] for p in layer["points"]]     # Zeile  -> y
+            if not xs:
+                continue
+            roi = PointRoi(xs, ys, len(xs))
+            roi.setStrokeColor(colors[index % len(colors)])
+            roi.setPointType(0)
+            roi.setSize(0)
+            overlay.add(roi)
+            total += len(xs)
 
     imp.setOverlay(overlay)
-    return sum(len(l["points"]) for l in layers)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -248,15 +262,20 @@ def build_init(imp, params, layers_info):
     shape = [imp.getHeight(), imp.getWidth()]
     stem_mode = params["imaging_mode"].startswith("STEM")
 
-    lattice = {"type": params["lattice_type"],
-               "a": params["lattice_a"],
-               "gamma_deg": params.get("gamma_deg", 120.0),
-               "rotation_deg": params["rotation_deg"],
-               "offset_px": list(params["offset_px"])}
-    if params["lattice_type"] == "file":
-        lattice["file"] = params.get("structure_file")
-    else:
-        lattice["basis"] = [[s, fa, fb, z] for (s, fa, fb, z) in params["basis"]]
+    lattices = []
+    for entry in params["lattices"]:
+        item = {"name": entry["name"],
+                "type": "file" if entry["kind"] == "aus Datei (.cif/.xyz)" else "custom",
+                "a": entry.get("a"),
+                "gamma_deg": entry.get("gamma_deg", 120.0),
+                "rotation_deg": entry["rotation_deg"],
+                "offset_px": list(entry["offset_px"]),
+                "z_offset_nm": entry.get("z_offset_nm", 0.0)}
+        if item["type"] == "file":
+            item["file"] = entry.get("structure_file")
+        else:
+            item["basis"] = [[s, fa, fb, z] for (s, fa, fb, z) in entry["basis"]]
+        lattices.append(item)
 
     groups = []
     for group in params["groups"]:
@@ -288,7 +307,8 @@ def build_init(imp, params, layers_info):
     if stem_mode:
         imaging["stem"] = {"convergence_mrad": params["convergence_mrad"],
                            "detector_mrad": [params["detector_inner"], params["detector_outer"]],
-                           "source_size_A": params["stem_source_size_A"]}
+                           "source_size_A": params["stem_source_size_A"],
+                           "aberrations": params.get("probe_aberrations") or {}}
 
     return {
         "version": INIT_VERSION,
@@ -302,7 +322,7 @@ def build_init(imp, params, layers_info):
         "target_zero_handling": "median",
         "config_dir": "config_imagej",
         "imaging": imaging,
-        "lattice": lattice,
+        "lattices": lattices,
         "groups": groups,
         "layers": layers_info,
         "train": params["train"],
@@ -363,42 +383,54 @@ def start_simulation(params, init_path):
 # Schichten und Gruppen aus dem Gitter ableiten
 # ---------------------------------------------------------------------------
 
-def default_layer_names(layers):
-    """Sprechende Namen: Element plus laufende Nummer, wenn mehrfach."""
+def layer_names_for(lattice_name, layers):
+    """Ein Gitter mit einer Schicht heisst wie das Gitter, sonst Element plus Nummer.
+
+    Fuer S/W/S kommt damit S1, W, S2 heraus - die uebliche Schreibweise.
+    """
+
+    if len(layers) == 1:
+        return [lattice_name]
 
     counts = {}
-    names = []
     for layer in layers:
         symbol = layer["elements"][0] if layer["elements"] else "L"
         counts[symbol] = counts.get(symbol, 0) + 1
-        names.append(symbol if counts[symbol] == 1 else "%s%d" % (symbol, counts[symbol]))
 
-    # zweites C wird zu C2 usw. - aber ein einzelnes bleibt schlicht
-    seen = {}
+    running = {}
+    names = []
     for layer in layers:
         symbol = layer["elements"][0] if layer["elements"] else "L"
-        seen[symbol] = seen.get(symbol, 0) + 1
-    for index, layer in enumerate(layers):
-        symbol = layer["elements"][0] if layer["elements"] else "L"
-        if seen[symbol] == 1:
-            names[index] = symbol
+        if counts[symbol] == 1:
+            names.append(symbol)
+        else:
+            running[symbol] = running.get(symbol, 0) + 1
+            names.append("%s%d" % (symbol, running[symbol]))
     return names
 
 
-def layers_info_from(layers, names, groups_per_layer, mixture, occupancy, debye_waller):
+def layers_info_from(lattice_name, layers, names, entry):
+    """Schichtbeschreibungen eines Gitters fuer die init.json."""
+
     info = []
     for index, layer in enumerate(layers):
         symbol = layer["elements"][0] if layer["elements"] else "C"
+        # 0 heisst: Tabellenwert je Element nehmen (S und W schwingen
+        # unterschiedlich stark, ein Wert pro Gitter waere zu grob)
+        u = entry.get("debye_waller_u")
+        if not u:
+            u = None
         info.append({
             "name": names[index],
             "element": symbol,
-            "z_nm": round(layer["z_nm"], 6),
-            "group": groups_per_layer[index],
-            "init_occupancy": occupancy,
-            "occ_entropy": True,
-            "elements": list(mixture),
-            "debye_waller_u": debye_waller if debye_waller is not None
-            else TYPICAL_DEBYE_WALLER.get(symbol, 0.06),
+            "z_nm": round(layer["z_nm"] + entry.get("z_offset_nm", 0.0), 6),
+            "group": entry["name"],
+            "lattice": lattice_name,
+            "lattice_layer": index,
+            "init_occupancy": entry.get("init_occupancy", 2.0),
+            "occ_entropy": entry.get("occ_entropy", True),
+            "elements": list(entry.get("mixture", [])),
+            "debye_waller_u": u if u is not None else TYPICAL_DEBYE_WALLER.get(symbol, 0.06),
         })
     return info
 
@@ -426,51 +458,63 @@ def format_aberrations(aberrations):
     return ", ".join(parts)
 
 
-LATTICE_TYPE_BY_KIND = {
-    "Graphen": "custom", "hBN": "custom", "2H-MX2 (WS2, MoS2 ...)": "custom",
-    "eigene Zelle": "custom", "aus Datei (.cif/.xyz)": "file",
-}
+def normalize_params(params):
+    """Alte Einzelgitter-Angaben in die Liste ueberfuehren."""
+
+    if params.get("lattices"):
+        return params
+
+    params["lattices"] = [{
+        "name": params.get("group_name", "Gitter"),
+        "kind": params.get("lattice_kind", "Graphen"),
+        "formula": params.get("formula", "WS2"),
+        "structure_file": params.get("structure_file", ""),
+        "a": params.get("lattice_a"),
+        "gamma_deg": params.get("gamma_deg", 120.0),
+        "rotation_deg": params.get("rotation_deg", 0.0),
+        "offset_px": params.get("offset_px", (0.0, 0.0)),
+        "z_offset_nm": 0.0,
+        "max_shift_px": params.get("max_shift_px", 50.0),
+        "max_rotation_deg": params.get("max_rotation_deg", 20.0),
+        "debye_waller_u": params.get("debye_waller_u"),
+        "init_occupancy": params.get("init_occupancy", 100.0),
+        "mixture": params.get("mixture", []),
+        "isolate": False,
+    }]
+    return params
 
 
 def finalize_params(params, imp):
-    """Basis, Schichten und Gruppen aus den Dialogwerten ableiten."""
+    """Basis, Schichten und Gruppen aus allen Gittern ableiten."""
 
-    kind = params["lattice_kind"]
-    params["lattice_type"] = LATTICE_TYPE_BY_KIND.get(kind, "custom")
-
-    if kind == "aus Datei (.cif/.xyz)":
-        params["basis"] = []
-        params["layers_info"] = params.get("layers_info", [])
-        return params
-
-    a, basis = basis_for(kind, params.get("formula", "WS2"),
-                         {"a": params.get("custom_a", 3.0), "basis": params.get("custom_basis", [])})
-    if not params.get("lattice_a"):
-        params["lattice_a"] = a
-    params["basis"] = basis
-
+    normalize_params(params)
     shape = (imp.getHeight(), imp.getWidth())
-    layers = lattice_layers_for(params, shape, limit=1)
-    names = params.get("layer_names") or default_layer_names(layers)
 
-    if params.get("one_group_per_layer"):
-        groups_per_layer = list(names)
-    else:
-        groups_per_layer = [params.get("group_name", "Struktur")] * len(layers)
+    layers_info = []
+    groups = []
+    for entry in params["lattices"]:
+        a, basis = resolve_lattice(entry)
+        entry["a"] = a
+        entry["basis"] = basis
 
-    params["layers_info"] = layers_info_from(
-        layers, names, groups_per_layer, params.get("mixture", []),
-        params.get("init_occupancy", 100.0), params.get("debye_waller_u"))
+        if basis:
+            layers = lattice_layers_for(entry, params, shape, limit=1)
+            names = layer_names_for(entry["name"], layers)
+            layers_info.extend(layers_info_from(entry["name"], layers, names, entry))
+        else:
+            IJ.log("Gitter %s kommt aus einer Datei - Schichten legt die Python-Seite an."
+                   % entry["name"])
 
-    group_names = []
-    for name in groups_per_layer:
-        if name not in group_names:
-            group_names.append(name)
-    params["groups"] = [{"name": name,
-                         "max_shift_px": params["max_shift_px"],
-                         "max_rotation_deg": params["max_rotation_deg"],
-                         "isolate_when_active": len(group_names) > 1}
-                        for name in group_names]
+        groups.append({
+            "name": entry["name"],
+            "max_shift_px": entry.get("max_shift_px", 50.0),
+            "max_rotation_deg": entry.get("max_rotation_deg", 20.0),
+            "isolate_when_active": entry.get("isolate", len(params["lattices"]) > 1),
+            "control_points": entry.get("control_points", [10, 10]),
+        })
+
+    params["layers_info"] = layers_info
+    params["groups"] = groups
     return params
 
 
@@ -493,70 +537,58 @@ def default_train_block(params):
 # Dialog
 # ---------------------------------------------------------------------------
 
-FIELD = {}          # Name -> Index im GenericDialog (numerische Felder)
+class Fields(object):
+    """Merkt sich die Reihenfolge der numerischen Felder eines Dialogs."""
+
+    def __init__(self):
+        self.order = []
+
+    def add(self, gd, label, value, digits):
+        self.order.append(label)
+        gd.addNumericField(label, value, digits)
+
+    def read(self, gd):
+        return dict((label, gd.getNextNumber()) for label in self.order)
+
+    def position(self, label):
+        return self.order.index(label)
 
 
-def _add_number(gd, label, value, digits, key):
-    FIELD[key] = len([k for k in FIELD])
-    gd.addNumericField(label, value, digits)
+def show_global_dialog(imp):
+    """Bild, Abbildung und Ausgabe - alles, was nicht am einzelnen Gitter haengt."""
 
-
-def show_dialog(imp):
-    from java.awt.event import ActionListener
     from ij.gui import NonBlockingGenericDialog
 
-    shape = (imp.getHeight(), imp.getWidth())
-    base_dir = None
     info = imp.getOriginalFileInfo()
-    if info is not None and info.directory:
-        base_dir = info.directory
-    if not base_dir:
-        base_dir = IJ.getDirectory("home") or ""
-
+    base_dir = info.directory if (info is not None and info.directory) else (IJ.getDirectory("home") or "")
     repo_guess = os.path.dirname(os.path.dirname(os.path.abspath(
         __file__ if "__file__" in dir() else ".")))
 
-    FIELD.clear()
-    gd = NonBlockingGenericDialog("Simulation initialisieren")
-    gd.addMessage("Bild: %s   %d x %d px" % (imp.getTitle(), shape[1], shape[0]))
+    fields = Fields()
+    gd = NonBlockingGenericDialog("Simulation initialisieren (1/2)")
+    gd.addMessage("Bild: %s   %d x %d px" % (imp.getTitle(), imp.getWidth(), imp.getHeight()))
 
-    _add_number(gd, "Pixelgroesse [nm]", 0.015, 6, "pixel_size_nm")
-    _add_number(gd, "Hochspannung [kV]", 80, 1, "voltage_kV")
-    _add_number(gd, "Padding [px]", 100, 0, "padding")
-
-    gd.addMessage("--- Gitter ---")
-    gd.addChoice("Typ", LATTICE_KINDS, LATTICE_KINDS[0])
-    gd.addStringField("Formel (MX2)", "WS2", 10)
-    gd.addStringField("Strukturdatei", "", 30)
-    _add_number(gd, "Gitterkonstante a [A] (0 = Vorgabe)", 0.0, 4, "lattice_a")
-    _add_number(gd, "Orientierung [Grad]", 0.0, 3, "rotation_deg")
-    _add_number(gd, "Versatz Zeile [px]", 0.0, 2, "offset_x")
-    _add_number(gd, "Versatz Spalte [px]", 0.0, 2, "offset_y")
-
-    gd.addMessage("--- Suchbereich und Schichten ---")
-    _add_number(gd, "max. Verschiebung [px]", 50.0, 1, "max_shift_px")
-    _add_number(gd, "max. Drehung [Grad]", 20.0, 1, "max_rotation_deg")
-    _add_number(gd, "Debye-Waller u_rms [A]", 0.06, 3, "debye_waller_u")
-    _add_number(gd, "Start-Occupancy (Logit)", 100.0, 1, "init_occupancy")
-    gd.addStringField("Elementmischung (Komma, leer = aus)", "", 20)
-    gd.addStringField("Gruppenname", "Struktur", 20)
-    gd.addCheckbox("eine Gruppe je Schicht", False)
+    fields.add(gd, "Pixelgroesse [nm] (0 = aus FFT)", 0.0, 6)
+    fields.add(gd, "Hochspannung [kV]", 80, 1)
+    fields.add(gd, "Padding [px]", 100, 0)
+    fields.add(gd, "Anzahl Gitter", 1, 0)
 
     gd.addMessage("--- Abbildung ---")
     gd.addChoice("Modus", IMAGING_MODES, IMAGING_MODES[0])
-    _add_number(gd, "Amplitudenkontrast", 0.1, 3, "amp_contrast")
-    _add_number(gd, "Aperturwinkel alpha_max [mrad]", 50.0, 1, "alpha_max_mrad")
-    gd.addStringField("Aberrationen", format_aberrations(DEFAULT_ABERRATIONS), 60)
-    _add_number(gd, "Quellgroesse [mrad]", 0.1, 3, "source_size_mrad")
-    _add_number(gd, "Energiebreite [eV]", 0.35, 3, "delta_e")
-    _add_number(gd, "Cc [um]", 1000.0, 1, "cc_um")
-    _add_number(gd, "Defokus-Instabilitaet [nm]", 0.01, 3, "instab_nm")
+    fields.add(gd, "Amplitudenkontrast", 0.1, 3)
+    fields.add(gd, "Aperturwinkel alpha_max [mrad]", 50.0, 1)
+    gd.addStringField("Aberrationen (TEM)", format_aberrations(DEFAULT_ABERRATIONS), 60)
+    fields.add(gd, "Quellgroesse [mrad]", 0.1, 3)
+    fields.add(gd, "Energiebreite [eV]", 0.35, 3)
+    fields.add(gd, "Cc [um]", 1000.0, 1)
+    fields.add(gd, "Defokus-Instabilitaet [nm]", 0.01, 3)
 
     gd.addMessage("--- nur STEM ---")
-    _add_number(gd, "Konvergenzwinkel [mrad]", 25.0, 1, "convergence_mrad")
-    _add_number(gd, "Detektor innen [mrad]", 60.0, 1, "detector_inner")
-    _add_number(gd, "Detektor aussen [mrad]", 200.0, 1, "detector_outer")
-    _add_number(gd, "Quellgroesse Sonde [A]", 0.4, 3, "stem_source_size_A")
+    gd.addStringField("Aberrationen der Sonde", "C10=0, C12=0, phi12=0, C30=0.001", 60)
+    fields.add(gd, "Konvergenzwinkel [mrad]", 25.0, 1)
+    fields.add(gd, "Detektor innen [mrad]", 60.0, 1)
+    fields.add(gd, "Detektor aussen [mrad]", 200.0, 1)
+    fields.add(gd, "Quellgroesse Sonde [A]", 0.4, 3)
 
     gd.addMessage("--- Ausgabe ---")
     gd.addStringField("Ordner", base_dir, 40)
@@ -565,84 +597,151 @@ def show_dialog(imp):
     gd.addCheckbox("Gitter als Overlay anzeigen", True)
     gd.addCheckbox("Simulation nach dem Export starten", False)
 
-    class FftButton(ActionListener):
-        def actionPerformed(self, event):
-            fields = gd.getNumericFields()
-            try:
-                a = float(fields.get(FIELD["lattice_a"]).getText())
-            except Exception:
-                a = 0.0
-            kind = LATTICE_KINDS[gd.getChoices().get(0).getSelectedIndex()]
-            if a <= 0:
-                a = basis_for(kind, gd.getStringFields().get(0).getText())[0]
-            estimate = estimate_from_fft(imp, a)
-            if estimate is None:
-                IJ.showMessage("Kein Gitterreflex gefunden.")
-                return
-            fields.get(FIELD["pixel_size_nm"]).setText("%.6f" % estimate["pixel_size_nm"])
-            fields.get(FIELD["rotation_deg"]).setText("%.3f" % estimate["rotation_deg"])
-            IJ.log("FFT: d = %.2f px -> Pixel %.5f nm, Orientierung %.2f Grad"
-                   % (estimate["d_px"], estimate["pixel_size_nm"], estimate["rotation_deg"]))
-
-    gd.addButton("Gitter aus FFT schaetzen", FftButton())
     gd.showDialog()
     if gd.wasCanceled():
         return None
 
-    numbers = [gd.getNextNumber() for _ in range(len(FIELD))]
-    def number(key):
-        return numbers[FIELD[key]]
-
-    kind = gd.getNextChoice()
-    formula = gd.getNextString()
-    structure_file = gd.getNextString()
-    mixture_text = gd.getNextString()
-    group_name = gd.getNextString()
-    one_group_per_layer = gd.getNextBoolean()
+    numbers = fields.read(gd)
     mode = gd.getNextChoice()
-    aberration_text = gd.getNextString()
+    aberrations = gd.getNextString()
+    probe_aberrations = gd.getNextString()
     out_dir = gd.getNextString()
     repo_dir = gd.getNextString()
     python = gd.getNextString()
     show_overlay = gd.getNextBoolean()
     run_simulation = gd.getNextBoolean()
 
-    params = {
-        "pixel_size_nm": number("pixel_size_nm"),
-        "voltage_kV": number("voltage_kV"),
-        "padding": int(number("padding")),
-        "lattice_kind": kind,
+    return {
+        "pixel_size_nm": numbers["Pixelgroesse [nm] (0 = aus FFT)"],
+        "voltage_kV": numbers["Hochspannung [kV]"],
+        "padding": int(numbers["Padding [px]"]),
+        "lattice_count": max(1, int(numbers["Anzahl Gitter"])),
+        "imaging_mode": mode,
+        "amp_contrast": numbers["Amplitudenkontrast"],
+        "alpha_max_mrad": numbers["Aperturwinkel alpha_max [mrad]"],
+        "aberrations": parse_aberrations(aberrations),
+        "probe_aberrations": parse_aberrations(probe_aberrations),
+        "source_size_rad": numbers["Quellgroesse [mrad]"] * 1e-3,
+        "delta_e": numbers["Energiebreite [eV]"],
+        "cc_um": numbers["Cc [um]"],
+        "instab_nm": numbers["Defokus-Instabilitaet [nm]"],
+        "convergence_mrad": numbers["Konvergenzwinkel [mrad]"],
+        "detector_inner": numbers["Detektor innen [mrad]"],
+        "detector_outer": numbers["Detektor aussen [mrad]"],
+        "stem_source_size_A": numbers["Quellgroesse Sonde [A]"],
+        "out_dir": out_dir, "repo_dir": repo_dir, "python": python,
+        "show_overlay": show_overlay, "run_simulation": run_simulation,
+    }
+
+
+def show_lattice_dialog(imp, index, count, params):
+    """Ein Gitter: Typ, Orientierung, Suchbereich, Schichteigenschaften."""
+
+    from java.awt.event import ActionListener
+    from ij.gui import NonBlockingGenericDialog
+
+    defaults = ["Gr", "WS2", "Gitter3", "Gitter4"]
+    fields = Fields()
+    gd = NonBlockingGenericDialog("Gitter %d von %d (2/2)" % (index + 1, count))
+
+    gd.addStringField("Name (wird zur Gruppe)", defaults[index] if index < len(defaults)
+                      else "Gitter%d" % (index + 1), 20)
+    gd.addChoice("Typ", LATTICE_KINDS, LATTICE_KINDS[0] if index == 0 else LATTICE_KINDS[2])
+    gd.addStringField("Formel (MX2)", "WS2", 10)
+    gd.addStringField("Strukturdatei", "", 30)
+
+    fields.add(gd, "Gitterkonstante a [A] (0 = Vorgabe)", 0.0, 4)
+    fields.add(gd, "Orientierung [Grad]", 0.0, 3)
+    fields.add(gd, "Versatz Zeile [px]", 0.0, 2)
+    fields.add(gd, "Versatz Spalte [px]", 0.0, 2)
+    fields.add(gd, "z-Versatz [nm]", 0.0, 3)
+
+    gd.addMessage("--- Suchbereich und Schicht ---")
+    fields.add(gd, "max. Verschiebung [px]", 50.0, 1)
+    fields.add(gd, "max. Drehung [Grad]", 20.0 if index == 0 else 5.0, 1)
+    fields.add(gd, "Debye-Waller u_rms [A] (0 = je Element)", 0.0, 3)
+    fields.add(gd, "Start-Occupancy (Logit)", 100.0 if index == 0 else 2.0, 1)
+    gd.addStringField("Elementmischung (Komma, leer = aus)", "", 20)
+    gd.addCheckbox("bei aktiver Gruppe allein simulieren", count > 1)
+
+    gd.addMessage("--- FFT-Suche (0 = automatisch) ---")
+    fields.add(gd, "kleinster Radius [px]", 0.0, 0)
+    fields.add(gd, "groesster Radius [px]", 0.0, 0)
+
+    class FftButton(ActionListener):
+        def actionPerformed(self, event):
+            numeric = gd.getNumericFields()
+            try:
+                a = float(numeric.get(fields.position("Gitterkonstante a [A] (0 = Vorgabe)")).getText())
+            except Exception:
+                a = 0.0
+            kind = LATTICE_KINDS[gd.getChoices().get(0).getSelectedIndex()]
+            if a <= 0:
+                a = resolve_lattice({"kind": kind,
+                                     "formula": gd.getStringFields().get(1).getText()})[0]
+            try:
+                min_r = float(numeric.get(fields.position("kleinster Radius [px]")).getText())
+                max_r = float(numeric.get(fields.position("groesster Radius [px]")).getText())
+            except Exception:
+                min_r, max_r = 0.0, 0.0
+
+            estimate = estimate_from_fft(imp, a, 120.0, min_r or 6.0, max_r or None)
+            if estimate is None:
+                IJ.showMessage("Kein Gitterreflex gefunden.")
+                return
+            numeric.get(fields.position("Orientierung [Grad]")).setText("%.3f" % estimate["rotation_deg"])
+            IJ.log("FFT (%s): Reflex bei r = %.1f px -> Orientierung %.2f Grad, "
+                   "Pixelgroesse waere %.6f nm"
+                   % (kind, estimate["peak"]["radius_px"], estimate["rotation_deg"],
+                      estimate["pixel_size_nm"]))
+
+    gd.addButton("Orientierung aus FFT", FftButton())
+    gd.showDialog()
+    if gd.wasCanceled():
+        return None
+
+    numbers = fields.read(gd)
+    name = gd.getNextString()
+    kind = gd.getNextChoice()
+    formula = gd.getNextString()
+    structure_file = gd.getNextString()
+    mixture = gd.getNextString()
+    isolate = gd.getNextBoolean()
+
+    return {
+        "name": name,
+        "kind": kind,
         "formula": formula,
         "structure_file": structure_file,
-        "lattice_a": number("lattice_a") or None,
+        "a": numbers["Gitterkonstante a [A] (0 = Vorgabe)"] or None,
         "gamma_deg": 120.0,
-        "rotation_deg": number("rotation_deg"),
-        "offset_px": (number("offset_x"), number("offset_y")),
-        "max_shift_px": number("max_shift_px"),
-        "max_rotation_deg": number("max_rotation_deg"),
-        "debye_waller_u": number("debye_waller_u"),
-        "init_occupancy": number("init_occupancy"),
-        "mixture": [s.strip() for s in mixture_text.split(",") if s.strip()],
-        "group_name": group_name,
-        "one_group_per_layer": one_group_per_layer,
-        "imaging_mode": mode,
-        "amp_contrast": number("amp_contrast"),
-        "alpha_max_mrad": number("alpha_max_mrad"),
-        "aberrations": parse_aberrations(aberration_text),
-        "source_size_rad": number("source_size_mrad") * 1e-3,
-        "delta_e": number("delta_e"),
-        "cc_um": number("cc_um"),
-        "instab_nm": number("instab_nm"),
-        "convergence_mrad": number("convergence_mrad"),
-        "detector_inner": number("detector_inner"),
-        "detector_outer": number("detector_outer"),
-        "stem_source_size_A": number("stem_source_size_A"),
-        "out_dir": out_dir,
-        "repo_dir": repo_dir,
-        "python": python,
-        "show_overlay": show_overlay,
-        "run_simulation": run_simulation,
+        "rotation_deg": numbers["Orientierung [Grad]"],
+        "offset_px": (numbers["Versatz Zeile [px]"], numbers["Versatz Spalte [px]"]),
+        "z_offset_nm": numbers["z-Versatz [nm]"],
+        "max_shift_px": numbers["max. Verschiebung [px]"],
+        "max_rotation_deg": numbers["max. Drehung [Grad]"],
+        "debye_waller_u": numbers["Debye-Waller u_rms [A] (0 = je Element)"],
+        "init_occupancy": numbers["Start-Occupancy (Logit)"],
+        "mixture": [s.strip() for s in mixture.split(",") if s.strip()],
+        "isolate": isolate,
+        "fft_min_radius_px": numbers["kleinster Radius [px]"],
+        "fft_max_radius_px": numbers["groesster Radius [px]"],
     }
+
+
+def show_dialog(imp):
+    params = show_global_dialog(imp)
+    if params is None:
+        return None
+
+    lattices = []
+    for index in range(params["lattice_count"]):
+        entry = show_lattice_dialog(imp, index, params["lattice_count"], params)
+        if entry is None:
+            return None
+        lattices.append(entry)
+
+    params["lattices"] = lattices
     return params
 
 
@@ -653,15 +752,20 @@ def show_dialog(imp):
 def run(imp, params):
     """Gemeinsamer Weg fuer Dialog und Parameterdatei."""
 
-    if params.get("fft_estimate"):
-        a = params.get("lattice_a") or basis_for(params["lattice_kind"],
-                                                 params.get("formula", "WS2"))[0]
-        estimate = estimate_from_fft(imp, a, params.get("gamma_deg", 120.0))
+    normalize_params(params)
+
+    if params.get("fft_estimate") or not params.get("pixel_size_nm"):
+        first = params["lattices"][0]
+        a = first.get("a") or resolve_lattice(first)[0]
+        estimate = estimate_from_fft(imp, a, first.get("gamma_deg", 120.0),
+                                     first.get("fft_min_radius_px") or 6.0,
+                                     first.get("fft_max_radius_px") or None)
         if estimate is None:
             IJ.log("FFT: kein Gitterreflex gefunden, Werte bleiben unveraendert")
         else:
             params["pixel_size_nm"] = estimate["pixel_size_nm"]
-            params["rotation_deg"] = estimate["rotation_deg"]
+            if params.get("fft_estimate"):
+                params["lattices"][0]["rotation_deg"] = estimate["rotation_deg"]
             IJ.log("FFT: Reflex bei r = %.2f px (d = %.2f px, %.2f A) -> "
                    "Pixel %.6f nm, Orientierung %.3f Grad"
                    % (estimate["peak"]["radius_px"], estimate["d_px"],

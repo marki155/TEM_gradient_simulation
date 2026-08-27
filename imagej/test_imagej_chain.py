@@ -152,7 +152,7 @@ def main():
         with open(init_path) as handle:
             init = json.load(handle)
 
-        rotation = init["lattice"]["rotation_deg"]
+        rotation = init["lattices"][0]["rotation_deg"]
         pixel = init["pixel_size_nm"]
         assert abs(rotation - TRUE_ROTATION) < 1.0, rotation
         assert abs(pixel - TRUE_PIXEL_NM) / TRUE_PIXEL_NM < 0.02, pixel
@@ -163,6 +163,8 @@ def main():
         print(f"  {label:12s}: {rotation:+7.3f} Grad (wahr {TRUE_ROTATION:+.1f}), "
               f"{pixel:.6f} nm (wahr {TRUE_PIXEL_NM}), {config.imaging_mode}, NCC {ncc:.4f}")
 
+        assert len(init.get("lattices", [])) == 1, init.get("lattices")
+
         if not stem and not fft:
             # gleiche Werte rein, gleiches Bild raus
             assert ncc > 0.999, ncc
@@ -170,8 +172,70 @@ def main():
             # mit geschaetztem Gitter laeuft die Phase ueber das Feld leicht weg
             assert ncc > 0.85, ncc
 
+    check_two_lattices(work, image_path, fiji_dir)
+
     print("Kette Plugin -> init.json -> Modell funktioniert")
     return 0
+
+
+def check_two_lattices(work, image_path, fiji_dir):
+    """Zwei unabhaengig orientierte Gitter (Graphen + WS2) in einem Lauf."""
+
+    out_dir = os.path.join(work, "export_zwei")
+    params = plugin_parameters(image_path, out_dir, stem=False, fft=True)
+    params["lattices"] = [
+        {"name": "Gr", "kind": "Graphen", "a": 2.46, "gamma_deg": 120.0, "rotation_deg": 0.0,
+         "offset_px": [0, 0], "z_offset_nm": 0.0, "max_shift_px": 60.0,
+         "max_rotation_deg": 20.0, "debye_waller_u": 0.0, "init_occupancy": 100.0,
+         "mixture": ["B", "C", "N", "O"], "isolate": True},
+        {"name": "WS2", "kind": "2H-MX2 (WS2, MoS2 ...)", "formula": "WS2", "a": None,
+         "gamma_deg": 120.0, "rotation_deg": 17.0, "offset_px": [25.0, -10.0],
+         "z_offset_nm": 0.33, "max_shift_px": 80.0, "max_rotation_deg": 5.0,
+         "debye_waller_u": 0.0, "init_occupancy": 2.0, "mixture": [], "isolate": False},
+    ]
+    params["rois"] = [{"name": "Gr", "rect": [50, 50, 600, 600]},
+                      {"name": "WS2", "rect": [200, 200, 300, 300]}]
+
+    params_path = os.path.join(work, "params_zwei.json")
+    with open(params_path, "w") as handle:
+        json.dump(params, handle)
+
+    log = run_plugin(fiji_dir, params_path)
+    init_path = os.path.join(out_dir, "init.json")
+    assert os.path.exists(init_path), "Plugin hat nichts geschrieben:\n" + log
+
+    config, _ncc = check_model(init_path, None)
+
+    assert config.layer_names == ["Gr", "S1", "W", "S2"], config.layer_names
+    assert config.group_names == ["Gr", "WS2"], config.group_names
+
+    z_values = [round(layer.z_nm, 4) for layer in config.layers]
+    assert z_values == [0.0, 0.33, 0.4875, 0.645], z_values
+
+    elements = [layer.element for layer in config.layers]
+    assert elements == ["C", "S", "W", "S"], elements
+
+    # Debye-Waller je Element aus der Tabelle
+    assert abs(config.layers[2].debye_waller_u - 0.055) < 1e-9, config.layers[2].debye_waller_u
+    assert abs(config.layers[1].debye_waller_u - 0.070) < 1e-9
+
+    # eigene Suchbereiche und Masken je Gruppe
+    assert abs(config.group("Gr").max_shift - 60.0) < 1e-6
+    assert abs(config.group("WS2").max_shift - 80.0) < 1e-6
+    assert config.group("Gr").isolate_when_active
+    assert not config.group("WS2").isolate_when_active
+    for group in config.groups:
+        assert group.mask_file, group.name
+        assert os.path.exists(os.path.join(out_dir, group.mask_file))
+
+    with open(init_path) as handle:
+        init = json.load(handle)
+    rotations = dict((e["name"], e["rotation_deg"]) for e in init["lattices"])
+    assert abs(rotations["WS2"] - 17.0) < 1e-6, rotations
+    assert abs(rotations["Gr"] - TRUE_ROTATION) < 1.0, rotations
+
+    print(f"  zwei Gitter : {config.layer_names} in {config.group_names}, "
+          f"z = {z_values}, Drehung Gr {rotations['Gr']:+.2f} / WS2 {rotations['WS2']:+.1f} Grad")
 
 
 if __name__ == "__main__":
