@@ -2,3 +2,6 @@ venv
 .venv
 __pycache__
 .idea
+
+# von Jython beim Import erzeugt
+*$py.class

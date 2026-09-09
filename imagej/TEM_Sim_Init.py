@@ -19,24 +19,28 @@ import os
 import sys
 
 from ij import IJ, WindowManager
-from ij.gui import Overlay, PointRoi
+from ij.gui import DialogListener, Overlay, Roi
 # NonBlockingGenericDialog erst im Dialog importieren: im Headless-Betrieb
 # patcht ImageJ die GenericDialog so um, dass die Unterklasse nicht mehr laedt
 from ij.io import FileSaver
 from ij.plugin.frame import RoiManager
 from ij.process import FHT, ByteProcessor
-from java.awt import Color
+from java.awt import Color, RenderingHints
+from java.awt.event import ActionListener, MouseAdapter
+from java.awt.geom import AffineTransform, Ellipse2D, Path2D, Point2D
 
 # ---------------------------------------------------------------------------
 # Modul mit den Gitterbasen daneben liegen lassen
 # ---------------------------------------------------------------------------
 try:
-    from tem_sim_lattice import basis_for, layer_points, MX2_TABLE
+    from tem_sim_lattice import (basis_for, cell_area_px, layer_points,
+                                 layer_points_local, MX2_TABLE)
 except ImportError:
     _here = os.path.dirname(os.path.abspath(__file__ if "__file__" in dir() else "."))
     if _here not in sys.path:
         sys.path.append(_here)
-    from tem_sim_lattice import basis_for, layer_points, MX2_TABLE
+    from tem_sim_lattice import (basis_for, cell_area_px, layer_points,
+                                 layer_points_local, MX2_TABLE)
 
 INIT_VERSION = 2
 
@@ -172,30 +176,191 @@ def lattice_layers_for(entry, params, shape, margin_px=0.0, limit=None):
                         entry["offset_px"], margin_px=margin_px, limit=limit)
 
 
-def update_overlay(imp, params, limit=4000):
-    """Gitterpunkte aller Gitter als Overlay - eine Farbe je Gitter."""
+#: Farben je Element - sonst faellt die Farbe des Gitters ein
+ELEMENT_COLORS = {
+    "B": Color(255, 145, 100), "C": Color(255, 232, 60), "N": Color(105, 180, 245),
+    "O": Color(240, 85, 80), "S": Color(255, 240, 120), "Se": Color(255, 165, 40),
+    "W": Color(130, 210, 250), "Mo": Color(170, 215, 130),
+}
+LATTICE_COLORS = [Color.yellow, Color.cyan, Color.magenta, Color.green, Color.orange]
 
-    shape = (imp.getHeight(), imp.getWidth())
-    overlay = Overlay()
-    colors = [Color.yellow, Color.cyan, Color.magenta, Color.green, Color.orange]
+#: mehr Kreise als das zeichnet kein Mensch mehr auseinander
+MAX_OVERLAY_POINTS = 60000
 
+
+class LatticeRoi(Roi):
+    """Gitterpunkte als gezeichnetes Overlay - keine Punktauswahl.
+
+    Der Pfad liegt einmal in Gitterkoordinaten vor. Drehung, Versatz und der
+    Zoom des Fensters stecken in der Transformation, deshalb kostet das
+    Verschieben nichts und das Ziehen mit der Maus bleibt fluessig.
+    """
+
+    def __init__(self, imp, shapes, marker_px):
+        Roi.__init__(self, 0, 0, imp.getWidth(), imp.getHeight())
+        # eigene Namen: imp, shapes und visible gehoeren schon zu ij.gui.Roi
+        self.owner_imp = imp
+        self.lattice_paths = shapes     # [(Path2D, Color)]
+        self.marker_px = marker_px
+        self.lattice_tf = AffineTransform()
+        self.anchor_color = Color.white
+        self.lattice_visible = True
+
+    def set_placement(self, centre_row, centre_col, rotation_deg, offset_row, offset_col):
+        """Bildschirm-x ist die Spalte, Bildschirm-y die Zeile - daher der Tausch."""
+
+        tf = AffineTransform()
+        tf.translate(centre_col + offset_col, centre_row + offset_row)
+        tf.rotate(-math.radians(rotation_deg))
+        self.lattice_tf = tf
+
+    def canvas_transform(self):
+        imp = self.getImage() or self.owner_imp
+        canvas = imp.getCanvas() if imp is not None else None
+        tf = AffineTransform()
+        if canvas is not None:
+            magnification = canvas.getMagnification()
+            rect = canvas.getSrcRect()
+            tf.scale(magnification, magnification)
+            tf.translate(-rect.x, -rect.y)
+        tf.concatenate(self.lattice_tf)
+        return tf
+
+    def draw(self, g):
+        if not self.lattice_visible:
+            return
+        transform = self.canvas_transform()
+        g2 = g.create()
+        try:
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                                RenderingHints.VALUE_ANTIALIAS_ON)
+            g2.transform(transform)
+            for path, color in self.lattice_paths:
+                g2.setColor(color)
+                g2.fill(path)
+        finally:
+            g2.dispose()
+        self.draw_anchor(g, transform)
+
+    def draw_anchor(self, g, transform):
+        """Kreuz auf dem Gitterursprung und die beiden Gittervektoren."""
+
+        origin = transform.transform(Point2D.Double(0.0, 0.0), None)
+        x, y = int(round(origin.getX())), int(round(origin.getY()))
+        g.setColor(self.anchor_color)
+        g.drawLine(x - 7, y, x + 7, y)
+        g.drawLine(x, y - 7, x, y + 7)
+
+    def drawOverlay(self, g):
+        self.draw(g)
+
+
+def lattice_shapes(entry, params, shape, index=0):
+    """Pfade je Element in Gitterkoordinaten, dazu Punktzahl und Untergitter-Faktor."""
+
+    a, basis = resolve_lattice(entry)
+    if not basis:
+        return [], 0, 1
+
+    height, width = shape
+    gamma = entry.get("gamma_deg", 120.0)
+    pixel_size_nm = params["pixel_size_nm"]
+    offset = entry.get("offset_px", (0.0, 0.0))
+
+    # so gross, dass das Bild bei jeder Drehung und jedem Versatz gedeckt ist
+    radius = 0.5 * math.hypot(height, width) + math.hypot(offset[0], offset[1])
+    radius += 2.0 * a / (pixel_size_nm * 10.0)
+
+    area = cell_area_px(a, a, gamma, pixel_size_nm)
+    expected = math.pi * radius * radius / max(area, 1e-9) * len(basis)
+    stride = int(math.ceil(math.sqrt(expected / float(MAX_OVERLAY_POINTS)))) if expected > MAX_OVERLAY_POINTS else 1
+
+    layers = layer_points_local(a, a, gamma, basis, pixel_size_nm, radius, cell_stride=stride)
+
+    step = min(a, a) / (pixel_size_nm * 10.0)
+    marker = max(0.7, min(6.0, 0.13 * step * stride))
+
+    fallback = LATTICE_COLORS[index % len(LATTICE_COLORS)]
+    by_color = {}
     total = 0
-    for index, entry in enumerate(params["lattices"]):
-        layers = lattice_layers_for(entry, params, shape, limit=limit)
-        for layer in layers:
-            xs = [p[1] for p in layer["points"]]     # Spalte -> x
-            ys = [p[0] for p in layer["points"]]     # Zeile  -> y
-            if not xs:
-                continue
-            roi = PointRoi(xs, ys, len(xs))
-            roi.setStrokeColor(colors[index % len(colors)])
-            roi.setPointType(0)
-            roi.setSize(0)
-            overlay.add(roi)
-            total += len(xs)
+    circle = Ellipse2D.Double()
+    for layer in layers:
+        for point, symbol in zip(layer["points"], layer["elements"]):
+            color = ELEMENT_COLORS.get(symbol, fallback)
+            path = by_color.get(symbol)
+            if path is None:
+                path = Path2D.Double()
+                by_color[symbol] = path
+            # Bildschirm-x ist die Spalte: (y, x) statt (x, y)
+            circle.setFrame(point[1] - marker, point[0] - marker, 2 * marker, 2 * marker)
+            path.append(circle, False)
+            total += 1
 
-    imp.setOverlay(overlay)
-    return total
+    shapes = [(path, ELEMENT_COLORS.get(symbol, fallback)) for symbol, path in by_color.items()]
+    return shapes, total, stride
+
+
+class LatticeOverlay(object):
+    """Haelt je Gitter einen LatticeRoi und haelt sie mit den Parametern gleich."""
+
+    def __init__(self, imp, params):
+        self.imp = imp
+        self.params = params
+        self.rois = []
+        self.counts = []
+        self.strides = []
+        self.build()
+
+    def build(self):
+        """Pfade neu bauen - noetig nach Gitterkonstante, Pixelgroesse oder Typ."""
+
+        shape = (self.imp.getHeight(), self.imp.getWidth())
+        self.rois, self.counts, self.strides = [], [], []
+        for index, entry in enumerate(self.params["lattices"]):
+            shapes, count, stride = lattice_shapes(entry, self.params, shape, index)
+            roi = LatticeRoi(self.imp, shapes, 0.0) if shapes else None
+            self.rois.append(roi)
+            self.counts.append(count)
+            self.strides.append(stride)
+        self.refresh()
+
+    def refresh(self, redraw=True):
+        """Nur Drehung und Versatz nachziehen - das ist der billige Weg."""
+
+        height, width = self.imp.getHeight(), self.imp.getWidth()
+        overlay = Overlay()
+        for entry, roi in zip(self.params["lattices"], self.rois):
+            if roi is None:
+                continue
+            offset = entry.get("offset_px", (0.0, 0.0))
+            roi.set_placement(height / 2.0, width / 2.0, entry["rotation_deg"],
+                              offset[0], offset[1])
+            overlay.add(roi)
+        self.imp.setOverlay(overlay)
+        if redraw:
+            self.imp.draw()
+
+    def total(self):
+        return sum(self.counts)
+
+    def note(self):
+        parts = []
+        for entry, count, stride in zip(self.params["lattices"], self.counts, self.strides):
+            text = "%s: %d Atome" % (entry["name"], count)
+            if stride > 1:
+                text += " (nur jede %d. Zelle gezeichnet)" % stride
+            parts.append(text)
+        return ", ".join(parts) if parts else "kein Gitter"
+
+    def clear(self):
+        self.imp.setOverlay(None)
+        self.imp.draw()
+
+
+def update_overlay(imp, params):
+    """Gitter aller Eintraege als Overlay zeichnen; liefert die Punktzahl."""
+
+    return LatticeOverlay(imp, params).total()
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +369,6 @@ def update_overlay(imp, params, limit=4000):
 
 def masks_from_params(imp, params, group_names):
     """Masken aus explizit angegebenen Rechtecken (fuer Skripte und Tests)."""
-
-    from ij.gui import Roi
 
     entries = params.get("rois") or []
     masks = {}
@@ -594,7 +757,7 @@ def show_global_dialog(imp):
     gd.addStringField("Ordner", base_dir, 40)
     gd.addStringField("Repository", repo_guess, 40)
     gd.addStringField("Python", "python3", 20)
-    gd.addCheckbox("Gitter als Overlay anzeigen", True)
+    gd.addCheckbox("Gitter anzeigen und ausrichten", True)
     gd.addCheckbox("Simulation nach dem Export starten", False)
 
     gd.showDialog()
@@ -630,14 +793,14 @@ def show_global_dialog(imp):
         "detector_outer": numbers["Detektor aussen [mrad]"],
         "stem_source_size_A": numbers["Quellgroesse Sonde [A]"],
         "out_dir": out_dir, "repo_dir": repo_dir, "python": python,
-        "show_overlay": show_overlay, "run_simulation": run_simulation,
+        "show_overlay": show_overlay, "edit_overlay": show_overlay,
+        "run_simulation": run_simulation,
     }
 
 
 def show_lattice_dialog(imp, index, count, params):
     """Ein Gitter: Typ, Orientierung, Suchbereich, Schichteigenschaften."""
 
-    from java.awt.event import ActionListener
     from ij.gui import NonBlockingGenericDialog
 
     defaults = ["Gr", "WS2", "Gitter3", "Gitter4"]
@@ -746,6 +909,289 @@ def show_dialog(imp):
 
 
 # ---------------------------------------------------------------------------
+# Editor: Gitter im Bild ausrichten
+# ---------------------------------------------------------------------------
+
+class LatticeDragger(MouseAdapter):
+    """Ziehen mit der Maus verschiebt das aktive Gitter."""
+
+    def __init__(self, editor):
+        MouseAdapter.__init__(self)
+        self.editor = editor
+        self.origin = None
+        self.start_offset = (0.0, 0.0)
+
+    def mousePressed(self, event):
+        entry = self.editor.active_entry()
+        if entry is None:
+            return
+        canvas = self.editor.imp.getCanvas()
+        self.origin = (canvas.offScreenYD(event.getY()), canvas.offScreenXD(event.getX()))
+        self.start_offset = tuple(entry.get("offset_px", (0.0, 0.0)))
+
+    def mouseDragged(self, event):
+        if self.origin is None:
+            return
+        entry = self.editor.active_entry()
+        canvas = self.editor.imp.getCanvas()
+        row = canvas.offScreenYD(event.getY())
+        col = canvas.offScreenXD(event.getX())
+        entry["offset_px"] = (self.start_offset[0] + row - self.origin[0],
+                              self.start_offset[1] + col - self.origin[1])
+        self.editor.overlay.refresh()
+
+    def mouseReleased(self, event):
+        if self.origin is None:
+            return
+        self.origin = None
+        self.editor.push_offsets()
+
+
+class LatticeEditor(DialogListener):
+    """Eigenes Fenster zum Ausrichten: Regler, Knoepfe und Ziehen mit der Maus.
+
+    Die Regler schreiben direkt in ``params``; das Overlay zieht live nach.
+    Gitterkonstante und Pixelgroesse bauen den Pfad neu (rund 0.2 s), Drehung
+    und Versatz aendern nur die Transformation und sind sofort da.
+    """
+
+    FIELDS = ["Orientierung [Grad]", "Versatz Zeile [px]", "Versatz Spalte [px]",
+              "Gitterkonstante a [A]", "Pixelgroesse [nm]"]
+
+    def __init__(self, imp, params, overlay):
+        self.imp = imp
+        self.params = params
+        self.overlay = overlay
+        self.index = 0
+        self.updating = False
+        self.gd = None
+        self.note_label = None
+        self.dragger = None
+        self.saved_listeners = None
+        self.backup = json.loads(json.dumps({
+            "lattices": params["lattices"], "pixel_size_nm": params["pixel_size_nm"]}))
+
+    # -- Zustand -----------------------------------------------------------
+
+    def active_entry(self):
+        entries = self.params["lattices"]
+        return entries[self.index] if 0 <= self.index < len(entries) else None
+
+    def field(self, label):
+        return self.gd.getNumericFields().get(self.FIELDS.index(label))
+
+    def set_field(self, label, value, digits=3):
+        self.field(label).setText(("%." + str(digits) + "f") % value)
+
+    def push_offsets(self):
+        """Nach dem Ziehen die Regler nachfuehren."""
+
+        entry = self.active_entry()
+        if entry is None or self.gd is None:
+            return
+        self.updating = True
+        try:
+            self.set_field("Versatz Zeile [px]", entry["offset_px"][0], 2)
+            self.set_field("Versatz Spalte [px]", entry["offset_px"][1], 2)
+        finally:
+            self.updating = False
+        self.status()
+
+    def status(self):
+        # GenericDialog kann seine Meldung nicht nachtraeglich setzen, also
+        # merken wir uns das Label, das addMessage angelegt hat
+        if self.note_label is not None:
+            try:
+                self.note_label.setText(self.overlay.note())
+            except Exception:
+                pass
+
+    # -- Maus --------------------------------------------------------------
+
+    def set_drag_mode(self, active):
+        """ImageJs eigene Maus-Hoerer beiseite legen, damit kein ROI entsteht."""
+
+        canvas = self.imp.getCanvas()
+        if canvas is None or self.dragger is None:
+            # ohne Handler nichts wegnehmen - sonst reagiert das Bild gar nicht mehr
+            return
+        if active and self.saved_listeners is None:
+            saved = (list(canvas.getMouseListeners()), list(canvas.getMouseMotionListeners()))
+            for listener in saved[0]:
+                canvas.removeMouseListener(listener)
+            for listener in saved[1]:
+                canvas.removeMouseMotionListener(listener)
+            canvas.addMouseListener(self.dragger)
+            canvas.addMouseMotionListener(self.dragger)
+            self.saved_listeners = saved
+        elif not active and self.saved_listeners is not None:
+            canvas.removeMouseListener(self.dragger)
+            canvas.removeMouseMotionListener(self.dragger)
+            for listener in self.saved_listeners[0]:
+                canvas.addMouseListener(listener)
+            for listener in self.saved_listeners[1]:
+                canvas.addMouseMotionListener(listener)
+            self.saved_listeners = None
+
+    # -- Dialog ------------------------------------------------------------
+
+    def load_fields(self):
+        entry = self.active_entry()
+        if entry is None:
+            return
+        a = entry.get("a") or resolve_lattice(entry)[0]
+        self.updating = True
+        try:
+            self.set_field("Orientierung [Grad]", entry["rotation_deg"], 3)
+            self.set_field("Versatz Zeile [px]", entry.get("offset_px", (0, 0))[0], 2)
+            self.set_field("Versatz Spalte [px]", entry.get("offset_px", (0, 0))[1], 2)
+            self.set_field("Gitterkonstante a [A]", a, 4)
+        finally:
+            self.updating = False
+
+    def dialogItemChanged(self, gd, event):
+        if self.updating:
+            return True
+
+        choice = gd.getNextChoice() if len(self.params["lattices"]) > 1 else None
+        rotation = gd.getNextNumber()
+        offset_row = gd.getNextNumber()
+        offset_col = gd.getNextNumber()
+        lattice_a = gd.getNextNumber()
+        pixel_size = gd.getNextNumber()
+        drag = gd.getNextBoolean()
+        show = gd.getNextBoolean()
+
+        if choice is not None:
+            names = [e["name"] for e in self.params["lattices"]]
+            if names.index(choice) != self.index:
+                self.index = names.index(choice)
+                self.load_fields()
+                self.overlay.refresh()
+                return True
+
+        entry = self.active_entry()
+        if entry is None:
+            return True
+
+        rebuild = False
+        if pixel_size > 0 and abs(pixel_size - self.params["pixel_size_nm"]) > 1e-12:
+            self.params["pixel_size_nm"] = pixel_size
+            rebuild = True
+        if lattice_a > 0 and abs(lattice_a - (entry.get("a") or 0.0)) > 1e-9:
+            entry["a"] = lattice_a
+            rebuild = True
+
+        entry["rotation_deg"] = rotation
+        entry["offset_px"] = (offset_row, offset_col)
+
+        for roi in self.overlay.rois:
+            if roi is not None:
+                roi.lattice_visible = show
+
+        if rebuild:
+            self.overlay.build()
+        else:
+            self.overlay.refresh()
+
+        self.set_drag_mode(drag)
+        self.status()
+        return True
+
+    def button(self, action):
+        editor = self
+
+        class Handler(ActionListener):
+            def actionPerformed(self, event):
+                action(editor)
+
+        return Handler()
+
+    def show(self):
+        from ij.gui import NonBlockingGenericDialog
+
+        entries = self.params["lattices"]
+        entry = entries[0]
+        a = entry.get("a") or resolve_lattice(entry)[0]
+        height, width = self.imp.getHeight(), self.imp.getWidth()
+
+        gd = NonBlockingGenericDialog("Gitter ausrichten")
+        self.gd = gd
+        gd.addMessage("Regler ziehen oder mit der Maus im Bild verschieben.\n"
+                      "Die Werte gehen so in die Simulation.")
+        if len(entries) > 1:
+            gd.addChoice("Gitter", [e["name"] for e in entries], entry["name"])
+        gd.addSlider("Orientierung [Grad]", -180.0, 180.0, entry["rotation_deg"], 0.05)
+        gd.addSlider("Versatz Zeile [px]", -height, height, entry.get("offset_px", (0, 0))[0], 0.5)
+        gd.addSlider("Versatz Spalte [px]", -width, width, entry.get("offset_px", (0, 0))[1], 0.5)
+        gd.addSlider("Gitterkonstante a [A]", a * 0.7, a * 1.3, a, 0.001)
+        gd.addNumericField("Pixelgroesse [nm]", self.params["pixel_size_nm"], 6)
+        gd.addCheckbox("mit der Maus verschieben", True)
+        gd.addCheckbox("Gitter zeigen", True)
+
+        gd.addButton("Orientierung aus FFT", self.button(LatticeEditor.from_fft))
+        gd.addButton("zentrieren", self.button(LatticeEditor.centre))
+        gd.addButton("zuruecksetzen", self.button(LatticeEditor.reset))
+        gd.addMessage(self.overlay.note() + " " * 40)
+        self.note_label = gd.getComponent(gd.getComponentCount() - 1)
+
+        self.dragger = LatticeDragger(self)
+        gd.addDialogListener(self)
+        self.set_drag_mode(True)
+        try:
+            gd.showDialog()
+        finally:
+            self.set_drag_mode(False)
+            self.gd = None
+            self.note_label = None
+
+        if gd.wasCanceled():
+            self.params["lattices"] = self.backup["lattices"]
+            self.params["pixel_size_nm"] = self.backup["pixel_size_nm"]
+            return False
+        return True
+
+    # -- Knoepfe -----------------------------------------------------------
+
+    def from_fft(self):
+        entry = self.active_entry()
+        a = entry.get("a") or resolve_lattice(entry)[0]
+        estimate = estimate_from_fft(self.imp, a, entry.get("gamma_deg", 120.0),
+                                     entry.get("fft_min_radius_px") or 6.0,
+                                     entry.get("fft_max_radius_px") or None)
+        if estimate is None:
+            IJ.showMessage("Kein Gitterreflex gefunden.")
+            return
+        self.set_field("Orientierung [Grad]", estimate["rotation_deg"], 3)
+        self.set_field("Pixelgroesse [nm]", estimate["pixel_size_nm"], 6)
+        IJ.log("FFT: Orientierung %.3f Grad, Pixelgroesse %.6f nm"
+               % (estimate["rotation_deg"], estimate["pixel_size_nm"]))
+
+    def centre(self):
+        self.set_field("Versatz Zeile [px]", 0.0, 2)
+        self.set_field("Versatz Spalte [px]", 0.0, 2)
+
+    def reset(self):
+        original = self.backup["lattices"][self.index]
+        self.set_field("Orientierung [Grad]", original["rotation_deg"], 3)
+        self.set_field("Versatz Zeile [px]", original.get("offset_px", [0, 0])[0], 2)
+        self.set_field("Versatz Spalte [px]", original.get("offset_px", [0, 0])[1], 2)
+        self.set_field("Pixelgroesse [nm]", self.backup["pixel_size_nm"], 6)
+
+
+def show_lattice_editor(imp, params):
+    """Overlay aufbauen und den Editor zeigen. False, wenn abgebrochen wurde."""
+
+    overlay = LatticeOverlay(imp, params)
+    IJ.log("Overlay: %s" % overlay.note())
+    editor = LatticeEditor(imp, params, overlay)
+    ok = editor.show()
+    if not ok:
+        overlay.build()
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # Ablauf
 # ---------------------------------------------------------------------------
 
@@ -777,9 +1223,15 @@ def run(imp, params):
     params = finalize_params(params, imp)
     params.setdefault("train", default_train_block(params))
 
-    if params.get("show_overlay", True):
-        count = update_overlay(imp, params)
-        IJ.log("Overlay: %d Gitterpunkte" % count)
+    if params.get("edit_overlay"):
+        if not show_lattice_editor(imp, params):
+            IJ.log("abgebrochen - nichts geschrieben")
+            return None
+        # Orientierung, Versatz, Gitterkonstante und Pixelgroesse koennen sich
+        # im Editor geaendert haben, also Schichten und Gruppen neu ableiten
+        params = finalize_params(params, imp)
+    elif params.get("show_overlay", True):
+        IJ.log("Overlay: %d Gitterpunkte" % update_overlay(imp, params))
 
     init_path = export(imp, params, params["layers_info"], params["out_dir"])
     IJ.log("geschrieben: %s" % init_path)
@@ -805,6 +1257,7 @@ def main():
             IJ.log("Kein Bild: image_path in der Parameterdatei setzen.")
             return
         params.setdefault("show_overlay", False)
+        params.setdefault("edit_overlay", False)
         run(imp, params)
         return
 
@@ -820,4 +1273,6 @@ def main():
     run(imp, params)
 
 
-main()
+# Beim Import (Tests) nicht loslaufen - Fiji fuehrt das Skript als __main__ aus.
+if __name__ == "__main__":
+    main()

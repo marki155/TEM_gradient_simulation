@@ -107,3 +107,51 @@ def layer_points(a, b, gamma_deg, basis, pixel_size_nm, shape, rotation_deg,
                 layer["points"] = layer["points"][::stride]
                 layer["elements"] = layer["elements"][::stride]
     return ordered
+
+
+def layer_points_local(a, b, gamma_deg, basis, pixel_size_nm, radius_px, cell_stride=1):
+    """Atompositionen je Schicht um den Ursprung, weder gedreht noch verschoben.
+
+    Fuers Overlay: der Pfad wird einmal in Gitterkoordinaten gebaut, Drehung
+    und Versatz stecken danach in der Transformation. Verschieben und Drehen
+    kosten dann nichts mehr.
+
+    ``cell_stride`` laesst nur jede k-te Zelle uebrig - das ist ein echtes
+    Untergitter und bleibt regelmaessig. (Jeden k-ten *Punkt* zu nehmen wuerde
+    dagegen ein voellig anderes Muster zeigen.)
+    """
+
+    pixel_A = pixel_size_nm * 10.0
+    (ax, ay), (bx, by) = lattice_vectors(a, b, gamma_deg)
+    ax, ay, bx, by = ax / pixel_A, ay / pixel_A, bx / pixel_A, by / pixel_A
+
+    step = min(math.hypot(ax, ay), math.hypot(bx, by))
+    stride = max(1, int(cell_stride))
+    reach = int(math.ceil(radius_px / max(step, 1e-6))) + 2
+    n = int(math.ceil(reach / float(stride)))
+    r2 = radius_px * radius_px
+
+    layers = {}
+    for symbol, fa, fb, z in basis:
+        key = round(z, 6)
+        layer = layers.setdefault(key, {"z_nm": z, "elements": [], "points": []})
+        base_x = fa * ax + fb * bx
+        base_y = fa * ay + fb * by
+        for i in range(-n, n + 1):
+            ii = i * stride
+            for j in range(-n, n + 1):
+                jj = j * stride
+                x = ii * ax + jj * bx + base_x
+                y = ii * ay + jj * by + base_y
+                if x * x + y * y <= r2:
+                    layer["points"].append((x, y))
+                    layer["elements"].append(symbol)
+
+    return [layers[k] for k in sorted(layers)]
+
+
+def cell_area_px(a, b, gamma_deg, pixel_size_nm):
+    """Flaeche einer Elementarzelle in Pixeln - fuer die Abschaetzung der Punktzahl."""
+
+    pixel_A = pixel_size_nm * 10.0
+    return abs(a * b * math.sin(math.radians(gamma_deg))) / (pixel_A * pixel_A)

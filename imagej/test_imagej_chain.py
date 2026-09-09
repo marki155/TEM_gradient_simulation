@@ -120,6 +120,22 @@ def check_model(init_path, reference):
     return config, ncc
 
 
+
+def run_overlay_geometry(fiji_dir, work):
+    """Deckt sich das gezeichnete Gitter mit dem simulierten? (eigenes Jython-Skript)"""
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_overlay.py")
+    result = os.path.join(work, "overlay_geometrie.txt")
+    proc = subprocess.run(
+        [os.path.join(fiji_dir, "ImageJ-linux64"), "--headless", "--console",
+         "--run", script, "result_path='%s'" % result],
+        cwd=fiji_dir, capture_output=True, text=True, timeout=900)
+    if not os.path.exists(result):
+        raise AssertionError("Overlay-Test lief nicht:\n" + proc.stdout + proc.stderr)
+    with open(result) as handle:
+        return handle.read().strip()
+
+
 def main():
     fiji_dir = DEFAULT_FIJI
     if "--fiji" in sys.argv:
@@ -133,6 +149,10 @@ def main():
     if not os.path.exists(os.path.join(fiji_dir, "ImageJ-linux64")):
         print(f"Fiji nicht gefunden ({fiji_dir}) - Plugin-Teil uebersprungen")
         return 0
+
+    verdict = run_overlay_geometry(fiji_dir, work)
+    assert verdict == "ok", "Overlay zeigt etwas anderes als simuliert wird: " + verdict
+    print("  Overlay      : gezeichnete Atome == simulierte Atome")
 
     # 1) exakte Werte: die Kette muss das Bild identisch reproduzieren
     # 2) FFT-Schaetzung: Orientierung und Pixelgroesse muessen getroffen werden
