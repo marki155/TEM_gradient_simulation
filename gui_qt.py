@@ -383,129 +383,128 @@ class MplCanvas(FigureCanvasQTAgg):
         self.target_tensor = target_tensor
         self._target_shape = None
 
-        self.full_canvas_target_mode = False
-        self.full_target_ax = None
-        self.full_target_im = None
-        self.full_target_scatter = None
+        #: None = alle Kacheln, sonst der Schluessel der einen gezeigten Kachel
+        self.single_key = None
+        #: Loss-Verlauf, damit die Kurve einen Kachelwechsel ueberlebt
+        self._losses = np.zeros(0, dtype=np.float32)
 
         self.show_positions_on_target = True
 
         self._rebuild_layout()
 
-    def set_full_canvas_target_mode(self, enabled: bool):
-        if self.full_canvas_target_mode == enabled:
-            return
+    # ------------------------------------------------------------------
+    # Kacheln
+    # ------------------------------------------------------------------
+    def all_tile_keys(self):
+        """Alle Kacheln in der Reihenfolge, in der sie im Raster liegen."""
 
-        self.full_canvas_target_mode = enabled
+        n_layers = max(len(self.layer_names), 1)
+        return (list(self.LEADING_TILES)
+                + [f"pot{i}" for i in range(n_layers)]
+                + list(self.TRAILING_TILES))
+
+    def tile_titles(self):
+        """{Kachel: Anzeigename} - auch fuer die Auswahl in der GUI."""
+
+        titles = {"loss": "Loss", "sim": "Simulated", "diff": "Diff",
+                  "target": "Target", "ctf": "CTF", "hist": "Histogramm",
+                  "ux": "ux", "uy": "uy",
+                  "eps_xx": "eps xx", "eps_yy": "eps yy", "eps_xy": "eps xy"}
+        for i in range(max(len(self.layer_names), 1)):
+            name = self.layer_names[i] if i < len(self.layer_names) else str(i)
+            titles[f"pot{i}"] = f"Potential {name}"
+        return titles
+
+    def set_single_tile(self, key):
+        """Eine Kachel gross zeigen; ``None`` zeigt wieder alle.
+
+        Die Artists werden dabei neu angelegt, das Bild ist also erst nach der
+        naechsten Aktualisierung wieder gefuellt - die GUI stoesst sie an.
+        """
+
+        if key == self.single_key:
+            return
+        self.single_key = key
         self._rebuild_layout()
         self.draw_idle()
-        #self.parent._trigger_heavy_refresh()
-
 
     def _rebuild_layout(self):
         self.fig.clear()
 
-        if self.full_canvas_target_mode:
-            ax_target = self.fig.add_subplot(1, 2, 2)
-            ax_loss = self.fig.add_subplot(1, 2 ,1)
-            ax_target.set_xticks([])
-            ax_target.set_yticks([])
-            ax_target.set_title("Target")
+        keys = self.all_tile_keys()
+        if self.single_key in keys:
+            keys = [self.single_key]
+        titles = self.tile_titles()
 
-            self.full_target_ax = ax_target
-            dummy = (np.zeros_like(self.target_tensor.detach().cpu().numpy(), dtype=np.float32)
-                     if self.target_tensor is not None else np.zeros((64, 64), dtype=np.float32))
-            self.full_target_im = ax_target.imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
-            self.full_target_scatter = ax_target.scatter(
-                [], [], c=[], cmap="Wistia", s=1)
+        columns = 1 if len(keys) == 1 else self.COLUMNS
+        rows = int(np.ceil(len(keys) / float(columns)))
 
-
-            self.axes_cmap = {"loss": ax_loss, "target_full": ax_target}
-            self.loss_line, = self.axes_cmap["loss"].plot([], [])
-            self.axes_cmap["loss"].set_xlabel("Step")
-            self.axes_cmap["loss"].set_ylabel("Loss")
-            return
-
-        # ---------- Normalmodus ----------
-        # Kachel-Raster waechst mit der Anzahl der Schichten mit
-        n_layers = max(len(self.layer_names), 1)
-        keys = (list(self.LEADING_TILES)
-                + [f"pot{i}" for i in range(n_layers)]
-                + list(self.TRAILING_TILES))
-        rows = int(np.ceil(len(keys) / self.COLUMNS))
-
-        self.axes = [self.fig.add_subplot(rows, self.COLUMNS, i + 1) for i in range(len(keys))]
-        for ax in self.axes:
-            ax.set_xticks([])
-            ax.set_yticks([])
-
+        self.axes = [self.fig.add_subplot(rows, columns, i + 1) for i in range(len(keys))]
         self.axes_cmap = {key: ax for key, ax in zip(keys, self.axes)}
-
-        self.axes_cmap["loss"].set_title("Loss")
-        self.axes_cmap["sim"].set_title("Simulated")
-        self.axes_cmap["diff"].set_title("Diff")
-        self.axes_cmap["target"].set_title("Target")
-        self.axes_cmap["ctf"].set_title("CTF")
-        for i in range(n_layers):
-            name = self.layer_names[i] if i < len(self.layer_names) else str(i)
-            self.axes_cmap[f"pot{i}"].set_title(f"Potential {name}")
-        self.axes_cmap["eps_xx"].set_title("eps xx")
-        self.axes_cmap["eps_yy"].set_title("eps yy")
-        self.axes_cmap["eps_xy"].set_title("eps xy")
-        self.axes_cmap["ux"].set_title("ux")
-        self.axes_cmap["uy"].set_title("uy")
+        for key, ax in self.axes_cmap.items():
+            ax.set_title(titles.get(key, key))
+            if key not in ("loss", "hist"):
+                ax.set_xticks([])
+                ax.set_yticks([])
 
         if self.target_tensor is not None:
-            target_np = self.target_tensor.detach().cpu().numpy()
-            dummy = np.zeros_like(target_np, dtype=np.float32)
+            dummy = np.zeros_like(self.target_tensor.detach().cpu().numpy(), dtype=np.float32)
         else:
             dummy = np.zeros((64, 64), dtype=np.float32)
 
-        self.loss_line, = self.axes[0].plot([], [])
-        self.axes_cmap["loss"].set_xlabel("Step")
-        self.axes_cmap["loss"].set_ylabel("Loss")
+        def image(key, cmap, data=None, **kwargs):
+            ax = self.axes_cmap.get(key)
+            if ax is None:
+                return None
+            return ax.imshow(dummy if data is None else data, cmap=cmap, origin="lower",
+                             interpolation=IMAGE_INTERPOLATION, **kwargs)
 
-        self.im_sim = self.axes_cmap["sim"].imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_diff = self.axes_cmap["diff"].imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_tgt = self.axes_cmap["target"].imshow(dummy, cmap="viridis", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_tgt_sc = self.axes_cmap["target"].scatter([], [], c=[], cmap="Wistia", s=2)
+        self.loss_line = None
+        if "loss" in self.axes_cmap:
+            loss_ax = self.axes_cmap["loss"]
+            self.loss_line, = loss_ax.plot([], [])
+            loss_ax.set_xlabel("Step")
+            loss_ax.set_ylabel("Loss")
+            if len(self._losses) > 1:
+                # der Verlauf steckt im Canvas, nicht in der Linie - sonst
+                # waere die Kurve nach jedem Kachelwechsel leer
+                self.loss_line.set_data(np.arange(len(self._losses)), self._losses)
+                loss_ax.relim()
+                loss_ax.autoscale_view()
 
-        self.im_eps_xx = self.axes_cmap["eps_xx"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_eps_yy = self.axes_cmap["eps_yy"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_eps_xy = self.axes_cmap["eps_xy"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_ux = self.axes_cmap["ux"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
-        self.im_uy = self.axes_cmap["uy"].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        self.im_sim = image("sim", "viridis")
+        self.im_diff = image("diff", "viridis")
+        self.im_tgt = image("target", "viridis")
+        self.im_tgt_sc = (self.axes_cmap["target"].scatter([], [], c=[], cmap="Wistia", s=2)
+                          if "target" in self.axes_cmap else None)
+
+        self.im_ux = image("ux", "RdBu")
+        self.im_uy = image("uy", "RdBu")
+        self.im_eps_xx = image("eps_xx", "RdBu")
+        self.im_eps_yy = image("eps_yy", "RdBu")
+        self.im_eps_xy = image("eps_xy", "RdBu")
+
+        blank = np.zeros((10, 10), dtype=np.float32)
+        self.im_ctf = image("ctf", "RdBu", data=blank, vmin=-np.pi, vmax=np.pi)
+        self.im_ring = image("ctf", "Greens", data=blank, alpha=0.35)
 
         self.pot_scatters = []
-        for i in range(n_layers):
-            if SHOW_POTENTIAL:
-                sc = self.axes_cmap["pot" + str(i)].imshow(dummy, cmap="RdBu", origin="lower", interpolation=IMAGE_INTERPOLATION)
+        for i in range(max(len(self.layer_names), 1)):
+            ax = self.axes_cmap.get(f"pot{i}")
+            if ax is None:
+                self.pot_scatters.append(None)
+            elif SHOW_POTENTIAL:
+                self.pot_scatters.append(image(f"pot{i}", "RdBu"))
             else:
-                sc = self.axes_cmap["pot" + str(i)].scatter([], [], s=2, c=[], cmap="viridis")
-            self.pot_scatters.append(sc)
-
-        self.im_ctf = self.axes_cmap["ctf"].imshow(
-            np.zeros((10, 10), dtype=np.float32),
-            cmap="RdBu",
-            vmin=-np.pi,
-            vmax=np.pi,
-            origin="lower",
-            interpolation=IMAGE_INTERPOLATION,
-        )
-        self.im_ring = self.axes_cmap["ctf"].imshow(
-            np.zeros((10, 10), dtype=np.float32),
-            cmap="Greens",
-            alpha=0.35,
-            origin="lower",
-            interpolation=IMAGE_INTERPOLATION,
-        )
+                self.pot_scatters.append(ax.scatter([], [], s=2, c=[], cmap="viridis"))
 
         self.hist_lines = []
-        for i in range(n_layers):
-            label = self.layer_names[i] if i < len(self.layer_names) else str(i)
-            line, = self.axes_cmap["hist"].plot([], [], label=label)
-            self.hist_lines.append(line)
-        self.axes_cmap["hist"].legend(fontsize="x-small")
+        if "hist" in self.axes_cmap:
+            for i in range(max(len(self.layer_names), 1)):
+                label = self.layer_names[i] if i < len(self.layer_names) else str(i)
+                line, = self.axes_cmap["hist"].plot([], [], label=label)
+                self.hist_lines.append(line)
+            self.axes_cmap["hist"].legend(fontsize="x-small")
 
     def set_target_rectangles(self, rectangles):
         if rectangles is None or "target" not in self.axes_cmap:
@@ -525,25 +524,33 @@ class MplCanvas(FigureCanvasQTAgg):
     # Zoom
     # ------------------------------------------------------------------
     def target_axis(self):
-        """Die gerade sichtbare Target-Achse (normal oder Vollbild)."""
+        """Die Target-Achse, falls sie gerade gezeigt wird."""
 
-        if self.full_canvas_target_mode:
-            return self.full_target_ax
         return self.axes_cmap.get("target")
 
-    def reset_zoom(self):
-        """Zoom aller Bildpanels auf das ganze Bild zuruecksetzen."""
+    def image_artists(self):
+        """{Kachel: Bild-Artist} - nur die, die es gerade wirklich gibt."""
 
-        if self._target_shape is None:
-            return
-        H, W = self._target_shape
-        for ax in ([self.target_axis()] if self.full_canvas_target_mode
-                   else [self.axes_cmap[k] for k in ("sim", "diff", "target")
-                         if k in self.axes_cmap]):
-            if ax is None:
+        pairs = {"sim": self.im_sim, "diff": self.im_diff, "target": self.im_tgt,
+                 "ctf": self.im_ctf,
+                 "ux": self.im_ux, "uy": self.im_uy, "eps_xx": self.im_eps_xx,
+                 "eps_yy": self.im_eps_yy, "eps_xy": self.im_eps_xy}
+        if SHOW_POTENTIAL:
+            for i, artist in enumerate(self.pot_scatters):
+                pairs[f"pot{i}"] = artist
+        return {key: art for key, art in pairs.items() if art is not None}
+
+    def reset_zoom(self):
+        """Zoom aller sichtbaren Bildpanels auf das ganze Bild zuruecksetzen."""
+
+        for key, artist in self.image_artists().items():
+            ax = self.axes_cmap.get(key)
+            data = artist.get_array()
+            if ax is None or data is None or np.ndim(data) < 2:
                 continue
-            ax.set_xlim(-0.5, W - 0.5)
-            ax.set_ylim(-0.5, H - 0.5)
+            height, width = data.shape[0], data.shape[1]
+            ax.set_xlim(-0.5, width - 0.5)
+            ax.set_ylim(-0.5, height - 0.5)
         self.draw_idle()
 
     def _scatter_size(self, ax):
@@ -608,8 +615,9 @@ class MplCanvas(FigureCanvasQTAgg):
         artist.set_clim(vmin, vmax)
 
     def update_light(self, step: int, loss: float, losses: np.ndarray):
-        if len(losses) > 1:
-            loss_ax = self.axes_cmap["loss"]
+        self._losses = np.asarray(losses, dtype=np.float32)
+        loss_ax = self.axes_cmap.get("loss")
+        if len(losses) > 1 and loss_ax is not None and self.loss_line is not None:
             xs = np.arange(len(losses), dtype=np.int32)
             self.loss_line.set_data(xs, losses)
             loss_ax.relim()
@@ -684,66 +692,59 @@ class MplCanvas(FigureCanvasQTAgg):
         return (positions[:, 0] - x_min, positions[:, 1] - y_min), intensities
 
     def update_heavy(self, payload: VizPayload, ctf_layer=None):
-        if self.full_canvas_target_mode:
-            if payload.target_img is not None:
-                # kein clear() - sonst waere der Zoom nach jeder
-                # Aktualisierung wieder weg
-                self._apply_target_image(self.full_target_im, self.full_target_ax,
-                                         payload.target_img)
-                self.full_target_ax.set_title(f"Target (Step {payload.step})")
-                self._update_target_scatter(self.full_target_scatter,
-                                            self.full_target_ax, payload)
-            return
-
-
-        if payload.sim_img is not None:
+        # Jede Kachel kann fehlen - in der Einzelansicht gibt es nur eine
+        if self.im_sim is not None and payload.sim_img is not None:
             self._safe_set_image(self.im_sim, payload.sim_img)
 
-        if payload.diff_img is not None:
+        if self.im_diff is not None and payload.diff_img is not None:
             self._safe_set_image(self.im_diff, payload.diff_img)
 
-        if payload.target_img is not None:
+        if self.im_tgt is not None and payload.target_img is not None:
             # Artists wiederverwenden statt die Achse zu leeren, damit der
             # Zoom (Toolbar) ueber die Aktualisierungen hinweg stehen bleibt
             ax_target = self.axes_cmap["target"]
             self._apply_target_image(self.im_tgt, ax_target, payload.target_img)
             self._update_target_scatter(self.im_tgt_sc, ax_target, payload)
+            ax_target.set_title(f"Target (Step {payload.step})")
 
 
-        if payload.strain_maps["ux"] is not None:
+        if self.im_ux is not None and payload.strain_maps["ux"] is not None:
             self._safe_set_image(self.im_ux, payload.strain_maps["ux"])
 
-        if payload.strain_maps["uy"] is not None:
+        if self.im_uy is not None and payload.strain_maps["uy"] is not None:
             self._safe_set_image(self.im_uy, payload.strain_maps["uy"])
 
-        if payload.strain_maps["eps_xx"] is not None:
+        if self.im_eps_xx is not None and payload.strain_maps["eps_xx"] is not None:
             self._safe_set_image(self.im_eps_xx, payload.strain_maps["eps_xx"])
 
-        if payload.strain_maps["eps_yy"] is not None:
+        if self.im_eps_yy is not None and payload.strain_maps["eps_yy"] is not None:
             self._safe_set_image(self.im_eps_yy, payload.strain_maps["eps_yy"])
 
-        if payload.strain_maps["eps_xy"] is not None:
+        if self.im_eps_xy is not None and payload.strain_maps["eps_xy"] is not None:
             self._safe_set_image(self.im_eps_xy, payload.strain_maps["eps_xy"])
 
-        if payload.ctf_phase is not None:
+        if self.im_ctf is not None and payload.ctf_phase is not None:
             self.im_ctf.set_data(payload.ctf_phase)
 
-        if payload.ring_mask is not None:
+        if self.im_ring is not None and payload.ring_mask is not None:
             self.im_ring.set_data(payload.ring_mask)
 
 
         if payload.strain_group is not None:
-            self.axes_cmap["ux"].set_title(f"ux ({payload.strain_group})")
-            self.axes_cmap["uy"].set_title(f"uy ({payload.strain_group})")
+            for key in ("ux", "uy"):
+                if key in self.axes_cmap:
+                    self.axes_cmap[key].set_title(f"{key} ({payload.strain_group})")
 
         if payload.pot_positions is not None and payload.pot_intensities is not None:
             if SHOW_POTENTIAL:
                 for i, sc in enumerate(self.pot_scatters):
-                    if payload.potential_maps is None or i >= len(payload.potential_maps):
+                    if sc is None or payload.potential_maps is None or i >= len(payload.potential_maps):
                         continue
                     self._safe_set_image(sc, payload.potential_maps[i])
             else:
                 for i, sc in enumerate(self.pot_scatters):
+                    if sc is None:
+                        continue
                     pos = payload.pot_positions[i]
                     ints = payload.pot_intensities[i]
 
@@ -782,7 +783,8 @@ class MplCanvas(FigureCanvasQTAgg):
                     self.axes_cmap["pot" + str(i)].set_ylim(ymin, ymax)
 
 
-        if payload.hist_counts is not None and payload.hist_edges is not None:
+        if ("hist" in self.axes_cmap and payload.hist_counts is not None
+                and payload.hist_edges is not None):
             centers = 0.5 * (payload.hist_edges[:-1] + payload.hist_edges[1:])
             ymax = 1.0
             for i, counts in enumerate(payload.hist_counts):
@@ -807,6 +809,9 @@ class MplCanvas(FigureCanvasQTAgg):
                 c30 = float(aberrations["C30"].detach().cpu())
             except Exception:
                 pass
+
+        if "ctf" not in self.axes_cmap:
+            return
 
         if c10 is not None or c30 is not None:
             self.axes_cmap["ctf"].set_title(
@@ -872,11 +877,23 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         layout = QtWidgets.QHBoxLayout(central)
 
-        left = QtWidgets.QVBoxLayout()
-        right = QtWidgets.QVBoxLayout()
+        # Splitter statt fester Aufteilung: die rechte Spalte mit den
+        # Lernraten laesst sich damit breit ziehen, wenn man sie braucht
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        layout.addWidget(splitter)
 
-        layout.addLayout(left, stretch=4)
-        layout.addLayout(right, stretch=1)
+        left_panel = QtWidgets.QWidget()
+        right_panel = QtWidgets.QWidget()
+        left = QtWidgets.QVBoxLayout(left_panel)
+        right = QtWidgets.QVBoxLayout(right_panel)
+        left.setContentsMargins(0, 0, 0, 0)
+        right.setContentsMargins(0, 0, 0, 0)
+
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 1)
+        right_panel.setMinimumWidth(380)
 
 
         self.parameter_frame = ParametersFrame(self.model.get_tunable_parameters(),
@@ -915,10 +932,21 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.resume_btn = QtWidgets.QPushButton("Resume")
         self.stop_btn = QtWidgets.QPushButton("Stop")
 
-        self.full_target_checkbox = QtWidgets.QCheckBox("Target fullscreen")
+        self.single_tile_combo = QtWidgets.QComboBox()
+        self.single_tile_combo.setToolTip(
+            "Eine Kachel gross zeigen - Simulation, Diff, Target, CTF, Potential ...\n"
+            "Zoomen und Verschieben mit der Toolbar unter dem Bild.")
+        self.single_tile_combo.addItem("alle Kacheln", None)
+        titles = self.canvas.tile_titles()
+        for key in self.canvas.all_tile_keys():
+            self.single_tile_combo.addItem(titles.get(key, key), key)
         self.show_atoms_on_target_checkbox = QtWidgets.QCheckBox("Show atom positions on target")
         self.show_atoms_on_target_checkbox.setChecked(True)
         self.reset_occupancies_btn = QtWidgets.QPushButton("Reset occupancies (aktive Gruppe)")
+        self.reset_intensities_btn = QtWidgets.QPushButton("Reset intensities (aktive Gruppe)")
+        self.reset_intensities_btn.setToolTip(
+            "Intensitaeten zurueck auf die Startwerte aus der Config -\n"
+            "nicht auf 0, die Intensitaet ist die Ordnungszahl.")
         self.reset_free_positions_ws2_btn = QtWidgets.QPushButton("Reset free positions (aktive Gruppe)")
         self.render_btn = QtWidgets.QPushButton("Render")
         self.reset_losses = QtWidgets.QPushButton("Reset losses")
@@ -936,12 +964,13 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(self.render_btn, 4, 0)
 
 
-        control_layout.addWidget(self.full_target_checkbox, 0, 1)
+        control_layout.addWidget(self.single_tile_combo, 0, 1)
         control_layout.addWidget(self.show_atoms_on_target_checkbox, 1, 1)
         control_layout.addWidget(self.reset_occupancies_btn, 2, 1)
-        control_layout.addWidget(self.reset_free_positions_ws2_btn, 3, 1)
-        control_layout.addWidget(self.reset_losses, 4, 1)
-        control_layout.addWidget(self.reset_zoom_btn, 5, 1)
+        control_layout.addWidget(self.reset_intensities_btn, 3, 1)
+        control_layout.addWidget(self.reset_free_positions_ws2_btn, 4, 1)
+        control_layout.addWidget(self.reset_losses, 5, 1)
+        control_layout.addWidget(self.reset_zoom_btn, 6, 1)
 
 
         right.addWidget(control_box)
@@ -965,9 +994,9 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         editor_scroll = QtWidgets.QScrollArea()
         editor_scroll.setWidgetResizable(True)
         editor_scroll.setWidget(self.editor)
+        # stretch=1 und KEIN addStretch danach: die Lernraten bekommen die
+        # ganze restliche Hoehe statt eines 250-px-Streifens
         right.addWidget(editor_scroll, stretch=1)
-
-        right.addStretch(1)
 
         # Kein Preset mehr erzwingen - die geladene TrainMethod gilt.
         self._apply_trainable_selection()
@@ -1008,20 +1037,45 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.editor.changed.connect(self._apply_trainable_selection)
 
-        self.full_target_checkbox.toggled.connect(self.canvas.set_full_canvas_target_mode)
+        self.single_tile_combo.currentIndexChanged.connect(self._on_single_tile_changed)
         self.show_atoms_on_target_checkbox.toggled.connect(self._on_show_positions_changed)
         self.reset_occupancies_btn.clicked.connect(self.reset_occupancies_ws2)
+        self.reset_intensities_btn.clicked.connect(self.reset_intensities)
         self.reset_free_positions_ws2_btn.clicked.connect(self.reset_free_positions_ws2)
 
         self.render_btn.clicked.connect(self._trigger_heavy_refresh)
         self.reset_losses.clicked.connect(self._reset_losses)
         self.reset_zoom_btn.clicked.connect(self.canvas.reset_zoom)
 
+    def _on_single_tile_changed(self, _index):
+        """Einzelansicht umschalten und die neuen Artists gleich fuellen."""
+
+        self.canvas.set_single_tile(self.single_tile_combo.currentData())
+        if hasattr(self.train_method, "train_small_area_squares"):
+            self.canvas.set_target_rectangles(self.train_method.train_small_area_squares)
+        self._trigger_heavy_refresh()
+
     def _reset_losses(self):
         self.worker.reset_losses()
 
     def reset_occupancies_ws2(self):
         self.parameter_frame.reset_occupancies(self._active_layer_indices())
+        self._trigger_heavy_refresh()
+
+    def reset_intensities(self):
+        """Startwerte holt das Potential selbst - dort steht der Bezug fuer
+        Gewicht = (I / I_start) * sigmoid(occ)."""
+
+        start_values = {}
+        for index in self._active_layer_indices():
+            try:
+                start_values[index] = self.pot_layer.get_init_intensities(index)
+            except AttributeError:
+                pass
+        if not start_values:
+            print("[reset] keine Startintensitaeten gefunden")
+            return
+        self.parameter_frame.reset_intensities(start_values)
         self._trigger_heavy_refresh()
 
     def reset_free_positions_ws2(self):

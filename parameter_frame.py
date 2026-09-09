@@ -555,6 +555,33 @@ class ParametersFrame(QFrame):
     def reset_free_positions(self, layer_indices):
         self._reset_by_labels("position_shifts", layer_indices)
 
+    def reset_intensities(self, start_values):
+        """Intensitaeten je Schicht auf ihre Startwerte zuruecksetzen.
+
+        Nicht auf 0 wie Occupancy und Verschiebung: die Intensitaet ist die
+        Ordnungszahl, 0 waere gar kein Atom. Zurueck geht es auf die Werte, mit
+        denen das Modell gebaut wurde - genau die, durch die ``get_atom_weights``
+        teilt, sodass danach wieder Gewicht = Occupancy gilt.
+
+        ``start_values`` ist ein Dict {Schicht-Index: Tensor}.
+        """
+
+        for index, values in start_values.items():
+            label = f"intensities[{int(index)}]"
+            for editor in self._tensor_editors:
+                if label not in getattr(editor, "label_text", ""):
+                    continue
+                target = torch.as_tensor(values, dtype=editor.tensor.dtype,
+                                         device=editor.tensor.device)
+                if target.shape != editor.tensor.shape:
+                    print(f"[reset] {label}: {tuple(target.shape)} passt nicht zu "
+                          f"{tuple(editor.tensor.shape)} - uebersprungen")
+                    continue
+                with torch.no_grad():
+                    editor.tensor.copy_(target)
+                editor.refresh_from_tensor()
+        self.trigger_parameter_changed()
+
     def save_parameters(self):
         # Speichern
         p = self.params_root
