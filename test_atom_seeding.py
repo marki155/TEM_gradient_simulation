@@ -266,6 +266,55 @@ def test_save_roundtrip():
     print("ok  gespeicherte config.json ergibt dasselbe Bild")
 
 
+def test_dataset_folder():
+    """Ordner mit target.tif + mask_Gr.tif -> config_random/ mit config, train_method, ..."""
+
+    import tifffile
+    from mains import main_random_atoms as mra
+    from training_parameter import load_train_method
+
+    true = graphene_lattice(SHAPE, PIXEL_NM)
+    true = true[true[:, 1] < 60]                       # Atome nur links
+    capacity = int(len(true) * 2)
+    image = render_target("stem", true, capacity).cpu().numpy()
+    mask = np.zeros(SHAPE, dtype=np.uint8)
+    mask[:, :64] = 255
+
+    with tempfile.TemporaryDirectory() as folder:
+        tifffile.imwrite(os.path.join(folder, "target.tif"), image.astype(np.float32))
+        tifffile.imwrite(os.path.join(folder, "mask_Gr.tif"), mask)
+
+        args = [folder, "--pixel-size-nm", str(PIXEL_NM), "--trials", "1500", "--border-px", "4",
+                "--tune-every", "0", "--log-every", "0", "--seed", "1"]
+        assert mra.main(args) == 0
+
+        out = os.path.join(folder, "config_random")
+        for name in ("config.json", "train_method.json", "target.npy", "seeded.xyz",
+                     "seeded_positions_px.npy", "seeded_preview.png", "area_masks.npz"):
+            assert os.path.exists(os.path.join(out, name)), name
+        assert os.path.exists(os.path.join(folder, "init_random.json"))
+
+        with open(os.path.join(out, "config.json")) as f:
+            config = deserialize(json.load(f), CONFIG_CLASS_REGISTRY)
+        assert config.group_names == ["Gr"] and config.groups[0].mask_file == "mask_Gr.tif"
+        positions = config.init_positions[0]
+        assert len(positions) > 0.5 * len(true)
+        assert (positions[:, 1] < 65).all(), "Atome nur innerhalb der Maske"
+
+        tm = load_train_method(os.path.join(out, "train_method.json"), config)
+        assert int(tm.masks["Gr"].sum()) == 64 * SHAPE[0], (int(tm.masks["Gr"].sum()), tm.masks["Gr"].dtype)
+        assert tm.layer("Gr").free_positions.enabled
+
+        # zweiter Lauf: nur der Ordner, Atome aus dem ersten Lauf bleiben
+        before = len(positions)
+        assert mra.main([folder, "--resume", "--trials", "200", "--border-px", "4",
+                         "--tune-every", "0", "--log-every", "0", "--seed", "2"]) == 0
+        with open(os.path.join(out, "config.json")) as f:
+            again = deserialize(json.load(f), CONFIG_CLASS_REGISTRY)
+        assert len(again.init_positions[0]) >= before * 0.9
+    print(f"ok  Datenordner: {before} Atome, Resume {len(again.init_positions[0])}")
+
+
 def test_graphene_capacity():
     assert abs(graphene_capacity((100, 100), 0.1, 1.0) - 3820) <= 1 and abs(graphene_capacity((100, 100), 0.1, 1.5) - 5730) <= 1
     print("ok  Pool-Groesse")
@@ -280,6 +329,7 @@ def main():
     test_rejected_trial_restores_everything()
     test_pool_full_stops_cleanly()
     test_save_roundtrip()
+    test_dataset_folder()
     test_tune_improves_wrong_probe()
     test_stem_recovers_lattice()
     test_tem_makes_progress()

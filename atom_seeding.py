@@ -56,27 +56,40 @@ def graphene_capacity(shape, pixel_size_nm, reserve=1.5):
 def seed_config(shape, pixel_size_nm, capacity, voltage_kV=80.0, imaging_mode="stem_haadf",
                 element="C", elements=(), group_name="Gr", padding=100,
                 convergence_mrad=24.81, detector_mrad=(60.0, 200.0), source_size_A=0.3,
-                aberrations=None, env_params=None, init_occupancy=100.0):
-    """ParticlesConfig mit einer leeren Pool-Schicht (alle Plaetze geparkt)."""
+                aberrations=None, env_params=None, init_occupancy=100.0,
+                probe_aberrations=None, amp_contrast=0.1, alpha_max_mrad=50.0,
+                mask_file=None, target_file=None, start_positions=None, debye_waller_u=None):
+    """ParticlesConfig mit einer Pool-Schicht.
+
+    Alle ``capacity`` Plaetze sind geparkt; ``start_positions`` (n, 2) belegt die
+    ersten n davon (zum Weitermachen mit einem frueheren Ergebnis).
+    """
 
     from ase.data import atomic_numbers
     from ctf import DEFAULT_ABERRATIONS
     from nn import ParticlesConfig
 
     parked = np.full((capacity, 2), PARK_POSITION, dtype=np.float64)
+    if start_positions is not None and len(start_positions):
+        if len(start_positions) > capacity:
+            raise ValueError(f"{len(start_positions)} Startatome passen nicht in den Pool ({capacity})")
+        parked[:len(start_positions)] = np.asarray(start_positions, dtype=np.float64)
     atomic = np.full(capacity, float(atomic_numbers[element]), dtype=np.float64)
 
     layer = LayerConfig(name=group_name, element=element, z_nm=0.0, group=group_name,
                         init_occupancy=init_occupancy, occ_entropy=False,
                         elements=list(elements),
-                        debye_waller_u=TYPICAL_DEBYE_WALLER_U.get(element, 0.0))
-    group = LayerGroupConfig(name=group_name, control_points=[4, 4])
+                        debye_waller_u=(TYPICAL_DEBYE_WALLER_U.get(element, 0.0)
+                                        if debye_waller_u is None else float(debye_waller_u)))
+    group = LayerGroupConfig(name=group_name, control_points=[4, 4],
+                             mask_file=mask_file, target_file=target_file)
 
     kwargs = {}
     if imaging_mode == "stem_haadf":
         kwargs = dict(imaging_mode="stem_haadf", stem_convergence_mrad=float(convergence_mrad),
                       stem_detector_mrad=tuple(detector_mrad),
-                      stem_source_size_A=float(source_size_A))
+                      stem_source_size_A=float(source_size_A),
+                      init_probe_aberrations=dict(probe_aberrations) if probe_aberrations else None)
 
     return ParticlesConfig(
         init_positions=[parked], init_intensities=[atomic],
@@ -85,7 +98,8 @@ def seed_config(shape, pixel_size_nm, capacity, voltage_kV=80.0, imaging_mode="s
         init_ctf_env_params=dict(env_params or {
             'source_size': 0.1e-3, 'Cc_um': 1.e3, 'deltaE': .35,
             'instab_defocus_nm': .01, 'use_detector': False}),
-        init_amp_contrast=0.1, ctf_alpha_max_mrad=50., padding=padding,
+        init_amp_contrast=float(amp_contrast), ctf_alpha_max_mrad=float(alpha_max_mrad),
+        padding=padding,
         layers=[layer], groups=[group], **kwargs)
 
 
@@ -184,7 +198,7 @@ class RandomAtomSeeder:
 
     def __init__(self, model, target, layer=0, touch_A=0.5, merge_A=1.0,
                  loss="model", margin_px=0.0, move_prob=0.0, remove_prob=0.0,
-                 move_sigma_A=0.7, seed=None):
+                 move_sigma_A=0.7, seed=None, region=None):
         if loss not in ("model", "ncc"):
             raise ValueError("loss muss 'model' oder 'ncc' sein")
         self.model = model
@@ -201,6 +215,20 @@ class RandomAtomSeeder:
         self.remove_prob = float(remove_prob)
         self.move_sigma_px = move_sigma_A / pixel_A
         self.shape = tuple(model.config.shape)
+
+        # Bereich, in dem neue Atome gewuerfelt werden (bool-Maske, Zeile/Spalte in Pixeln)
+        self._region_pixels = None
+        if region is not None:
+            region = np.asarray(region, dtype=bool)
+            if region.shape != self.shape:
+                raise ValueError(f"region {region.shape} passt nicht zum Bild {self.shape}")
+            margin = int(math.ceil(self.margin_px))
+            inner = np.zeros_like(region)
+            inner[margin:self.shape[0] - margin, margin:self.shape[1] - margin] = True
+            pixels = np.argwhere(region & inner)
+            if len(pixels) == 0:
+                raise ValueError("Die Maske laesst keinen Platz fuer Atome")
+            self._region_pixels = pixels
 
         self.stats = SeedStats()
         self._optimizer = None
@@ -265,8 +293,13 @@ class RandomAtomSeeder:
 
     def propose(self, exclude=None):
         height, width = self.shape
-        x = self.rng.uniform(self.margin_px, height - self.margin_px)
-        y = self.rng.uniform(self.margin_px, width - self.margin_px)
+        if self._region_pixels is not None:
+            row, col = self._region_pixels[self.rng.integers(len(self._region_pixels))]
+            x = row + self.rng.uniform(0.0, 1.0)
+            y = col + self.rng.uniform(0.0, 1.0)
+        else:
+            x = self.rng.uniform(self.margin_px, height - self.margin_px)
+            y = self.rng.uniform(self.margin_px, width - self.margin_px)
         return self.resolve_collisions(x, y)
 
     # -- Ein Versuch ------------------------------------------------------------
@@ -400,7 +433,7 @@ class RandomAtomSeeder:
     def positions_px(self):
         return self.pool.active_positions()
 
-    def save(self, directory, name="seeded"):
+    def save(self, directory, name="seeded", config_file=None):
         """config.json (nur die aktiven Atome) und .xyz ablegen.
 
         Die ``config.json`` ist ein normales Modell mit festen Atomen - sie
@@ -422,7 +455,7 @@ class RandomAtomSeeder:
                 original_intensities[i][active] if i == layer else v
                 for i, v in enumerate(original_intensities)]
             from mains.main import serialize
-            with open(os.path.join(directory, f"{name}_config.json"), "w") as f:
+            with open(os.path.join(directory, config_file or f"{name}_config.json"), "w") as f:
                 json.dump(serialize(config), f)
         finally:
             config.init_positions = original_positions
