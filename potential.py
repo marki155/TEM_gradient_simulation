@@ -551,6 +551,25 @@ class DifferentiablePotential(nn.Module):
 
         return intensities_, occupancies_
 
+    def set_control_points(self, group_name, new_shape):
+        """Aufloesung des Strain-Kontrollgitters einer Gruppe aendern.
+
+        Das vorhandene Feld wird dabei mitgenommen (siehe
+        ``SplineDisplacementField2D.resample_control``). Liefert zurueck, wie
+        stark sich das Verschiebungsfeld dadurch aendert, in Pixeln.
+
+        Der Optimizer muss danach neu gebaut werden: die Parameter behalten
+        zwar ihre Identitaet, ihr Adam-Zustand hat aber noch die alte Form.
+        """
+
+        field = self.strain_fields[group_name]
+        deviation = field.resample_control(new_shape)
+        self.config.group(group_name).control_points = [int(new_shape[0]), int(new_shape[1])]
+        return deviation
+
+    def control_points(self, group_name):
+        return list(self.strain_fields[group_name].control_shape)
+
     def get_init_positions(self, i):
         return getattr(self, f"init_positions_{i}")
 

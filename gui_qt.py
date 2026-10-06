@@ -990,6 +990,35 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         right.addWidget(quick_box)
 
+        strain_box = QtWidgets.QGroupBox("Strain-Kontrollgitter")
+        strain_layout = QtWidgets.QFormLayout(strain_box)
+        strain_box.setToolTip(
+            "Zahl der Kontrollpunkte je Gruppe. Beim Uebernehmen wird das\n"
+            "vorhandene Feld interpoliert - Verfeinern kostet fast nichts,\n"
+            "Vergroebern verliert Struktur.")
+
+        self.control_point_spins = {}
+        for group in self.model.config.groups:
+            row = QtWidgets.QWidget()
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            current = self.pot_layer.control_points(group.name)
+            spins = []
+            for index, value in enumerate(current):
+                spin = QtWidgets.QSpinBox()
+                spin.setRange(2, 200)
+                spin.setValue(int(value))
+                row_layout.addWidget(spin)
+                if index == 0:
+                    row_layout.addWidget(QtWidgets.QLabel("x"))
+                spins.append(spin)
+            self.control_point_spins[group.name] = spins
+            strain_layout.addRow(group.name, row)
+
+        self.apply_control_points_btn = QtWidgets.QPushButton("uebernehmen (interpoliert)")
+        strain_layout.addRow("", self.apply_control_points_btn)
+        right.addWidget(strain_box)
+
         self.editor = TrainMethodEditor(self.train_method, config=self.model.config)
         editor_scroll = QtWidgets.QScrollArea()
         editor_scroll.setWidgetResizable(True)
@@ -1040,6 +1069,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.single_tile_combo.currentIndexChanged.connect(self._on_single_tile_changed)
         self.show_atoms_on_target_checkbox.toggled.connect(self._on_show_positions_changed)
         self.reset_occupancies_btn.clicked.connect(self.reset_occupancies_ws2)
+        self.apply_control_points_btn.clicked.connect(self.apply_control_points)
         self.reset_intensities_btn.clicked.connect(self.reset_intensities)
         self.reset_free_positions_ws2_btn.clicked.connect(self.reset_free_positions_ws2)
 
@@ -1061,6 +1091,44 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     def reset_occupancies_ws2(self):
         self.parameter_frame.reset_occupancies(self._active_layer_indices())
         self._trigger_heavy_refresh()
+
+    def apply_control_points(self):
+        """Kontrollgitter im laufenden Betrieb umstellen.
+
+        Das Feld wird interpoliert, danach muss der Optimizer neu gebaut
+        werden - sein Adam-Zustand hat noch die alte Form. Laeuft gerade ein
+        Training, wird dafuer kurz pausiert.
+        """
+
+        was_running = self.worker is not None and not self.worker._pause
+        if was_running:
+            self.pause_training()
+
+        notes = []
+        for name, spins in self.control_point_spins.items():
+            shape = tuple(spin.value() for spin in spins)
+            if shape == tuple(self.pot_layer.control_points(name)):
+                continue
+            before = self.pot_layer.control_points(name)
+            deviation = self.pot_layer.set_control_points(name, shape)
+            notes.append(f"{name}: {before[0]}x{before[1]} -> {shape[0]}x{shape[1]} "
+                         f"(Feld aendert sich um {deviation:.3g} px)")
+
+        if not notes:
+            print("[strain] Kontrollgitter unveraendert")
+            if was_running:
+                self.resume_training()
+            return
+
+        self.optimizer = self.model.build_optimizer()
+        if self.worker is not None:
+            self.worker.optimizer = self.optimizer
+        self.parameter_frame.refresh_from_params()
+        print("[strain] " + "; ".join(notes))
+        self._trigger_heavy_refresh()
+
+        if was_running:
+            self.resume_training()
 
     def reset_intensities(self):
         """Startwerte holt das Potential selbst - dort steht der Bezug fuer

@@ -131,6 +131,29 @@ ABERRATION_TERMS = {
     "C56": (6, 1 / 6, 1.0, 6),
 }
 
+#: Startwerte der Sonden-Aberrationen im STEM.
+#:
+#: Alles null - und das ist keine Verlegenheit, sondern die richtige Annahme:
+#: eine STEM-Sonde wird vor der Aufnahme fokussiert und der Astigmatismus
+#: ausgeglichen, gesucht ist also der *Rest*. Ein von Hand gesetzter Startwert
+#: waere eine Behauptung ueber diesen Rest, die man nicht hat.
+#:
+#: Der Satz ist der, den man am Korrektor auch wirklich einstellt: Defokus,
+#: zweizaehliger Astigmatismus, Koma, dreizaehliger Astigmatismus, Cs. Die
+#: beiden mittleren wegzulassen ist nicht harmlos - steckt Koma im Bild und
+#: fehlt sie im Modell, landet sie im Defokus (gemessen: C10 -1.98 statt +1.5).
+#:
+#: Reichweite: bei 25 mrad und 80 kV macht C10 = 3.3 nm eine Viertelwelle. Der
+#: Nullstart findet einen echten Restdefokus bis etwa +-2 nm; liegt er weiter
+#: daneben, laeuft der Fit in ein Nebental und C10 muss grob vorgegeben werden.
+DEFAULT_PROBE_ABERRATIONS = {
+    "C10": 0.0,
+    "C12": 0.0, "phi12": 0.0,
+    "C21": 0.0, "phi21": 0.0,
+    "C23": 0.0, "phi23": 0.0,
+    "C30": 0.0,
+}
+
 #: Wertebereiche, die frueher direkt in zernike_phase geklammert wurden
 ABERRATION_CLAMPS = {"C10": (-1000., 1000.), "C30": (-20., 20.)}
 

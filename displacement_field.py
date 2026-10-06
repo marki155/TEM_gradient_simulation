@@ -11,6 +11,45 @@ import numpy as np
 class StrainTunableParameters:
     control: nn.Parameter
 
+def control_node_grid(shape, device=None, dtype=torch.float32):
+    """Normierte Koordinaten der Kontrollpunkte als grid_sample-Gitter.
+
+    Mit ``align_corners=True`` liegen erster und letzter Knoten genau auf -1
+    bzw. +1, die uebrigen gleichmaessig dazwischen.
+    """
+
+    Hc, Wc = int(shape[0]), int(shape[1])
+    ys = (torch.linspace(-1.0, 1.0, Hc, device=device, dtype=dtype) if Hc > 1
+          else torch.zeros(1, device=device, dtype=dtype))
+    xs = (torch.linspace(-1.0, 1.0, Wc, device=device, dtype=dtype) if Wc > 1
+          else torch.zeros(1, device=device, dtype=dtype))
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    return torch.stack([xx, yy], dim=-1).unsqueeze(0)     # (1, Hc, Wc, 2)
+
+
+def resample_control_grid(control, new_shape):
+    """Ein Kontrollgitter (1, 2, Hc, Wc) auf eine andere Aufloesung bringen.
+
+    Das Gitter wird in *normierten* Koordinaten abgetastet - seine Groesse ist
+    also reine Aufloesung und traegt keine Geometrie. Die neuen Knoten bekommen
+    einfach den Wert, den das bisherige Feld an ihrer Stelle hat. Weil
+    ``grid_sample`` bikubisch durch die Stuetzstellen geht, trifft das neue
+    Feld an seinen Knoten exakt das alte; dazwischen weicht es nur dort ab, wo
+    das alte Gitter die Struktur ohnehin nicht aufloesen konnte.
+
+    Verfeinern ist damit verlustfrei bis auf die Interpolation, Vergroebern
+    verliert naturgemaess Details.
+    """
+
+    control = torch.as_tensor(control)
+    if control.dim() != 4 or control.shape[1] != 2:
+        raise ValueError(f"Kontrollgitter muss (1, 2, Hc, Wc) sein, ist {tuple(control.shape)}")
+
+    grid = control_node_grid(new_shape, device=control.device, dtype=control.dtype)
+    with torch.no_grad():
+        return F.grid_sample(control, grid, mode="bicubic",
+                             padding_mode="border", align_corners=True).contiguous()
+
 class SplineDisplacementField2D(nn.Module):
     """
     Glattes 2D-Verschiebungsfeld u(x,y), parametrisiert über ein grobes
@@ -46,6 +85,36 @@ class SplineDisplacementField2D(nn.Module):
         for name, value in vars(self.tunable_parameters).items():
             if isinstance(value, (nn.Parameter, nn.ParameterList, nn.ParameterDict)):
                 setattr(self, name, value)
+
+    def resample_control(self, new_shape, probe=96):
+        """Aufloesung des Kontrollgitters aendern, das Feld dabei mitnehmen.
+
+        Liefert zurueck, wie stark sich das Verschiebungsfeld dabei geaendert
+        hat (groesste Abweichung in Pixeln, auf einem ``probe`` x ``probe``
+        Raster). Beim Verfeinern ist das nahe null, beim Vergroebern sieht man
+        daran, wieviel Struktur verloren geht.
+
+        Das Parameter-Objekt bleibt dasselbe (nur ``.data`` wird getauscht),
+        damit ParameterDicts und die GUI-Editoren weiter darauf zeigen. Der
+        Optimizer muss danach aber neu gebaut werden - sein Adam-Zustand hat
+        noch die alte Form.
+        """
+
+        new_shape = (int(new_shape[0]), int(new_shape[1]))
+        if min(new_shape) < 2:
+            raise ValueError("Das Kontrollgitter braucht mindestens 2x2 Punkte")
+        if new_shape == tuple(self.control_shape):
+            return 0.0
+
+        coords = self.make_coordinate_grid(H=probe, W=probe, pixel_centers=False)
+        with torch.no_grad():
+            before = self.sample(coords).clone()
+            values = resample_control_grid(self.tunable_parameters.control.detach(), new_shape)
+            self.tunable_parameters.control.data = values.clone()
+            after = self.sample(coords)
+
+        self.control_shape = list(new_shape)
+        return float((after - before).abs().max())
 
     def normalize_coords(self, coords_xy):
         """

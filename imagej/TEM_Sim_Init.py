@@ -747,7 +747,11 @@ def show_global_dialog(imp):
     fields.add(gd, "Defokus-Instabilitaet [nm]", 0.01, 3)
 
     gd.addMessage("--- nur STEM ---")
-    gd.addStringField("Aberrationen der Sonde", "C10=0, C12=0, phi12=0, C30=0.001", 60)
+    # Sonde: alles null. Sie wird vor der Aufnahme fokussiert und der
+    # Astigmatismus ausgeglichen - gesucht ist der Rest. Koma und
+    # Dreizaehligkeit gehoeren mit in den Satz, sonst landen sie im Defokus.
+    gd.addStringField("Aberrationen der Sonde",
+                      "C10=0, C12=0, phi12=0, C21=0, phi21=0, C23=0, phi23=0, C30=0", 60)
     fields.add(gd, "Konvergenzwinkel [mrad]", 25.0, 1)
     fields.add(gd, "Detektor innen [mrad]", 60.0, 1)
     fields.add(gd, "Detektor aussen [mrad]", 200.0, 1)

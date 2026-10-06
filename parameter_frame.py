@@ -105,6 +105,10 @@ class TensorEditor(QFrame):
         self.spinboxes: list[QDoubleSpinBox] = []
         self.max_elements = self.MAX_INLINE_ELEMENTS if max_elements is None else max_elements
         self.summary_label: QLabel | None = None
+        # gemerkt, damit die Zeilen nach einer Formaenderung neu entstehen
+        # koennen (das Strain-Kontrollgitter laesst sich im Betrieb umstellen)
+        self._decimals = decimals
+        self._step = step
 
         self._building = False
 
@@ -164,6 +168,18 @@ class TensorEditor(QFrame):
 
         self._building = False
 
+    def _rebuild_ui(self):
+        """Zeilen neu aufbauen - noetig, wenn der Tensor seine Form geaendert hat."""
+
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self.spinboxes = []
+        self.summary_label = None
+        self._build_ui(decimals=self._decimals, step=self._step)
+
     def _make_spinbox(self, decimals: int, step: float) -> QDoubleSpinBox:
         sb = QDoubleSpinBox()
         sb.setDecimals(decimals)
@@ -196,8 +212,19 @@ class TensorEditor(QFrame):
                 f"max {float(values.max()):.4g}")
 
     def refresh_from_tensor(self):
-        self._building = True
         cpu_tensor = self.tensor.detach().cpu()
+
+        # Form geaendert (z.B. anderes Strain-Kontrollgitter)? Dann passen die
+        # vorhandenen Zeilen nicht mehr.
+        needs_rebuild = (
+            (self.summary_label is None and cpu_tensor.ndim > 0
+             and cpu_tensor.numel() != len(self.spinboxes))
+            or (self.summary_label is not None and cpu_tensor.numel() <= self.max_elements))
+        if needs_rebuild:
+            self._rebuild_ui()
+            cpu_tensor = self.tensor.detach().cpu()
+
+        self._building = True
 
         if self.summary_label is not None:
             self.summary_label.setText(self._summary_text(cpu_tensor))
@@ -224,6 +251,7 @@ from ctf import (
     cartesian_keys,
     migrate_serialized_ctf_parameters,
 )
+from displacement_field import resample_control_grid
 from potential import migrate_serialized_potential_parameters
 
 
@@ -443,6 +471,53 @@ def update_from_serialized(target: Any, source: Any):
 
     # Fallback für einfache skalare Attribute:
     # hier kann nicht "in place" aktualisiert werden, also ignorieren oder separat behandeln
+def resample_serialized_strain(data, params_root):
+    """Gespeicherte Strain-Kontrollgitter auf die Groesse dieses Modells bringen.
+
+    Sonst waere die Zahl der Kontrollpunkte einmal festgelegt: eine mit 10x10
+    gespeicherte Datei liesse sich in ein Modell mit 20x20 nicht mehr laden.
+    Das Gitter wird in normierten Koordinaten abgetastet, seine Groesse ist
+    also reine Aufloesung - Umrechnen ist wohldefiniert.
+    """
+
+    potential = data.get("potential_parameters")
+    if not isinstance(potential, dict):
+        return data
+    saved_fields = potential.get("strain_fields")
+    if not isinstance(saved_fields, dict):
+        return data
+
+    targets = getattr(getattr(params_root, "potential_parameters", None), "strain_fields", None)
+    if not targets:
+        return data
+
+    changed = {}
+    for name, entry in saved_fields.items():
+        target = targets.get(name)
+        if target is None or not isinstance(entry, dict) or "control" not in entry:
+            continue
+
+        saved = torch.as_tensor(entry["control"], dtype=torch.float32)
+        wanted = tuple(target.control.shape)
+        if tuple(saved.shape) == wanted:
+            continue
+        if saved.dim() != 4 or saved.shape[:2] != wanted[:2]:
+            print(f"[parameter] Strain-Gitter {name}: {tuple(saved.shape)} laesst sich nicht "
+                  f"auf {wanted} umrechnen - uebersprungen")
+            continue
+
+        resampled = resample_control_grid(saved, wanted[2:])
+        changed[name] = dict(entry, control=resampled.tolist())
+        print(f"[parameter] Strain-Gitter {name}: {saved.shape[2]}x{saved.shape[3]} -> "
+              f"{wanted[2]}x{wanted[3]} umgerechnet")
+
+    if changed:
+        data = dict(data)
+        data["potential_parameters"] = dict(potential,
+                                            strain_fields=dict(saved_fields, **changed))
+    return data
+
+
 def migrate_parameters_dict(data, params_root, config=None):
     """Bringt eine gespeicherte Parameter-Datei auf die aktuelle Struktur.
 
@@ -459,6 +534,8 @@ def migrate_parameters_dict(data, params_root, config=None):
     if isinstance(potential, dict) and config is not None:
         data["potential_parameters"] = migrate_serialized_potential_parameters(
             potential, config)
+
+    data = resample_serialized_strain(data, params_root)
 
     ctf_parameters = data.get("ctf_parameters")
     if isinstance(ctf_parameters, dict):

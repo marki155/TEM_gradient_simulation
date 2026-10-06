@@ -13,7 +13,7 @@ from loss_functions import *
 from multislice import DifferentiableMultislice
 from potential import DifferentiablePotential, TunablePotentialParameters
 
-from ctf import CTFLayer, TunableCTFParameters
+from ctf import DEFAULT_PROBE_ABERRATIONS, CTFLayer, TunableCTFParameters
 from stem import DifferentiableHAADF
 
 from layers import (
@@ -447,8 +447,14 @@ class NN_particles(nn.Module):
         potential_layer = DifferentiablePotential(self.config, self.train_method,
                                                   device=self.device,
                                                   output_mode="element_density")
+        # Ohne eigene Vorgabe wuerde die Sonde die TEM-Aberrationen erben - bei
+        # C10 = -13 nm waere sie um vier Viertelwellen defokussiert und ueber
+        # tausende Pixel verschmiert. Der Sondensatz startet stattdessen bei 0.
+        probe_aberrations = getattr(self.config, "init_probe_aberrations", None)
+        if not probe_aberrations:
+            probe_aberrations = dict(DEFAULT_PROBE_ABERRATIONS)
         probe_layer = CTFLayer(self.config, device=self.device, train_method=self.train_method,
-                               aberrations=getattr(self.config, "init_probe_aberrations", None))
+                               aberrations=probe_aberrations)
         haadf_layer = DifferentiableHAADF(self.config, self.train_method,
                                           probe_layer, device=self.device)
 

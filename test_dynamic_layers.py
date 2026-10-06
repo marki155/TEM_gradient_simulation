@@ -603,6 +603,49 @@ def test_normalisation_is_scale_invariant():
     print("  Normierung: bei 0 unveraendert, Korrekturen relativ, invariant von 1e-6 bis 1e3")
 
 
+def test_stem_probe_defaults():
+    """Die Sonde startet bei 0 - und erbt nicht die TEM-Aberrationen."""
+
+    from ctf import DEFAULT_PROBE_ABERRATIONS
+
+    layers, groups = graphene_only()
+    layers[0].elements = ["B", "C", "N", "O"]
+    config = make_config(layers, groups, n_atoms=60)
+    config.imaging_mode = "stem_haadf"
+    config.stem_convergence_mrad = 25.0
+    config.stem_detector_mrad = (60.0, 200.0)
+    config.stem_source_size_A = 0.4
+    config.init_aberrations = dict(ABERRATIONS)      # TEM: C10 = -13 nm
+    config.init_probe_aberrations = None             # nichts vorgegeben
+
+    tm = TrainMethod().ensure_for_config(config)
+    model = NN_particles(config=config, pixel_size_nm=config.pixel_size_nm,
+                         voltage_kV=config.voltage_kV, train_method=tm,
+                         device=DEVICE, train_methods=tm)
+    model.build()
+
+    values = {k: float(v) for k, v in model.probe_layer.tunable_parameters.aberrations.items()}
+    assert all(abs(v) < 1e-9 for v in values.values()), values
+    assert abs(float(config.init_aberrations["C10"]) + 13.0) < 1e-9, "TEM-CTF bleibt unberuehrt"
+
+    # Der Satz ist der, den man am Korrektor einstellt
+    for key in ("C10", "C12", "phi12", "C21", "phi21", "C23", "phi23", "C30"):
+        assert key in DEFAULT_PROBE_ABERRATIONS, key
+
+    # eine fokussierte Sonde ist deutlich enger als die TEM-geerbte
+    focused = model.imaging_layer.probe_intensity().detach().cpu().numpy()
+    config.init_probe_aberrations = dict(config.init_aberrations)
+    blurred_model = NN_particles(config=config, pixel_size_nm=config.pixel_size_nm,
+                                 voltage_kV=config.voltage_kV, train_method=tm,
+                                 device=DEVICE, train_methods=tm)
+    blurred_model.build()
+    blurred = blurred_model.imaging_layer.probe_intensity().detach().cpu().numpy()
+
+    assert focused.max() > 3.0 * blurred.max(), (float(focused.max()), float(blurred.max()))
+    print(f"  STEM-Sonde: Startwerte alle 0, Spitze {focused.max():.3g} statt "
+          f"{blurred.max():.3g} mit den TEM-Werten")
+
+
 def test_legacy_migration(dataset="platelet_11"):
     config_file = os.path.join(dataset, "config", "config.json")
     if not os.path.exists(config_file):
@@ -666,6 +709,8 @@ if __name__ == "__main__":
     test_haadf_cross_sections()
     print("test_stem_imaging")
     test_stem_imaging()
+    print("test_stem_probe_defaults")
+    test_stem_probe_defaults()
     print("test_legacy_migration")
     test_legacy_migration()
     print("\nalle Tests durch")
