@@ -1,7 +1,7 @@
 """Headless-Test fuer das zufaellige Atom-Seeding (``atom_seeding.py``).
 
 Das Zielbild wird mit demselben Modelltyp aus bekannten Graphen-Positionen
-gerendert; der Seeder startet mit leerem Pool und soll die Positionen wieder
+gerendert; der Seeder startet ohne Atome und soll die Positionen wieder
 finden.
 
 Aufruf:  python3 test_atom_seeding.py
@@ -21,8 +21,7 @@ import multislice
 
 multislice.CHECK_PHASE = False
 
-from atom_seeding import (
-    INACTIVE_OCCUPANCY, PARK_POSITION, AtomPool, RandomAtomSeeder, graphene_capacity)
+from atom_seeding import AtomStore, RandomAtomSeeder
 from mains.main_random_atoms import build_seeding_model
 from nn import CONFIG_CLASS_REGISTRY
 from mains.main import deserialize
@@ -48,16 +47,15 @@ def graphene_lattice(shape, pixel_nm):
     return points[keep]
 
 
-def make(mode, capacity, aberrations=None, border_px=0):
+def make(mode, aberrations=None, border_px=0):
     image = np.random.default_rng(0).random(SHAPE)
-    return build_seeding_model(image, PIXEL_NM, mode, capacity, border_px=border_px,
+    return build_seeding_model(image, PIXEL_NM, mode, border_px=border_px,
                                aberrations=aberrations, padding=20)
 
 
-def render_target(mode, true, capacity, aberrations=None):
-    model, _t, _tm = make(mode, capacity, aberrations)
-    pool = AtomPool(model.potential_layer)
-    pool.set_slots(np.arange(len(true)), true, True)
+def render_target(mode, true, aberrations=None):
+    model, _t, _tm = make(mode, aberrations)
+    AtomStore(model.potential_layer).apply([], true)
     with torch.no_grad():
         image = model.model(None)[0].detach().clone()
     return (image - image.min()) / (image.max() - image.min())
@@ -69,43 +67,47 @@ def recovery(found, true, tolerance_px=2.5):
     return float((distance < tolerance_px).mean())
 
 
-def test_pool_starts_empty_and_shapes_stay_fixed():
-    model, target, _ = make("stem", 50)
+def test_store_starts_empty_and_grows():
+    model, target, _ = make("stem")
     pot = model.potential_layer
-    parameters = {name: p.shape for name, p in pot.named_parameters()}
     objects = [id(p) for p in pot.parameters()]
 
-    pool = AtomPool(pot)
-    assert pool.n_active == 0 and pool.free_slot() == 0
+    store = AtomStore(pot)
+    assert store.n == 0
     with torch.no_grad():
         image = model.model(None)[0]
-    assert torch.isfinite(image).all() and float(image.abs().max()) == 0.0, "geparkte Atome duerfen nichts malen"
+    assert torch.isfinite(image).all() and float(image.abs().max()) == 0.0
 
-    pool.set_slots([0, 1, 2], [[10, 10], [30, 30], [50, 50]], True)
-    assert pool.n_active == 3 and pool.free_slot() == 3
+    token = store.apply([], [[10, 10], [30, 30], [50, 50]])
+    assert store.n == 3 and pot.get_init_positions(0).shape[0] == 3
     with torch.no_grad():
         assert float(model.model(None)[0].max()) > 0
-
-    assert {n: p.shape for n, p in pot.named_parameters()} == parameters
+    store.apply([1], [[70, 70]])
+    assert store.n == 3 and np.allclose(store.positions, [[10, 10], [50, 50], [70, 70]])
     assert [id(p) for p in pot.parameters()] == objects, "Parameter-Objekte muessen gleich bleiben"
-    print("ok  pool: leer startet, Formen und Parameter-Objekte bleiben")
+
+    other = AtomStore(pot)
+    assert np.allclose(other.positions, store.positions), "Zustand wird aus dem Modell gelesen"
+    store.undo(token)
+    print("ok  store: leer startet, waechst/schrumpft, Parameter-Objekte bleiben")
 
 
-def test_pool_sync_reads_model_state():
-    model, _, _ = make("stem", 20)
-    pool = AtomPool(model.potential_layer)
-    pool.set_slots([2, 5], [[20, 20], [40, 40]], True)
+def test_store_sync_drops_unoccupied():
+    model, _, _ = make("stem")
+    store = AtomStore(model.potential_layer)
+    store.apply([], [[10, 10], [30, 30], [50, 50]])
+    with torch.no_grad():
+        store.tensors()[4][1] = -5.0
+    store.sync()
+    assert store.n == 2 and np.allclose(store.positions, [[10, 10], [50, 50]])
+    print("ok  store: Atome mit Occupancy < 0.5 fallen beim Einlesen weg")
 
-    other = AtomPool(model.potential_layer)
-    assert other.n_active == 2
-    assert np.allclose(other.active_positions(), [[20, 20], [40, 40]])
-    print("ok  pool: Zustand wird aus dem Modell gelesen")
 
-
-def seeder_with(atoms, **kwargs):
-    model, target, _ = make("stem", 40)
+def seeder_with(atoms, mode="stem", **kwargs):
+    model, target, _ = make(mode)
     seeder = RandomAtomSeeder(model, target, **kwargs)
-    seeder.pool.set_slots(np.arange(len(atoms)), atoms, True)
+    seeder.atoms.apply([], atoms)
+    seeder.resync(sync_store=False)
     return seeder
 
 
@@ -141,42 +143,136 @@ def test_collision_chain_terminates():
 
 def test_rejected_trial_restores_everything():
     true = graphene_lattice(SHAPE, PIXEL_NM)[:30]
-    seeder = seeder_with(true, move_prob=0.3, remove_prob=0.2, seed=3)
-    seeder.loss = -np.inf          # nichts kann mehr besser sein
-    before = (seeder.pool.positions.copy(), seeder.pool.active.copy())
-    with torch.no_grad():
-        image_before = seeder.model.model(None)[0].clone()
+    for local in (False, True):
+        seeder = seeder_with(true, move_prob=0.3, remove_prob=0.2, seed=3, local=local)
+        seeder.loss = -np.inf          # nichts kann mehr besser sein
+        before = seeder.atoms.positions.copy()
+        with torch.no_grad():
+            image_before = seeder.model.model(None)[0].clone()
 
-    for _ in range(40):
-        assert seeder.trial() is False
+        for _ in range(40):
+            assert seeder.trial() is False
 
-    assert np.array_equal(seeder.pool.active, before[1])
-    assert np.array_equal(seeder.pool.positions, before[0])
-    with torch.no_grad():
-        assert torch.equal(seeder.model.model(None)[0], image_before), "Bild muss bitgleich zurueck sein"
-    # Spiegel stimmt mit dem Modell ueberein
-    mirror = (seeder.pool.positions.copy(), seeder.pool.active.copy())
-    seeder.pool.sync()
-    assert np.array_equal(seeder.pool.active, mirror[1])
-    assert np.allclose(seeder.pool.positions[seeder.pool.active], mirror[0][mirror[1]])
+        assert np.array_equal(seeder.atoms.positions, before)
+        with torch.no_grad():
+            assert torch.equal(seeder.model.model(None)[0], image_before), \
+                "Bild muss bitgleich zurueck sein"
+        mirror = seeder.atoms.positions.copy()
+        seeder.atoms.sync()
+        assert np.allclose(seeder.atoms.positions, mirror)
     print("ok  abgelehnte Versuche (Einfuegen/Verschieben/Entfernen) stellen alles exakt her")
 
 
-def test_pool_full_stops_cleanly():
-    model, target, _ = make("stem", 6)
-    seeder = RandomAtomSeeder(model, target, seed=0)
+def test_neighbor_distribution():
+    # 0.2 A/px: Bindung 1.42 A = 7.1 px, sigma 0.2 A = 1 px, Cutoffs 2.5 .. 10 px
+    seeder = seeder_with(np.array([[48.0, 48.0]]))
+    seeder.neighbor_seeding = True
+    points = np.array([seeder._neighbor_point() for _ in range(4000)])
+    radius = np.hypot(points[:, 0] - 48.0, points[:, 1] - 48.0)
+    assert radius.min() >= 2.5 - 1e-9 and radius.max() <= 10.0 + 1e-9, "Cutoffs"
+    assert abs(radius.mean() - 7.1) < 0.1 and abs(radius.std() - 1.0) < 0.1, \
+        f"Gauss um die Bindungslaenge: {radius.mean():.2f} +- {radius.std():.2f} px"
+    angle = np.arctan2(points[:, 1] - 48.0, points[:, 0] - 48.0)
+    assert abs(np.cos(angle).mean()) < 0.05 and abs(np.sin(angle).mean()) < 0.05, "Winkel gleichverteilt"
+    assert abs(seeder.bond_A - 1.42) < 1e-9 and abs(seeder.neighbor_max_A - 2.0) < 1e-9
+
+    seeder.margin_px = 45.0          # Platz nur noch 45..51: Punkte ausserhalb werden verworfen
+    inside = [seeder._neighbor_point() for _ in range(200)]
+    assert all(p is None or (45.0 <= p[0] < 51.0 and 45.0 <= p[1] < 51.0) for p in inside)
+
+    seeder.margin_px = 0.0
+    atoms = np.array([[20.0, 20.0], [20.0, 70.0], [70.0, 70.0], [70.0, 20.0], [45.0, 45.0]])
+    ring = seeder_with(atoms)
+    ring.neighbor_seeding = True
+    order = []
+    for _ in range(12):
+        x, y = ring._neighbor_point()
+        order.append(int(np.argmin(np.hypot(atoms[:, 0] - x, atoms[:, 1] - y))))
+    assert order == [0, 1, 2, 3, 4] * 2 + [0, 1], f"Reihenfolge {order}"
+    skipped = [ring._neighbor_point(exclude=[ring._neighbor_cursor % 5]) for _ in range(3)]
+    assert all(p is not None for p in skipped)
+
+    empty = seeder_with(np.zeros((0, 2)))
+    empty.neighbor_seeding = True
+    assert empty._neighbor_point() is None
+    xy, grave, merged = empty.propose()
+    assert grave == [] and not merged, "ohne Atome: gleichverteilt"
+    print(f"ok  Nachbar-Positionen: r = {radius.mean():.2f} +- {radius.std():.2f} px "
+          f"[{radius.min():.1f}, {radius.max():.1f}]")
+
+
+def test_neighbor_seeding_grows_connected():
+    model, target, _ = make("stem")
+    seeder = RandomAtomSeeder(model, target, seed=3, margin_px=4, neighbor_seeding=True, max_atoms=12)
+    seeder.run(600, log_every=0)
+    pos = seeder.atoms.positions
+    assert len(pos) >= 3
+    first = seeder.pixel_A
+    dist = np.hypot(*(pos[:, None] - pos[None]).transpose(2, 0, 1)) + np.eye(len(pos)) * 1e9
+    assert (dist.min(axis=1) * first <= 2.5).all(), "jedes Atom hat einen Nachbarn in Bindungsnaehe"
+    print(f"ok  Nachbar-Seeding: {len(pos)} Atome, groesster Nachbarabstand {dist.min(axis=1).max() * first:.2f} A")
+
+
+def test_max_atoms_stops_cleanly():
+    model, target, _ = make("stem")
+    seeder = RandomAtomSeeder(model, target, seed=0, max_atoms=6)
     stats = seeder.run(400, log_every=0)
-    assert seeder.pool.n_active <= 6
-    assert stats.full or seeder.pool.n_active < 6
-    print(f"ok  voller Pool: {seeder.pool.n_active}/6 Atome, full={stats.full}")
+    assert seeder.n_atoms <= 6 and (stats.full or seeder.n_atoms < 6)
+    print(f"ok  Atomgrenze: {seeder.n_atoms}/6 Atome, full={stats.full}")
+
+
+def check_local_matches_full(mode, aberrations, trials, tolerance):
+    """Der lokale Simulator muss Bild und Loss der vollen Simulation treffen."""
+
+    true = graphene_lattice(SHAPE, PIXEL_NM)
+    target = render_target(mode, true, aberrations)
+    model, _t, _tm = make(mode, aberrations, border_px=4)
+    seeder = RandomAtomSeeder(model, target, seed=1, margin_px=4,
+                              move_prob=0.1, remove_prob=0.05, refresh_every=0)
+    assert seeder.uses_local, seeder.local_note
+    worst_loss = worst_image = 0.0
+    for k in range(trials):
+        seeder.trial()
+        if k % 25 == 24:
+            full = seeder.evaluate()
+            with torch.no_grad():
+                image = model.model(None)[0]
+            scale = float(image.abs().max())
+            worst_loss = max(worst_loss, abs(seeder.loss - full))
+            worst_image = max(worst_image, float((seeder.local.sim - image).abs().max()) / scale)
+    assert seeder.stats.accepted > 20 and seeder.stats.fallbacks == 0
+    print(f"ok  lokal == voll ({mode}): {seeder.stats.accepted} angenommen, "
+          f"max |dLoss| {worst_loss:.1e}, max |dBild| {worst_image:.1e}")
+    assert worst_loss < tolerance and worst_image < tolerance
+
+
+def test_local_matches_full_stem():
+    check_local_matches_full("stem", None, 400, 2e-3)
+
+
+def test_local_matches_full_tem():
+    check_local_matches_full("tem", TEM_ABERRATIONS, 400, 2e-3)
+
+
+def test_local_and_full_find_same_decisions():
+    true = graphene_lattice(SHAPE, PIXEL_NM)
+    target = render_target("stem", true)
+    runs = []
+    for local in (False, True):
+        model, _t, _tm = make("stem", border_px=4)
+        seeder = RandomAtomSeeder(model, target, seed=5, margin_px=4, local=local)
+        seeder.run(300, log_every=0)
+        runs.append((seeder.n_atoms, seeder.loss))
+    print(f"ok  gleiche Entscheidungen: voll {runs[0][0]} Atome / lokal {runs[1][0]} Atome")
+    assert abs(runs[0][0] - runs[1][0]) <= max(3, 0.1 * runs[0][0])
+    assert abs(runs[0][1] - runs[1][1]) < 0.02
 
 
 def test_stem_recovers_lattice():
     true = graphene_lattice(SHAPE, PIXEL_NM)
-    capacity = int(len(true) * 1.5)
-    target = render_target("stem", true, capacity)
+    target = render_target("stem", true)
 
-    model, _t, _tm = make("stem", capacity)
+    model, _t, _tm = make("stem")
     seeder = RandomAtomSeeder(model, target, seed=1)
     first = None
     for _ in range(5):
@@ -194,10 +290,9 @@ def test_stem_recovers_lattice():
 
 def test_tem_makes_progress():
     true = graphene_lattice(SHAPE, PIXEL_NM)
-    capacity = int(len(true) * 1.5)
-    target = render_target("tem", true, capacity, TEM_ABERRATIONS)
+    target = render_target("tem", true, TEM_ABERRATIONS)
 
-    model, _t, _tm = make("tem", capacity, TEM_ABERRATIONS)
+    model, _t, _tm = make("tem", TEM_ABERRATIONS)
     seeder = RandomAtomSeeder(model, target, seed=1)
     seeder.run(10, log_every=0)
     early = seeder.loss
@@ -212,34 +307,90 @@ def test_tem_makes_progress():
 
 def test_tune_improves_wrong_probe():
     true = graphene_lattice(SHAPE, PIXEL_NM)
-    capacity = int(len(true) * 1.5)
-    target = render_target("stem", true, capacity)
+    target = render_target("stem", true)
 
-    model, _t, train_method = make("stem", capacity)
+    model, _t, train_method = make("stem")
     train_method.train_ctf_aberrations.lr = 0.05
     seeder = RandomAtomSeeder(model, target, seed=0)
-    seeder.pool.set_slots(np.arange(len(true)), true, True)
-    seeder.loss = seeder.evaluate()
+    seeder.atoms.apply([], true)
+    seeder.resync(sync_store=False)
     good = seeder.loss
 
     defocus = model.imaging_layer.tunable_parameters.aberrations["C10"]
     with torch.no_grad():
         defocus += 4.0
-    bad = seeder.evaluate()
+    seeder.resync(sync_store=False)
+    bad = seeder.loss
     assert bad > good + 1e-3, (bad, good)
 
     seeder.tune(60)
     after = seeder.loss
     print(f"ok  tune: Sonde falsch {bad:.4f} -> {after:.4f} (Soll {good:.4f}), C10 {float(defocus):.2f}")
     assert after < bad
-    assert np.array_equal(seeder.pool.active, np.arange(capacity) < len(true)), "tune darf Atome nicht anfassen"
+    assert np.allclose(seeder.atoms.positions, true), "tune darf Atome nicht anfassen"
+
+
+def test_gradient_landscape_matches_local_loss():
+    true = graphene_lattice(SHAPE, PIXEL_NM)
+    target = render_target("stem", true)
+    model, _t, _tm = make("stem")
+    seeder = RandomAtomSeeder(model, target, seed=1, margin_px=4)
+    for _ in range(60):
+        seeder.trial()
+    local = seeder.local
+    gain = local.insertion_gain(seeder.atoms.new_weight)
+    rng = np.random.default_rng(0)
+    predicted, actual = [], []
+    for _ in range(80):
+        i, j = rng.integers(6, 90, 2)
+        predicted.append(gain[i, j])
+        actual.append(local.propose([], np.array([[float(i), float(j)]]), seeder.atoms.new_weight).loss - seeder.loss)
+    predicted, actual = np.array(predicted), np.array(actual)
+    assert np.abs(predicted - actual).max() < 1e-5, np.abs(predicted - actual).max()
+
+    seeder.gradient_seeding = True
+    seeder._version += 1
+    masked = seeder._gain_map()
+    finite = np.isfinite(masked)
+    assert finite.any() and (masked[finite] < 0).all(), "nur Verbesserungen bleiben"
+    rows, cols = np.nonzero(finite)
+    distance = np.hypot(rows[:, None] - seeder.atoms.positions[None, :, 0],
+                        cols[:, None] - seeder.atoms.positions[None, :, 1]).min(axis=1)
+    assert (distance > seeder.merge_px - 0.75).all(), "keine Stellen in der Kollisionszone"
+    print(f"ok  Gradienten-Landschaft exakt (max Abweichung {np.abs(predicted - actual).max():.1e}), "
+          f"{finite.sum()} Stellen verbessern, keine in der Kollisionszone")
+
+
+def test_gradient_seeding_beats_random():
+    true = graphene_lattice(SHAPE, PIXEL_NM)
+    target = render_target("stem", true)
+    losses = {}
+    for name, kw in (("zufall", {}), ("gradient", dict(gradient_seeding=True)),
+                     ("gradient+nachbar", dict(gradient_seeding=True, neighbor_seeding=True))):
+        model, _t, _tm = make("stem")
+        seeder = RandomAtomSeeder(model, target, seed=1, margin_px=4, **kw)
+        for _ in range(200):
+            seeder.trial()
+        losses[name] = seeder.loss
+        if name != "zufall":
+            assert (seeder.atoms.positions >= 4 - 1e-6).all() and (seeder.atoms.positions <= 96 - 4).all()
+    assert losses["gradient"] < losses["zufall"] - 0.1 and losses["gradient+nachbar"] < losses["zufall"] - 0.05, losses
+    print("ok  nach 200 Versuchen: " + ", ".join(f"{k} {v:.3f}" for k, v in losses.items()))
+
+
+def test_gradient_ignored_for_tem():
+    model, target, _ = make("tem")
+    seeder = RandomAtomSeeder(model, target, seed=0, margin_px=4, gradient_seeding=True)
+    assert not seeder.gradient_supported
+    seeder.run(30, log_every=0)
+    print("ok  Gradienten-Seeding im TEM: wird uebergangen, normales Seeding")
 
 
 def test_save_roundtrip():
     true = graphene_lattice(SHAPE, PIXEL_NM)[:60]
-    model, target, _ = make("stem", 100)
+    model, target, _ = make("stem")
     seeder = RandomAtomSeeder(model, target, seed=0)
-    seeder.pool.set_slots(np.arange(len(true)), true, True)
+    seeder.atoms.apply([], true)
     with torch.no_grad():
         reference = model.model(None)[0].detach().clone()
 
@@ -250,7 +401,6 @@ def test_save_roundtrip():
             config = deserialize(json.load(f), CONFIG_CLASS_REGISTRY)
 
     assert len(config.init_positions[0]) == len(true)
-    assert seeder.model.config.init_positions[0].shape[0] == 100, "Modell-Config bleibt unveraendert"
 
     from nn import NN_particles
     from training_parameter import TrainMethod
@@ -275,8 +425,7 @@ def test_dataset_folder():
 
     true = graphene_lattice(SHAPE, PIXEL_NM)
     true = true[true[:, 1] < 60]                       # Atome nur links
-    capacity = int(len(true) * 2)
-    image = render_target("stem", true, capacity).cpu().numpy()
+    image = render_target("stem", true).cpu().numpy()
     mask = np.zeros(SHAPE, dtype=np.uint8)
     mask[:, :64] = 255
 
@@ -307,27 +456,35 @@ def test_dataset_folder():
 
         # zweiter Lauf: nur der Ordner, Atome aus dem ersten Lauf bleiben
         before = len(positions)
-        assert mra.main([folder, "--resume", "--trials", "200", "--border-px", "4",
+        assert mra.main([folder, "--trials", "200", "--border-px", "4",
                          "--tune-every", "0", "--log-every", "0", "--seed", "2"]) == 0
         with open(os.path.join(out, "config.json")) as f:
             again = deserialize(json.load(f), CONFIG_CLASS_REGISTRY)
-        assert len(again.init_positions[0]) >= before * 0.9
+        assert len(again.init_positions[0]) >= before * 0.9, "vorhandener Stand wird automatisch weitergefuehrt"
+
+        # --fresh: neu anfangen, alter Stand in Sicherungsordner
+        assert mra.main([folder, "--fresh", "--trials", "5", "--border-px", "4",
+                         "--tune-every", "0", "--log-every", "0", "--seed", "2"]) == 0
+        backups = [d for d in os.listdir(folder) if d.startswith("config_random_")]
+        assert len(backups) == 1
     print(f"ok  Datenordner: {before} Atome, Resume {len(again.init_positions[0])}")
 
 
-def test_graphene_capacity():
-    assert abs(graphene_capacity((100, 100), 0.1, 1.0) - 3820) <= 1 and abs(graphene_capacity((100, 100), 0.1, 1.5) - 5730) <= 1
-    print("ok  Pool-Groesse")
-
-
 def main():
-    test_graphene_capacity()
-    test_pool_starts_empty_and_shapes_stay_fixed()
-    test_pool_sync_reads_model_state()
+    test_store_starts_empty_and_grows()
+    test_store_sync_drops_unoccupied()
     test_collision_rule_matches_script()
     test_collision_chain_terminates()
     test_rejected_trial_restores_everything()
-    test_pool_full_stops_cleanly()
+    test_max_atoms_stops_cleanly()
+    test_neighbor_distribution()
+    test_gradient_landscape_matches_local_loss()
+    test_gradient_seeding_beats_random()
+    test_gradient_ignored_for_tem()
+    test_neighbor_seeding_grows_connected()
+    test_local_matches_full_stem()
+    test_local_matches_full_tem()
+    test_local_and_full_find_same_decisions()
     test_save_roundtrip()
     test_dataset_folder()
     test_tune_improves_wrong_probe()

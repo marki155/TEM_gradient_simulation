@@ -1,3 +1,4 @@
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -55,6 +56,8 @@ class VizPayload:
     mask_img: Optional[np.ndarray] = None
 
     ctf_phase: Optional[np.ndarray] = None
+    #: STEM: Sondenintensitaet statt CTF-Phase
+    probe_img: Optional[np.ndarray] = None
     ring_mask: Optional[np.ndarray] = None
     p_diff: Optional[np.ndarray] = None
 
@@ -98,19 +101,55 @@ def collect_layer_visuals(pot_layer):
         pot_positions.append(np.column_stack([px, py]).astype(np.float32))
         pot_intensities.append(np.asarray(ints, dtype=np.float32))
 
+    # nur besetzte Atome (die anderen sind NaN), alle Schichten auf denselben
+    # Klassen, damit die Kurven vergleichbar sind
     hist_counts = None
     hist_edges = None
-    intensities = pot_layer.get_intensities_raw()
-    if intensities is not None:
-        hist_counts = []
-        for arr in intensities:
-            arr_np = arr.detach().cpu().numpy().ravel()
-            arr_np = arr_np[np.isfinite(arr_np)]
-            counts, edges = np.histogram(arr_np, bins=100)
-            hist_counts.append(counts.astype(np.float32))
-            hist_edges = edges.astype(np.float32)
+    values = [v[np.isfinite(v)] for v in pot_intensities]
+    filled = [v for v in values if v.size]
+    if filled:
+        low = min(float(v.min()) for v in filled)
+        high = max(float(v.max()) for v in filled)
+        if high - low < 1e-6:
+            low, high = low - 0.5, high + 0.5
+        hist_edges = np.linspace(low, high, 101, dtype=np.float32)
+        hist_counts = [np.histogram(v, bins=hist_edges)[0].astype(np.float32) for v in values]
 
     return pot_positions, pot_intensities, hist_counts, hist_edges
+
+
+PROBE_VIEW_MAX_PX = 64
+
+
+def probe_image(ctf_layer):
+    """STEM: Sondenintensitaet, zentriert und auf den sichtbaren Kern zugeschnitten."""
+
+    with torch.no_grad():
+        profile = ctf_layer.probe_profile().detach().cpu().numpy()
+    height, width = profile.shape
+    cy, cx = height // 2, width // 2
+    yy, xx = np.indices(profile.shape)
+    radius = np.hypot(yy - cy, xx - cx).ravel()
+    order = np.argsort(radius)
+    cumulative = np.cumsum(profile.ravel()[order])
+    cumulative /= max(cumulative[-1], 1e-30)
+    r90 = radius[order][min(np.searchsorted(cumulative, 0.9), len(order) - 1)]
+    half = int(np.clip(np.ceil(2.5 * r90), 8, min(PROBE_VIEW_MAX_PX, cy, cx)))
+    return profile[cy - half:cy + half + 1, cx - half:cx + half + 1]
+
+
+def ctf_visuals(ctf_layer, stem):
+    """(CTF-Phase, Ring, Sonde) - im STEM nur die Sonde."""
+
+    try:
+        if stem:
+            return None, None, probe_image(ctf_layer)
+        dp, env, ring_mask, psf = ctf_layer.to_diffraction_patterns(
+            max_angle_mrad=42.0, gpts=1300)
+        return (np.angle(dp.detach().cpu().numpy()), ring_mask.detach().cpu().numpy(), None)
+    except Exception as exc:
+        print("CTF update failed:", exc)
+        return None, None, None
 
 
 def strain_maps_for_active_group(pot_layer, train_method, resolution=STRAIN_MAP_RESOLUTION):
@@ -163,6 +202,7 @@ class TrainingWorker(QtCore.QObject):
 
         self._stop = False
         self._pause = False
+        self.parked = False
         self.losses = []
         self.deleted_steps = 0
 
@@ -195,6 +235,37 @@ class TrainingWorker(QtCore.QObject):
 
     #spin_values_changed = QtCore.Signal(float, float, float, float, float, float, float,n  bool)  # scale, rot, shift_x, shift_y
     parameter_update = QtCore.Signal(ParticlesTunableParameters)
+
+    #: Strain-Karten kosten Zeit und sind beim Seeding ohne Bedeutung
+    with_strain = True
+
+    def _stem(self):
+        return getattr(self.model.config, "imaging_mode", "tem") == "stem_haadf"
+
+    def _strain_maps(self):
+        if not self.with_strain:
+            return None, None
+        return strain_maps_for_active_group(self.pot_layer, self.train_method)
+
+    def _wait_while_paused(self):
+        if self._pause and not self._stop:
+            self.parked = True
+            self.status_changed.emit("paused")
+            while self._pause and not self._stop:
+                QtCore.QThread.msleep(20)
+            self.parked = False
+
+    def wait_until_parked(self, timeout=5.0):
+        """Wartet, bis der Worker mitten in keinem Schritt mehr steckt.
+
+        Danach darf die GUI das Modell selbst auswerten, ohne dass ein Versuch
+        im Worker gleichzeitig die Tensoren umbaut.
+        """
+
+        end = time.monotonic() + timeout
+        while not self.parked and time.monotonic() < end:
+            QtCore.QThread.msleep(5)
+        return self.parked
 
     def reset_losses(self):
         self.deleted_steps = len(self.losses)
@@ -238,24 +309,13 @@ class TrainingWorker(QtCore.QObject):
         (pot_positions, pot_intensities,
          hist_counts, hist_edges) = collect_layer_visuals(self.pot_layer)
 
-        ctf_phase = None
-        ring = None
-        try:
-            dp, env, ring_mask, psf = self.ctf_layer.to_diffraction_patterns(
-                max_angle_mrad=42.0, gpts=1300
-            )
-            ctf_map = dp.detach().cpu().numpy()
-            ring = ring_mask.detach().cpu().numpy()
-            ctf_phase = np.angle(ctf_map)
-        except Exception as exc:
-            print("CTF update failed:", exc)
+        ctf_phase, ring, probe_img = ctf_visuals(self.ctf_layer, self._stem())
 
         p_diff_np = None
         if p_diff is not None:
             p_diff_np = p_diff.detach().cpu().numpy()
 
-        strain_maps, strain_group = strain_maps_for_active_group(
-            self.pot_layer, self.train_method)
+        strain_maps, strain_group = self._strain_maps()
 
         pot_imgs = potential_images_for_display(self.pot_layer)
 
@@ -272,6 +332,7 @@ class TrainingWorker(QtCore.QObject):
             target_img=tgt_img,
             mask_img=mask_img,
             ctf_phase=ctf_phase,
+            probe_img=probe_img,
             ring_mask=ring,
             p_diff=p_diff_np,
             pot_positions=pot_positions,
@@ -291,6 +352,11 @@ class TrainingWorker(QtCore.QObject):
 
     @QtCore.Slot()
     def run(self):
+        # Slot wird nicht ueberschrieben: PySide fuehrt einen ueberschriebenen
+        # Slot im GUI-Thread aus statt im Worker-Thread (Seeding hing dort)
+        self._execute()
+
+    def _execute(self):
         self._stop = False
         self._pause = False
         self.status_changed.emit("running")
@@ -299,8 +365,7 @@ class TrainingWorker(QtCore.QObject):
             if self._stop:
                 break
 
-            while self._pause and not self._stop:
-                QtCore.QThread.msleep(20)
+            self._wait_while_paused()
 
             if self._stop:
                 break
@@ -364,11 +429,118 @@ class TrainingWorker(QtCore.QObject):
         self.status_changed.emit("stopping...")
 
 
+class SeedingWorker(TrainingWorker):
+    """Setzt Atome zufaellig ein (``RandomAtomSeeder``) statt Gradientenschritte zu machen.
+
+    Gleiche Signale wie der Trainings-Worker, damit die GUI das Einfuegen live
+    zeigt: Loss-Kurve, Simulation, Diff und die Atome auf dem Zielbild.
+    """
+
+    with_strain = False
+
+    def __init__(self, seeder, max_trials=100_000, tune_every=0, tune_steps=3,
+                 light_interval=0.25, heavy_interval=1.5, save_callback=None,
+                 save_interval=120.0, **kwargs):
+        super().__init__(model=seeder.model, optimizer=None, **kwargs)
+        self.seeder = seeder
+        self.max_trials = max_trials
+        self.tune_every = tune_every
+        self.tune_steps = tune_steps
+        self.light_interval = light_interval
+        self.heavy_interval = heavy_interval
+        self.save_callback = save_callback
+        self.save_interval = save_interval
+
+    def _emit_heavy(self):
+        started = time.monotonic()
+        with torch.no_grad():
+            simulated_image, target_image, p_diff, _loss = self.model.loss_multislice(self.target)
+        loss = self.seeder.loss
+        payload = self.build_heavy_payload(
+            step=self.seeder.stats.trials, loss_item=loss if math.isfinite(loss) else 0.0,
+            simulated_image=simulated_image, target_image=target_image, p_diff=p_diff)
+        self.progress_heavy.emit(payload)
+        # die GUI darf nicht von Bildern ueberrollt werden, wenn das Zeichnen langsam ist
+        self.heavy_interval = max(self.heavy_interval, 3.0 * (time.monotonic() - started))
+
+    def _emit_light(self):
+        stats = self.seeder.stats
+        self.progress_light.emit(stats.trials, float(self.seeder.loss),
+                                 np.asarray(self.losses, dtype=np.float32).copy())
+        self.status_changed.emit(
+            f"seeding: {self.seeder.n_atoms} Atome, {stats.accepted}/{stats.trials} angenommen")
+        self.emit_parameter_update()
+
+    def _save(self):
+        if self.save_callback is not None:
+            try:
+                self.save_callback(self.seeder)
+            except Exception as exc:
+                print("seeding: Speichern fehlgeschlagen:", exc)
+
+    def _execute(self):
+        self._stop = False
+        self._pause = False
+        self.status_changed.emit("seeding")
+
+        seeder = self.seeder
+        started = time.monotonic()
+        try:
+            reason = self._seed_loop(seeder, started)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            reason = f"Fehler: {exc}"
+        try:
+            self._emit_light()
+            self._emit_heavy()
+            self._save()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        self.status_changed.emit(f"{reason}: {seeder.n_atoms} Atome")
+        self.finished.emit()
+
+    def _seed_loop(self, seeder, started):
+        last_light = last_heavy = last_save = 0.0
+        done = 0
+        reason = "done"
+        while done < self.max_trials:
+            self._wait_while_paused()
+            if self._stop:
+                reason = "stopped"
+                break
+
+            seeder.trial()
+            done += 1
+            if seeder.stats.full:
+                reason = "Atomgrenze erreicht"
+                break
+            if self.tune_every and done % self.tune_every == 0:
+                seeder.tune(self.tune_steps)
+            if math.isfinite(seeder.loss):
+                self.losses.append(seeder.loss)
+
+            now = time.monotonic() - started
+            if self.losses and now - last_light >= self.light_interval:
+                last_light = now
+                self._emit_light()
+            if now - last_heavy >= self.heavy_interval:
+                last_heavy = now
+                self._emit_heavy()
+            if now - last_save >= self.save_interval:
+                last_save = now
+                self._save()
+            QtCore.QThread.msleep(1)
+        return reason
+
+
 class MplCanvas(FigureCanvasQTAgg):
     #: feste Kacheln vor bzw. nach den Potential-Kacheln
     LEADING_TILES = ("loss", "sim", "diff", "target", "ctf")
     TRAILING_TILES = ("hist", "ux", "uy", "eps_xx", "eps_yy", "eps_xy")
     COLUMNS = 5
+    STRAIN_TILES = ("ux", "uy", "eps_xx", "eps_yy", "eps_xy")
 
     def __init__(self, target_tensor=None, parent=None, train_method=None, config=None):
         self.fig = Figure(figsize=(12, 8), dpi=100, constrained_layout=True)
@@ -390,6 +562,10 @@ class MplCanvas(FigureCanvasQTAgg):
 
         self.show_positions_on_target = True
 
+        self.stem = getattr(config, "imaging_mode", "tem") == "stem_haadf"
+        #: beim Seeding gibt es kein Strain-Feld - die Kacheln entfallen
+        self.seeding = False
+
         self._rebuild_layout()
 
     # ------------------------------------------------------------------
@@ -399,15 +575,30 @@ class MplCanvas(FigureCanvasQTAgg):
         """Alle Kacheln in der Reihenfolge, in der sie im Raster liegen."""
 
         n_layers = max(len(self.layer_names), 1)
+        trailing = [k for k in self.TRAILING_TILES
+                    if not (self.seeding and k in self.STRAIN_TILES)]
         return (list(self.LEADING_TILES)
                 + [f"pot{i}" for i in range(n_layers)]
-                + list(self.TRAILING_TILES))
+                + trailing)
+
+    def set_seeding(self, seeding):
+        """Strain-Kacheln aus- bzw. einblenden; True, wenn sich das Raster geaendert hat."""
+
+        seeding = bool(seeding)
+        if seeding == self.seeding:
+            return False
+        self.seeding = seeding
+        if self.single_key not in self.all_tile_keys():
+            self.single_key = None
+        self._rebuild_layout()
+        self.draw_idle()
+        return True
 
     def tile_titles(self):
         """{Kachel: Anzeigename} - auch fuer die Auswahl in der GUI."""
 
         titles = {"loss": "Loss", "sim": "Simulated", "diff": "Diff",
-                  "target": "Target", "ctf": "CTF", "hist": "Histogramm",
+                  "target": "Target", "ctf": "Probe" if self.stem else "CTF", "hist": "Histogramm",
                   "ux": "ux", "uy": "uy",
                   "eps_xx": "eps xx", "eps_yy": "eps yy", "eps_xy": "eps xy"}
         for i in range(max(len(self.layer_names), 1)):
@@ -432,14 +623,18 @@ class MplCanvas(FigureCanvasQTAgg):
         self.fig.clear()
 
         keys = self.all_tile_keys()
-        if self.single_key in keys:
-            keys = [self.single_key]
         titles = self.tile_titles()
 
-        columns = 1 if len(keys) == 1 else self.COLUMNS
-        rows = int(np.ceil(len(keys) / float(columns)))
-
-        self.axes = [self.fig.add_subplot(rows, columns, i + 1) for i in range(len(keys))]
+        if self.single_key in keys:
+            # eine Kachel gross, daneben immer der Loss-Verlauf
+            keys = [self.single_key] if self.single_key == "loss" else [self.single_key, "loss"]
+        if len(keys) == 2 and keys[1] == "loss" and self.single_key in keys:
+            grid = self.fig.add_gridspec(1, 2, width_ratios=[2.5, 1])
+            self.axes = [self.fig.add_subplot(grid[0, i]) for i in range(2)]
+        else:
+            columns = 1 if len(keys) == 1 else self.COLUMNS
+            rows = int(np.ceil(len(keys) / float(columns)))
+            self.axes = [self.fig.add_subplot(rows, columns, i + 1) for i in range(len(keys))]
         self.axes_cmap = {key: ax for key, ax in zip(keys, self.axes)}
         for key, ax in self.axes_cmap.items():
             ax.set_title(titles.get(key, key))
@@ -485,8 +680,12 @@ class MplCanvas(FigureCanvasQTAgg):
         self.im_eps_xy = image("eps_xy", "RdBu")
 
         blank = np.zeros((10, 10), dtype=np.float32)
-        self.im_ctf = image("ctf", "RdBu", data=blank, vmin=-np.pi, vmax=np.pi)
-        self.im_ring = image("ctf", "Greens", data=blank, alpha=0.35)
+        if self.stem:
+            self.im_ctf = image("ctf", "viridis", data=blank)
+            self.im_ring = None
+        else:
+            self.im_ctf = image("ctf", "RdBu", data=blank, vmin=-np.pi, vmax=np.pi)
+            self.im_ring = image("ctf", "Greens", data=blank, alpha=0.35)
 
         self.pot_scatters = []
         for i in range(max(len(self.layer_names), 1)):
@@ -708,23 +907,33 @@ class MplCanvas(FigureCanvasQTAgg):
             ax_target.set_title(f"Target (Step {payload.step})")
 
 
-        if self.im_ux is not None and payload.strain_maps["ux"] is not None:
+        if self.im_ux is not None and payload.strain_maps and payload.strain_maps["ux"] is not None:
             self._safe_set_image(self.im_ux, payload.strain_maps["ux"])
 
-        if self.im_uy is not None and payload.strain_maps["uy"] is not None:
+        if self.im_uy is not None and payload.strain_maps and payload.strain_maps["uy"] is not None:
             self._safe_set_image(self.im_uy, payload.strain_maps["uy"])
 
-        if self.im_eps_xx is not None and payload.strain_maps["eps_xx"] is not None:
+        if self.im_eps_xx is not None and payload.strain_maps and payload.strain_maps["eps_xx"] is not None:
             self._safe_set_image(self.im_eps_xx, payload.strain_maps["eps_xx"])
 
-        if self.im_eps_yy is not None and payload.strain_maps["eps_yy"] is not None:
+        if self.im_eps_yy is not None and payload.strain_maps and payload.strain_maps["eps_yy"] is not None:
             self._safe_set_image(self.im_eps_yy, payload.strain_maps["eps_yy"])
 
-        if self.im_eps_xy is not None and payload.strain_maps["eps_xy"] is not None:
+        if self.im_eps_xy is not None and payload.strain_maps and payload.strain_maps["eps_xy"] is not None:
             self._safe_set_image(self.im_eps_xy, payload.strain_maps["eps_xy"])
 
         if self.im_ctf is not None and payload.ctf_phase is not None:
             self.im_ctf.set_data(payload.ctf_phase)
+
+        if self.im_ctf is not None and self.stem and payload.probe_img is not None:
+            probe = payload.probe_img
+            self.im_ctf.set_data(probe)
+            self.im_ctf.set_extent((-0.5, probe.shape[1] - 0.5, -0.5, probe.shape[0] - 0.5))
+            self.im_ctf.set_clim(float(probe.min()), float(probe.max()) or 1e-12)
+            ax = self.axes_cmap.get("ctf")
+            if ax is not None:
+                ax.set_xlim(-0.5, probe.shape[1] - 0.5)
+                ax.set_ylim(-0.5, probe.shape[0] - 0.5)
 
         if self.im_ring is not None and payload.ring_mask is not None:
             self.im_ring.set_data(payload.ring_mask)
@@ -815,12 +1024,12 @@ class MplCanvas(FigureCanvasQTAgg):
 
         if c10 is not None or c30 is not None:
             self.axes_cmap["ctf"].set_title(
-                f"CTF (Step {payload.step})\n"
+                f"{'Probe' if self.stem else 'CTF'} (Step {payload.step})\n"
                 f"C10: {c10 if c10 is not None else np.nan:.2f} nm   "
                 f"C30: {c30 if c30 is not None else np.nan:.2f} um"
             )
         else:
-            self.axes_cmap["ctf"].set_title(f"CTF (Step {payload.step})")
+            self.axes_cmap["ctf"].set_title(f"{'Probe' if self.stem else 'CTF'} (Step {payload.step})")
 
 
 class LiveTrainWindow(QtWidgets.QMainWindow):
@@ -839,9 +1048,14 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         heavy_every=10,
         max_steps=2_000_000,
         parent=None,
+        seeder=None,
+        seeding=None,
     ):
         super().__init__(parent)
         self.updating_gui = False
+        self.seeder = seeder
+        self.seeding = dict(seeding or {})
+        self._seeding_view = seeder is not None
         self.setWindowTitle("Live Training Qt")
 
         self.model = model
@@ -889,11 +1103,19 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         left.setContentsMargins(0, 0, 0, 0)
         right.setContentsMargins(0, 0, 0, 0)
 
+        # die rechte Spalte scrollt als Ganzes, wenn das Fenster fuer alle Boxen zu niedrig ist
+        right_scroll = QtWidgets.QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right_panel)
+        self.right_scroll = right_scroll
+
         splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
-        right_panel.setMinimumWidth(380)
+        right_scroll.setMinimumWidth(400)
 
 
         self.parameter_frame = ParametersFrame(self.model.get_tunable_parameters(),
@@ -903,6 +1125,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
         self.canvas = MplCanvas(target_tensor=self.target, train_method=self.train_method,
                                 config=self.model.config)
+        self.canvas.set_seeding(self._seeding_view)
         # Matplotlib-Toolbar: Lupe zum Aufziehen eines Ausschnitts, Hand zum
         # Verschieben, Haus zurueck zur Gesamtansicht
         self.nav_toolbar = NavigationToolbar2QT(self.canvas, self)
@@ -931,15 +1154,17 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.pause_btn = QtWidgets.QPushButton("Pause")
         self.resume_btn = QtWidgets.QPushButton("Resume")
         self.stop_btn = QtWidgets.QPushButton("Stop")
+        self.seed_btn = QtWidgets.QPushButton("Start Seeding")
+        self.seed_btn.setToolTip(
+            "Atome zufaellig einfuegen und behalten, wenn die Korrelation besser wird.\n"
+            "Pause/Resume/Stop gelten auch hierfuer.")
+        self.seed_btn.setVisible(self.seeder is not None)
 
         self.single_tile_combo = QtWidgets.QComboBox()
         self.single_tile_combo.setToolTip(
             "Eine Kachel gross zeigen - Simulation, Diff, Target, CTF, Potential ...\n"
             "Zoomen und Verschieben mit der Toolbar unter dem Bild.")
-        self.single_tile_combo.addItem("alle Kacheln", None)
-        titles = self.canvas.tile_titles()
-        for key in self.canvas.all_tile_keys():
-            self.single_tile_combo.addItem(titles.get(key, key), key)
+        self._fill_tile_combo()
         self.show_atoms_on_target_checkbox = QtWidgets.QCheckBox("Show atom positions on target")
         self.show_atoms_on_target_checkbox.setChecked(True)
         self.reset_occupancies_btn = QtWidgets.QPushButton("Reset occupancies (aktive Gruppe)")
@@ -962,6 +1187,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(self.resume_btn, 2, 0)
         control_layout.addWidget(self.stop_btn, 3, 0)
         control_layout.addWidget(self.render_btn, 4, 0)
+        control_layout.addWidget(self.seed_btn, 5, 0)
 
 
         control_layout.addWidget(self.single_tile_combo, 0, 1)
@@ -974,6 +1200,8 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
 
         right.addWidget(control_box)
+
+        self._build_seeding_box(right)
 
         quick_box = QtWidgets.QGroupBox("Quick presets")
         quick_layout = QtWidgets.QHBoxLayout(quick_box)
@@ -1025,12 +1253,139 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         editor_scroll.setWidget(self.editor)
         # stretch=1 und KEIN addStretch danach: die Lernraten bekommen die
         # ganze restliche Hoehe statt eines 250-px-Streifens
+        editor_scroll.setMinimumHeight(260)
         right.addWidget(editor_scroll, stretch=1)
 
         # Kein Preset mehr erzwingen - die geladene TrainMethod gilt.
         self._apply_trainable_selection()
 
 
+
+    def _fill_tile_combo(self):
+        """Kachelauswahl neu fuellen; die gewaehlte Kachel bleibt, wenn es sie noch gibt."""
+
+        combo = self.single_tile_combo
+        current = combo.currentData() if combo.count() else None
+        titles = self.canvas.tile_titles()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("alle Kacheln", None)
+        for key in self.canvas.all_tile_keys():
+            combo.addItem(titles.get(key, key), key)
+        index = combo.findData(current)
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(False)
+
+    def _set_view(self, seeding):
+        """Seeding-Ansicht (ohne Strain-Karten) oder Trainings-Ansicht."""
+
+        self._seeding_view = bool(seeding) and self.seeder is not None
+        if self.canvas.set_seeding(self._seeding_view):
+            self._fill_tile_combo()
+            if hasattr(self.train_method, "train_small_area_squares"):
+                self.canvas.set_target_rectangles(self.train_method.train_small_area_squares)
+            self._trigger_heavy_refresh()
+
+    #: (Schluessel, Beschriftung, Minimum, Maximum, Schritt, Nachkommastellen, Tooltip)
+    SEEDING_FIELDS = (
+        ("touch_A", "Entfernen bis [A]", 0.0, 10.0, 0.05, 2,
+         "Atome, die naeher als das am neuen Atom liegen, werden entfernt."),
+        ("merge_A", "Verschieben bis [A]", 0.0, 10.0, 0.05, 2,
+         "Zwischen 'Entfernen bis' und diesem Radius wird nicht neu eingefuegt:\n"
+         "das Nachbaratom wandert in die Mitte zum neuen Punkt."),
+        ("move_prob", "P(Atom verschieben)", 0.0, 1.0, 0.05, 2,
+         "Anteil der Versuche, ein vorhandenes Atom zu verschieben statt eins einzufuegen."),
+        ("remove_prob", "P(Atom entfernen)", 0.0, 1.0, 0.05, 2,
+         "Anteil der Versuche, ein vorhandenes Atom wegzunehmen."),
+        ("move_sigma_A", "Verschiebung sigma [A]", 0.0, 10.0, 0.05, 2,
+         "Streuung der Gauss-Verschiebung eines Atoms."),
+        ("gradient_temperature", "Gradient Temperatur", 0.01, 5.0, 0.05, 2,
+         "Klein: fast immer die beste Stelle der Landschaft; gross: breiter gestreut.\n"
+         "Einheit: Anteil der groessten erwarteten Loss-Verbesserung."),
+        ("bond_A", "Bindungslaenge [A]", 0.0, 10.0, 0.05, 2,
+         "Wahrscheinlichster Abstand zum Nachbaratom (Gauss-Maximum)."),
+        ("bond_sigma_A", "Bindung sigma [A]", 0.01, 5.0, 0.05, 2,
+         "Breite der Gauss-Verteilung um die Bindungslaenge."),
+        ("neighbor_min_A", "Nachbar min. Abstand [A]", 0.0, 10.0, 0.05, 2, "Harter Cutoff nach unten."),
+        ("neighbor_max_A", "Nachbar max. Abstand [A]", 0.0, 10.0, 0.05, 2, "Harter Cutoff nach oben."),
+        ("max_atoms", "max. Atome (0 = frei)", 0, 1_000_000, 100, 0,
+         "Seeding endet, sobald so viele Atome gesetzt sind."),
+        ("max_trials", "max. Versuche", 1, 100_000_000, 1000, 0, ""),
+        ("tune_every", "Training alle N Versuche (0 = aus)", 0, 1_000_000, 100, 0,
+         "Zwischendurch ein paar Gradientenschritte auf Sonde/Mikroskop-Parametern."),
+        ("tune_steps", "Schritte je Training", 1, 1000, 1, 0, ""),
+    )
+
+    def _seeding_value(self, key):
+        seeder = self.seeder
+        if key == "max_atoms":
+            return seeder.max_atoms or 0
+        if key in ("max_trials", "tune_every", "tune_steps"):
+            default = {"max_trials": 100_000, "tune_every": 0, "tune_steps": 3}[key]
+            alias = "trials" if key == "max_trials" else key
+            return self.seeding.get(alias, default)
+        return getattr(seeder, key)
+
+    def _build_seeding_box(self, parent_layout):
+        self.seeding_spins = {}
+        box = QtWidgets.QGroupBox("Seeding-Parameter")
+        box.setVisible(self.seeder is not None)
+        form = QtWidgets.QFormLayout(box)
+        self.seeding_box = box
+        if self.seeder is None:
+            return
+        check = QtWidgets.QCheckBox("Nachbar-Seeding")
+        check.setToolTip("Neue Atome der Reihe nach im Bindungsabstand um jedes vorhandene Atom setzen\n"
+                         "(Gauss um die Bindungslaenge) statt gleichverteilt ueber das Bild.\n"
+                         "Das erste Atom wird zufaellig gesetzt.")
+        check.setChecked(self.seeder.neighbor_seeding)
+        check.toggled.connect(lambda on: setattr(self.seeder, "neighbor_seeding", bool(on)))
+        form.addRow(check)
+        self.seeding_neighbor_check = check
+
+        gradient = QtWidgets.QCheckBox("Gradienten-Seeding (nur STEM)")
+        gradient.setToolTip("Positionen nach der Loss-Landschaft fuers Einfuegen ziehen (aus dem Gradienten\n"
+                            "der Loss, eine Kreuzkorrelation mit dem Atombild) statt gleichverteilt.\n"
+                            "Zusammen mit Nachbar-Seeding: die Landschaft im Ring um das jeweilige Atom.\n"
+                            "Angenommen wird weiterhin nur nach der exakten lokalen Loss.")
+        supported = self.seeder.gradient_supported
+        gradient.setEnabled(supported)
+        gradient.setChecked(self.seeder.gradient_seeding and supported)
+        gradient.toggled.connect(lambda on: setattr(self.seeder, "gradient_seeding", bool(on)))
+        form.addRow(gradient)
+        self.seeding_gradient_check = gradient
+        for key, label, low, high, step, decimals, tip in self.SEEDING_FIELDS:
+            if decimals:
+                spin = QtWidgets.QDoubleSpinBox()
+                spin.setDecimals(decimals)
+            else:
+                spin = QtWidgets.QSpinBox()
+            spin.setRange(low, high)
+            spin.setSingleStep(step)
+            spin.setValue(self._seeding_value(key))
+            if tip:
+                spin.setToolTip(tip)
+            spin.valueChanged.connect(lambda value, k=key: self._on_seeding_value(k, value))
+            form.addRow(label, spin)
+            self.seeding_spins[key] = spin
+        parent_layout.addWidget(box)
+
+    def _on_seeding_value(self, key, value):
+        """Wirkt sofort, auch auf einen laufenden Worker."""
+
+        worker = self.worker if isinstance(self.worker, SeedingWorker) else None
+        if key == "max_atoms":
+            self.seeder.max_atoms = int(value) or None
+        elif key == "max_trials":
+            self.seeding["trials"] = int(value)
+            if worker is not None:
+                worker.max_trials = int(value)
+        elif key in ("tune_every", "tune_steps"):
+            self.seeding[key] = int(value)
+            if worker is not None:
+                setattr(worker, key, int(value))
+        else:
+            setattr(self.seeder, key, float(value))
 
     def _current_transform_group(self):
         return self.train_method.active_group
@@ -1058,6 +1413,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
 
     def _connect_actions(self):
         self.start_btn.clicked.connect(self.start_training)
+        self.seed_btn.clicked.connect(self.start_seeding)
         self.pause_btn.clicked.connect(self.pause_training)
         self.resume_btn.clicked.connect(self.resume_training)
         self.stop_btn.clicked.connect(self.stop_training)
@@ -1163,12 +1519,31 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         self.editor.free_positions_training()
         self._apply_trainable_selection()
 
+    def _prepare_training_after_seeding(self):
+        """Nach dem Seeding sollen die gesetzten Atome frei beweglich sein."""
+
+        tm = self.train_method
+        layers = [tm.layer(name) for name in self.pot_layer.config.layer_names]
+        if not any(layer.free_positions.enabled for layer in layers):
+            for layer in layers:
+                layer.free_positions.enabled = True
+                layer.intensities.enabled = True
+            if hasattr(self.editor, "refresh_from_object"):
+                self.editor.refresh_from_object()
+        self._apply_trainable_selection()
+        # das Seeding hat Parameter direkt beschrieben - alte Adam-Momente verwerfen
+        self.optimizer = self.model.build_optimizer()
+        self._seeded = False
+
     def start_training(self):
         if self.thread is not None and self.thread.isRunning():
             return
+        if getattr(self, "_seeded", False):
+            self._prepare_training_after_seeding()
+        self._trained = True
+        self._set_view(False)
 
-        self.thread = QtCore.QThread(self)
-        self.worker = TrainingWorker(
+        worker = TrainingWorker(
             model=self.model,
             optimizer=self.optimizer,
             target=self.target,
@@ -1179,22 +1554,53 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             heavy_every=self.heavy_every,
             max_steps=self.max_steps,
         )
+        self._launch_worker(worker)
+
+    def start_seeding(self):
+        if self.seeder is None or (self.thread is not None and self.thread.isRunning()):
+            return
+
+        if getattr(self, "_trained", False):
+            self.seeder.resync()
+            self._trained = False
+        self._seeded = True
+        self._set_view(True)
+
+        options = self.seeding
+        worker = SeedingWorker(
+            self.seeder,
+            max_trials=options.get("trials", 100_000),
+            tune_every=options.get("tune_every", 0),
+            tune_steps=options.get("tune_steps", 3),
+            save_callback=options.get("save_callback"),
+            target=self.target,
+            pot_layer=self.pot_layer,
+            ctf_layer=self.ctf_layer,
+            train_method=self.train_method,
+        )
+        self._launch_worker(worker)
+
+    def _launch_worker(self, worker):
+        self.thread = QtCore.QThread(self)
+        self.worker = worker
         self.worker.moveToThread(self.thread)
 
         #self.worker.spin_values_changed.connect(self.on_spin_values_changed)
-        self.worker.parameter_update.connect(self.on_parameter_update)
+        queued = QtCore.Qt.ConnectionType.QueuedConnection
+        self.worker.parameter_update.connect(self.on_parameter_update, queued)
 
         self.request_heavy_refresh_signal.connect(self.worker.request_heavy_refresh)
 
         self.thread.started.connect(self.worker.run)
-        self.worker.progress_light.connect(self.on_progress_light)
-        self.worker.progress_heavy.connect(self.on_progress_heavy)
-        self.worker.status_changed.connect(self.on_status_changed)
-        self.worker.finished.connect(self.on_worker_finished)
+        self.worker.progress_light.connect(self.on_progress_light, queued)
+        self.worker.progress_heavy.connect(self.on_progress_heavy, queued)
+        self.worker.status_changed.connect(self.on_status_changed, queued)
+        self.worker.finished.connect(self.on_worker_finished, queued)
         self.worker.finished.connect(self.thread.quit)
         self.thread.finished.connect(self.thread.deleteLater)
 
         self.start_btn.setEnabled(False)
+        self.seed_btn.setEnabled(False)
         self.pause_btn.setEnabled(True)
         self.resume_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -1233,6 +1639,14 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
                 self._heavy_refresh_pending = False
                 self._trigger_heavy_refresh()
 
+    def _stem(self):
+        return getattr(self.model.config, "imaging_mode", "tem") == "stem_haadf"
+
+    def _strain_maps(self):
+        if self._seeding_view:
+            return None, None
+        return strain_maps_for_active_group(self.pot_layer, self.train_method)
+
     def _build_local_heavy_payload(self, step, loss_item, simulated_image, target_image, p_diff):
         _, mask_img = self.model.get_current_target_and_mask_img(target_image)
         if mask_img is not None:
@@ -1244,22 +1658,11 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         (pot_positions, pot_intensities,
          hist_counts, hist_edges) = collect_layer_visuals(self.pot_layer)
 
-        ctf_phase = None
-        ring = None
-        try:
-            dp, env, ring_mask, psf = self.ctf_layer.to_diffraction_patterns(
-                max_angle_mrad=42.0, gpts=1300
-            )
-            ctf_map = dp.detach().cpu().numpy()
-            ring = ring_mask.detach().cpu().numpy()
-            ctf_phase = np.angle(ctf_map)
-        except Exception as exc:
-            print("local CTF update failed:", exc)
+        ctf_phase, ring, probe_img = ctf_visuals(self.ctf_layer, self._stem())
 
         p_diff_np = None if p_diff is None else p_diff.detach().cpu().numpy()
 
-        strain_maps, strain_group = strain_maps_for_active_group(
-            self.pot_layer, self.train_method)
+        strain_maps, strain_group = self._strain_maps()
 
         pot_imgs = potential_images_for_display(self.pot_layer)
 
@@ -1272,6 +1675,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
             target_img=tgt_img,
             mask_img=mask_img,
             ctf_phase=ctf_phase,
+            probe_img=probe_img,
             ring_mask=ring,
             p_diff=p_diff_np,
             pot_positions=pot_positions,
@@ -1299,9 +1703,18 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
         else:
             self._do_local_heavy_refresh()
 
+    def closeEvent(self, event):
+        # laufendes Seeding sauber beenden: der Worker speichert beim Stoppen
+        if self.thread is not None and self.thread.isRunning():
+            self.worker.stop()
+            self.thread.quit()
+            self.thread.wait(60_000)
+        super().closeEvent(event)
+
     def pause_training(self):
         if self.worker is not None:
             self.worker.pause()
+            self.worker.wait_until_parked()
             self.pause_btn.setEnabled(False)
             self.resume_btn.setEnabled(True)
 
@@ -1356,6 +1769,7 @@ class LiveTrainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def on_worker_finished(self):
         self.start_btn.setEnabled(True)
+        self.seed_btn.setEnabled(True)
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
@@ -1376,6 +1790,9 @@ def launch_gui_qt(
     plot_every=5,
     heavy_every=10,
     max_steps=2_000_000,
+    seeder=None,
+    seeding=None,
+    autostart_seeding=False,
 ):
     app = QtWidgets.QApplication.instance()
     owns_app = app is None
@@ -1391,9 +1808,13 @@ def launch_gui_qt(
         plot_every=plot_every,
         heavy_every=heavy_every,
         max_steps=max_steps,
+        seeder=seeder,
+        seeding=seeding,
     )
     window.resize(1600, 950)
     window.show()
+    if seeder is not None and autostart_seeding:
+        QtCore.QTimer.singleShot(500, window.start_seeding)
 
     if owns_app:
         app.exec()

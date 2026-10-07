@@ -24,8 +24,9 @@ des ImageJ-Plugins (``imaging.mode``, ``pixel_size_nm``, ``voltage_kV``,
 sie ueberschrieben. Beim ersten Lauf ohne ``init.json`` legt das Skript eine
 ``init_random.json`` mit den Angaben an, danach reicht der Ordner. Die Gitter
 und weitere Schichten der ``init.json`` werden ignoriert: der Seeder fuellt die
-erste Gruppe/Schicht. Mit ``--resume`` geht es mit den Atomen eines frueheren
-Laufs weiter.
+erste Gruppe/Schicht. Ist ``config_random/`` schon vorhanden, geht es automatisch mit den
+Atomen des frueheren Laufs weiter (auch mit ``--gui``); ``--fresh`` fängt neu an
+und sichert den alten Stand.
 
 Aufruf mit ``--help`` zeigt alle Optionen.
 """
@@ -35,6 +36,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import torch
@@ -45,8 +47,7 @@ import multislice  # noqa: E402
 
 multislice.CHECK_PHASE = False
 
-from atom_seeding import (  # noqa: E402
-    AtomPool, RandomAtomSeeder, graphene_capacity, seed_config)
+from atom_seeding import RandomAtomSeeder, seed_config  # noqa: E402
 from nn import NN_particles  # noqa: E402
 from training_parameter import TrainMethod, save_train_methods  # noqa: E402
 
@@ -237,20 +238,20 @@ def border_mask(shape, border_px, device):
     return mask
 
 
-def build_seeding_model(image, pixel_size_nm, mode, capacity, voltage_kV=80.0,
+def build_seeding_model(image, pixel_size_nm, mode, voltage_kV=80.0,
                         border_px=10, convergence_mrad=24.81, detector_mrad=(60.0, 200.0),
                         source_size_A=0.3, aberrations=None, padding=100, device=None,
                         mask=None, group_name="Gr", element="C", debye_waller_u=None,
                         probe_aberrations=None, env_params=None, amp_contrast=0.1,
                         alpha_max_mrad=50.0, mask_file=None, target_file=None,
                         start_positions=None):
-    """Pool-Modell zum Seeden. ``mask`` (bool, optional) begrenzt die Wertung."""
+    """Modell ohne Atome zum Seeden (oder mit ``start_positions``). ``mask`` (bool, optional) begrenzt die Wertung."""
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_default_device(device)
 
     config = seed_config(
-        image.shape, pixel_size_nm, capacity, voltage_kV=voltage_kV,
+        image.shape, pixel_size_nm, voltage_kV=voltage_kV,
         imaging_mode="stem_haadf" if mode == "stem" else "tem",
         convergence_mrad=convergence_mrad, detector_mrad=detector_mrad,
         source_size_A=source_size_A, aberrations=aberrations, padding=padding,
@@ -273,24 +274,14 @@ def build_seeding_model(image, pixel_size_nm, mode, capacity, voltage_kV=80.0,
     return model, target, train_method
 
 
-def build_from_dataset(data, capacity=None, border_px=10, resume_positions=None, device=None,
+def build_from_dataset(data, border_px=10, resume_positions=None, device=None,
                        overrides=None):
     """Modell, Zielbild und TrainMethod fuer einen Datensatz."""
-
-    if capacity is None:
-        if data.mask is not None:
-            area_nm2 = float(data.mask.sum()) * data.pixel_size_nm ** 2
-            capacity = int(np.ceil(area_nm2 * 38.2 * 1.5))
-        else:
-            capacity = graphene_capacity(data.image.shape, data.pixel_size_nm)
-        capacity = max(capacity, 1)
-    if resume_positions is not None:
-        capacity = max(capacity, int(len(resume_positions) * 1.2) + 10)
 
     options = dict(data.optics)
     options.update(overrides or {})
     return build_seeding_model(
-        data.image, data.pixel_size_nm, data.mode, capacity, voltage_kV=data.voltage_kV,
+        data.image, data.pixel_size_nm, data.mode, voltage_kV=data.voltage_kV,
         border_px=border_px, padding=data.padding, device=device, mask=data.mask,
         group_name=data.group_name, element=data.element, debye_waller_u=data.debye_waller_u,
         mask_file=data.mask_file, start_positions=resume_positions, **options)
@@ -332,7 +323,7 @@ def save_preview(seeder, path):
     plt.close(fig)
 
 
-def save_dataset_state(seeder, train_method, data, group_name):
+def save_dataset_state(seeder, train_method, data, group_name, preview=True):
     """Config-Ordner anlegen: config.json, train_method.json, target.npy, xyz, Vorschau."""
 
     out_dir = data.out_dir
@@ -340,7 +331,8 @@ def save_dataset_state(seeder, train_method, data, group_name):
     write_learned_microscope(seeder.model)
     seeder.save(out_dir, config_file="config.json")
     np.save(os.path.join(out_dir, "target.npy"), seeder.target.detach().cpu().numpy())
-    save_preview(seeder, os.path.join(out_dir, "seeded_preview.png"))
+    if preview:
+        save_preview(seeder, os.path.join(out_dir, "seeded_preview.png"))
 
     # fuer das Weitertrainieren: Maske ohne Randstreifen, Atome frei
     saved_mask = train_method.masks.get(group_name)
@@ -369,17 +361,37 @@ def parse_args(argv=None):
                    help="Abbildungsmodus (Standard: aus der init.json, sonst stem)")
     p.add_argument("--voltage-kV", type=float, default=None)
     p.add_argument("--trials", type=int, default=20000, help="Zahl der Versuche")
-    p.add_argument("--capacity", type=int, default=None,
-                   help="Platz im Pool (Standard: 1.5 x erwartete Graphen-Atomzahl in der Maske)")
+    p.add_argument("--max-atoms", type=int, default=None, help="Obergrenze der Atomzahl (optional)")
+    p.add_argument("--no-local", action="store_true",
+                   help="jeden Versuch mit dem ganzen Bild simulieren (langsam, zur Kontrolle)")
+    p.add_argument("--local-radius", type=int, default=None,
+                   help="Reichweite der lokalen Simulation in Pixeln (Standard: aus Sonde/CTF)")
+    p.add_argument("--refresh-every", type=int, default=300,
+                   help="lokale Simulation alle n angenommenen Versuche aus dem ganzen Bild neu aufbauen")
     p.add_argument("--resume", action="store_true",
-                   help="mit den Atomen aus dem Config-Ordner weitermachen")
-    p.add_argument("--loss", choices=["model", "ncc"], default="model",
-                   help="model = Loss aus der TrainMethod, ncc = Korrelation wie im Skript")
+                   help="Fehler, wenn kein frueherer Stand da ist (weitergemacht wird ohnehin automatisch)")
+    p.add_argument("--fresh", action="store_true",
+                   help="neu anfangen; der vorhandene Config-Ordner wird zur Sicherung umbenannt")
+    p.add_argument("--loss", choices=["model", "ncc"], default="ncc",
+                   help="ncc = Korrelation wie im Skript (Standard); model = Loss der TrainMethod - "
+                        "der bestraft duenn besetzte Bilder und bleibt bei grossen Bildern haengen")
     p.add_argument("--touch-A", type=float, default=0.5, help="Atome naeher als das verschwinden")
     p.add_argument("--merge-A", type=float, default=1.0, help="Atome naeher als das werden verschmolzen")
     p.add_argument("--border-px", type=int, default=10, help="Bildrand ohne Wertung (Randartefakte)")
     p.add_argument("--move-prob", type=float, default=0.0, help="Anteil Verschiebe-Versuche (optional)")
     p.add_argument("--remove-prob", type=float, default=0.0, help="Anteil Entfern-Versuche (optional)")
+    p.add_argument("--neighbor", action="store_true",
+                   help="Nachbar-Seeding: neue Atome der Reihe nach im Bindungsabstand um die vorhandenen "
+                        "Atome setzen (statt gleichverteilt ueber das Bild)")
+    p.add_argument("--gradient", action="store_true",
+                   help="Gradienten-Seeding (nur STEM): Positionen nach der Loss-Landschaft fuers Einfuegen; "
+                        "zusammen mit --neighbor im Ring um die Atome")
+    p.add_argument("--gradient-temperature", type=float, default=0.1,
+                   help="Streuung der Auswahl (klein = immer die beste Stelle)")
+    p.add_argument("--bond-A", type=float, default=1.42, help="Nachbar-Seeding: Bindungslaenge (Gauss-Maximum)")
+    p.add_argument("--bond-sigma-A", type=float, default=0.2, help="Nachbar-Seeding: Breite der Gauss-Verteilung")
+    p.add_argument("--neighbor-min-A", type=float, default=0.5, help="Nachbar-Seeding: minimaler Abstand")
+    p.add_argument("--neighbor-max-A", type=float, default=2.0, help="Nachbar-Seeding: maximaler Abstand")
     p.add_argument("--tune-every", type=int, default=2500,
                    help="alle n Versuche Aberrationen/Normierung nachziehen (0 = nie)")
     p.add_argument("--tune-steps", type=int, default=3)
@@ -390,7 +402,9 @@ def parse_args(argv=None):
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--convergence-mrad", type=float, default=None)
     p.add_argument("--source-size-A", type=float, default=None)
-    p.add_argument("--gui", action="store_true", help="danach die GUI zum Weitertrainieren oeffnen")
+    p.add_argument("--gui", action="store_true",
+                   help="Einfuegen live in der GUI zeigen (statt ohne Anzeige zu laufen); "
+                        "danach laesst sich dort normal weitertrainieren")
     return p.parse_args(argv)
 
 
@@ -405,12 +419,22 @@ def main(argv=None):
     if created:
         print(f"[seed] Einstellungen abgelegt in {created}")
 
+    # Ein vorhandener Stand wird immer weitergefuehrt - sonst ueberschreibt der
+    # Autosave der GUI ihn sofort. Neu anfangen nur mit --fresh (alter Stand
+    # wandert in einen Sicherungsordner).
     resume = None
-    if args.resume:
-        path = os.path.join(data.out_dir, "seeded_positions_px.npy")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"--resume: {path} fehlt")
-        resume = np.load(path)
+    state = os.path.join(data.out_dir, "seeded_positions_px.npy")
+    if args.fresh:
+        if os.path.isdir(data.out_dir) and os.path.exists(state):
+            backup = data.out_dir + "_" + time.strftime("%Y%m%d_%H%M%S")
+            os.rename(data.out_dir, backup)
+            print(f"[seed] alter Stand gesichert in {backup}")
+    elif os.path.exists(state):
+        resume = np.load(state)
+        print(f"[seed] vorhandener Stand in {data.out_dir} wird weitergefuehrt "
+              f"({len(resume)} Atome; --fresh startet neu)")
+    elif args.resume:
+        raise FileNotFoundError(f"--resume: {state} fehlt")
 
     overrides = {k: v for k, v in dict(convergence_mrad=args.convergence_mrad,
                                        source_size_A=args.source_size_A).items() if v is not None}
@@ -427,24 +451,43 @@ def main(argv=None):
         overrides.setdefault("env_params", previous.init_ctf_env_params)
         overrides.setdefault("amp_contrast", previous.init_amp_contrast)
     model, target, train_method = build_from_dataset(
-        data, capacity=args.capacity, border_px=args.border_px,
-        resume_positions=resume, overrides=overrides)
-    capacity = model.potential_layer.get_init_positions(0).shape[0]
+        data, border_px=args.border_px, resume_positions=resume, overrides=overrides)
     print(f"[seed] {data.mode.upper()}, Bild {data.image.shape}, "
           f"{data.pixel_size_nm * 10:.4f} A/px, Gruppe {data.group_name!r}"
-          f"{', Maske ' + data.mask_file if data.mask_file else ''}, Pool {capacity} Atome",
+          f"{', Maske ' + data.mask_file if data.mask_file else ''}",
           flush=True)
 
     seeder = RandomAtomSeeder(
         model, target, loss=args.loss, touch_A=args.touch_A, merge_A=args.merge_A,
         margin_px=args.border_px, move_prob=args.move_prob, remove_prob=args.remove_prob,
-        seed=args.seed, region=data.mask)
+        seed=args.seed, region=data.mask, local=not args.no_local,
+        local_radius_px=args.local_radius, refresh_every=args.refresh_every,
+        max_atoms=args.max_atoms, neighbor_seeding=args.neighbor,
+        gradient_seeding=args.gradient, gradient_temperature=args.gradient_temperature,
+        bond_A=args.bond_A, bond_sigma_A=args.bond_sigma_A,
+        neighbor_min_A=args.neighbor_min_A, neighbor_max_A=args.neighbor_max_A)
+    print("[seed] lokale Simulation: "
+          + (f"Reichweite {seeder.local.radius} px" if seeder.uses_local else
+             f"aus ({seeder.local_note or 'ganzes Bild'})"),
+          flush=True)
     if resume is not None:
-        print(f"[seed] weiter mit {seeder.pool.n_active} Atomen, Loss {seeder.loss:.5f}")
+        print(f"[seed] weiter mit {seeder.n_atoms} Atomen, Loss {seeder.loss:.5f}")
 
-    def save(s):
-        out = save_dataset_state(s, train_method, data, data.group_name)
+    def save(s, preview=True):
+        out = save_dataset_state(s, train_method, data, data.group_name, preview=preview)
         print(f"[seed] gespeichert in {out}", flush=True)
+
+    if args.gui:
+        # kein Matplotlib-Vorschaubild aus dem Worker-Thread: die GUI zeigt alles selbst
+        from gui_qt import launch_gui_qt
+        launch_gui_qt(model=model, target=target,
+                      pot_layer=model.potential_layer, ctf_layer=model.imaging_layer,
+                      train_method=train_method, plot_every=25, heavy_every=50,
+                      max_steps=2_000_000, seeder=seeder, autostart_seeding=True,
+                      seeding=dict(trials=args.trials, tune_every=args.tune_every,
+                                   tune_steps=args.tune_steps,
+                                   save_callback=lambda s: save(s, preview=False)))
+        return 0
 
     try:
         seeder.run(args.trials, tune_every=args.tune_every, tune_steps=args.tune_steps,
@@ -452,28 +495,11 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("[seed] abgebrochen - speichere den aktuellen Stand")
 
+    seeder.finish()
     save(seeder)
-    print(f"[seed] fertig: {seeder.pool.n_active} Atome, Loss {seeder.loss:.5f}, "
+    print(f"[seed] fertig: {seeder.n_atoms} Atome, Loss {seeder.loss:.5f}, "
           f"{seeder.stats.accepted}/{seeder.stats.trials} Versuche angenommen")
-
-    if args.gui:
-        open_gui(model, target, train_method)
     return 0
-
-
-def open_gui(model, target, train_method):
-    """Die Atome sind gesetzt: ab jetzt Positionen, Intensitaeten und Mikroskop trainieren."""
-
-    layer = model.config.layer_names[0]
-    train_method.layer(layer).free_positions.enabled = True
-    train_method.layer(layer).intensities.enabled = True
-    model.potential_layer.apply_trainable_selection()
-
-    from gui_qt import launch_gui_qt
-    launch_gui_qt(model=model, target=target,
-                  pot_layer=model.potential_layer, ctf_layer=model.imaging_layer,
-                  train_method=train_method, plot_every=25, heavy_every=50,
-                  max_steps=2_000_000)
 
 
 if __name__ == "__main__":

@@ -99,10 +99,11 @@ def main():
         for _ in range(3):
             app.processEvents()
         tile = combo.itemData(index)
-        if tile is not None and sorted(canvas.axes_cmap) != [tile]:
+        expected = [tile] if tile in (None, "loss") else sorted([tile, "loss"])
+        if tile is not None and sorted(canvas.axes_cmap) != expected:
             every_tile_alone = False
             print(f"    {tile} zeigt {sorted(canvas.axes_cmap)}")
-    check("jede Kachel laesst sich allein zeigen", every_tile_alone,
+    check("jede Kachel laesst sich einzeln zeigen (mit Loss daneben)", every_tile_alone,
           f"{combo.count() - 1} Kacheln")
 
     # -- Zoom ----------------------------------------------------------------
@@ -128,6 +129,12 @@ def main():
     check("Loss-Kurve ueberlebt den Kachelwechsel",
           canvas.loss_line is not None and len(canvas.loss_line.get_xdata()) == 4,
           f"{len(canvas.loss_line.get_xdata()) if canvas.loss_line else 0} Punkte")
+
+    select(app, window, "Simulated")
+    check("Loss-Verlauf neben dem Einzelbild",
+          "loss" in canvas.axes_cmap and canvas.loss_line is not None
+          and len(canvas.loss_line.get_xdata()) == 4,
+          f"Kacheln {sorted(canvas.axes_cmap)}")
 
     select(app, window, "Target")
     check("Atompositionen auch in der Einzelansicht",
