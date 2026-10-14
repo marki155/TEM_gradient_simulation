@@ -57,8 +57,14 @@ class _Pending:
 
 
 class Client:
-    def __init__(self, endpoint: str, on_event: Optional[EventHandler] = None, timeout: float = 120.0):
+    def __init__(self, endpoint: str, on_event: Optional[EventHandler] = None, timeout: float = 120.0,
+                 auto_ack: bool = True):
+        """``auto_ack``: answer every frame at once; a client that draws should pass ``False`` and call
+        :meth:`ack_frame` when the frame has been drawn, so that the core never gets ahead of it."""
+
         self.endpoint = endpoint
+        self.auto_ack = auto_ack
+        self._target: Tuple[Optional[int], Dict[str, np.ndarray]] = (None, {})
         self.on_event = on_event
         self.timeout = timeout
         self._context = zmq.Context.instance()
@@ -114,11 +120,27 @@ class Client:
             if pending is not None:
                 pending.header, pending.arrays = header, arrays
                 pending.done.set()
+        elif header.get("kind") == "event" and header.get("name") == "target":
+            self._target = (header.get("data", {}).get("key"), arrays)
         elif header.get("kind") == "event" and self.on_event is not None:
+            if header["name"] == "frame":
+                self._restore(header.get("data", {}), arrays)
             try:
                 self.on_event(header["name"], header.get("data", {}), arrays)
             except Exception:
                 pass
+            if self.auto_ack and header["name"] == "frame":
+                self.ack_frame(header.get("data", {}).get("seq"))
+
+    def _restore(self, data: Dict[str, Any], arrays: Dict[str, np.ndarray]) -> None:
+        """Undo the savings of the core: float16 -> float32, and target and mask of an earlier ``target`` event."""
+
+        key = data.get("target_key")
+        if key is not None and self._target[0] == key:
+            arrays.update(self._target[1])
+        for name in ("sim", "diff", "target", "x", "y"):
+            if name in arrays and arrays[name].dtype != np.float32:
+                arrays[name] = arrays[name].astype(np.float32)
 
     # ------------------------------------------------------------------ calls
     def call(self, name: str, args: Optional[Dict[str, Any]] = None,
@@ -139,6 +161,14 @@ class Client:
         if not header.get("ok", False):
             raise RemoteError(header.get("error", "unknown error"), header.get("trace", ""))
         return Reply(header.get("result", {}), pending.arrays)
+
+    def ack_frame(self, seq: Optional[int]) -> None:
+        """Tell the core that a frame has been taken care of (one-way)."""
+
+        if self._closed.is_set() or seq is None:
+            return
+        with self._push_lock:
+            self._push.send_multipart(protocol.pack(protocol.command(0, "ack_frame", {"seq": int(seq)})), copy=False)
 
     def close(self) -> None:
         if self._closed.is_set():
@@ -164,6 +194,11 @@ class Client:
 
     def info(self) -> Dict[str, Any]:
         return self.call("info").result
+
+    def workspace(self) -> Dict[str, Any]:
+        """``{"root": ..., "entries": [{"path", "kind", "autosave", "mtime"}, ...]}`` of the core's workspace."""
+
+        return self.call("workspace").result
 
     def open_run(self, directory: str, target_path: Optional[str] = None) -> Dict[str, Any]:
         return self.call("open_run", {"directory": directory, "target_path": target_path}).result["info"]
@@ -236,8 +271,8 @@ class Client:
     def seeding_config(self, patch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.call("seeding_config", {"patch": patch}).result["config"]
 
-    def save(self, directory: Optional[str] = None) -> str:
-        return self.call("save", {"directory": directory}).result["directory"]
+    def save(self, directory: Optional[str] = None, name: Optional[str] = None) -> str:
+        return self.call("save", {"directory": directory, "name": name}).result["directory"]
 
     def shutdown(self) -> None:
         self.call("shutdown", timeout=10.0)

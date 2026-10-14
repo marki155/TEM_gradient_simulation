@@ -348,10 +348,16 @@ class Objective:
             return self._target, group_mask, reference
         return self._target, None, reference
 
-    def __call__(self, simulation: torch.Tensor, normalisation: torch.Tensor):
-        """``(loss, terms)`` for a simulated image."""
+    def __call__(self, simulation: torch.Tensor, normalisation: torch.Tensor, keep: Optional[dict] = None):
+        """``(loss, terms)`` for a simulated image.
+
+        If ``keep`` is a dictionary it receives the standardised images ``x``, ``y`` and the
+        loss mask (detached, no extra work), so that a view can show what the step computed.
+        """
 
         target, mask, reference = self.regions()
         x, y = standardise(simulation, target, reference, normalisation)
         loss, parts = data_loss(x, y, mask, self.settings.loss)
+        if keep is not None:
+            keep.update(x=x.detach(), y=y.detach(), loss_mask=mask)
         return loss, parts

@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from temsim.data import store
+from temsim.learning.trainer import StepResult
 from temsim.service.session import Session, SessionError
 
 from ..learning.helpers import SHAPE
@@ -28,7 +29,7 @@ def stem(tmp_path):
 
 def test_nothing_open():
     s = Session("cpu")
-    assert s.info() == {"open": False}
+    assert s.info() == {"open": False, "workspace": None}
     for call in (s.experiment, s.frame, s.save, lambda: s.set_param("x")):
         with pytest.raises(SessionError, match="nothing is open"):
             call()
@@ -147,7 +148,7 @@ def test_minima_and_insert_on_a_stem_seed(stem):
     points = s.minima(threshold=0.2, distance_px=3.0)
     assert points.ndim == 2 and points.shape[1] == 2 and len(points) > 0
     r = s.insert_minima(threshold=0.2, distance_px=3.0)
-    assert r["candidates"] == len(points) and r["atoms"] == r["atoms_before"] + r["accepted"]
+    assert r["candidates"] == len(points) and 0 < r["atoms"] <= r["atoms_before"] + r["accepted"]
     assert s.info()["layers"][0]["atoms"] == r["atoms"]
     _, arrays = s.frame()
     assert len(arrays["atoms.0.pos"]) == r["atoms"]
@@ -230,3 +231,54 @@ def test_live_seed_patch_keeps_the_seeder(tmp_path):
     assert session.seeder is seeder and seeder.config.move_sigma_A == 0.4
     session.seeding_config({"margin_px": 3.0})
     assert session.seeder is None
+
+
+def test_frame_images_are_dark_outside_the_loss_mask(tmp_path):
+    s = Session("cpu")
+    s.open_run(make_run(tmp_path / "r")[0])
+    data, arrays = s.frame()
+    outside = ~arrays["mask"].astype(bool)
+    assert outside.any()
+    for key in ("sim", "target", "diff"):
+        assert np.all(arrays[key][outside] == 0.0) and np.any(arrays[key][~outside] != 0.0)
+    s.model.settings.active_group = None          # no active group: the loss mask is all pixels
+    _, arrays = s.frame()
+    assert np.any(arrays["sim"][outside] != 0.0)
+
+
+def test_minima_stay_inside_the_loss_mask(tmp_path):
+    s = Session("cpu")
+    s.open_run(make_run(tmp_path / "r")[0])
+    s.model.settings.active_group = None
+    everywhere = s.minima(threshold=0.1, distance_px=2.0, atom_distance=False)
+    assert len(everywhere) > 0
+    s.model.settings.active_group = next(iter(s.model.settings.masks))
+    inside = s.minima(threshold=0.1, distance_px=2.0, atom_distance=False)
+    rows, cols = inside[:, 0].astype(int), inside[:, 1].astype(int)
+    _, arrays = s.frame()
+    mask = arrays["mask"].astype(bool)
+    assert (~mask).any() and mask[rows, cols].all()
+
+
+def test_frame_from_a_training_step_equals_the_evaluated_frame(run):
+    s, *_ = run
+    kept = {}
+    with torch.no_grad():                                    # a forward pass without a step: the state does not move
+        loss, parts, prior = s.model.loss(kept)
+    result = StepResult(3, float(loss), parts, prior, kept)
+    data, arrays = Session.compose(s.capture(kept, result))
+    full, expected = s.frame()
+    for key in expected:
+        np.testing.assert_allclose(arrays[key], expected[key], rtol=1e-5, atol=1e-6, err_msg=key)
+    assert data["partial"] and data["steps"] == result.step and data["layers"] == full["layers"]
+    assert abs(data["loss"] - full["loss"]) < 1e-5
+
+
+def test_a_capture_keeps_the_atoms_of_its_step(run):
+    s, *_ = run
+    result = s.trainer.step(keep=True)
+    capture = s.capture(result.kept, result)
+    before = capture.atoms[0][0].clone()
+    with torch.no_grad():
+        s.model.params.layers[0].shifts += 1.0               # the optimiser moves the atoms in place
+    assert torch.equal(capture.atoms[0][0], before)

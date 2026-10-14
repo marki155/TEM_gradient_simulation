@@ -83,3 +83,23 @@ def test_seeding_job_notices_a_config_change(tmp_path):
     s.seeding_config({"margin_px": 2.0})           # the seeder has to be rebuilt: the job stops
     with pytest.raises(SessionError, match="changed"):
         job.advance()
+
+
+def test_seeding_chunk_ends_early_so_stop_is_not_kept_waiting(monkeypatch):
+    import time
+    from temsim.service import jobs
+
+    class Slow:
+        class stats:
+            full = False
+
+        def trial(self):
+            time.sleep(0.05)
+
+    job = jobs.SeedingJob.__new__(jobs.SeedingJob)
+    job.seeder, job.limit, job.chunk, job.tune_every, job.tune_steps = Slow(), None, 1000, 0, 0
+    job.count, job._since_tune, job.done = 0, 0, False
+    job.session = type("S", (), {"seeder": job.seeder, "seeding_status": lambda self: {}})()
+    start = time.monotonic()
+    job.advance()
+    assert time.monotonic() - start < 1.5 and 0 < job.count < 1000

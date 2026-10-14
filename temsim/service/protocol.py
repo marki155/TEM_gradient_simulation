@@ -29,7 +29,14 @@ Three kinds of messages exist.
 ``event``  (core -> every client that has said ``hello``)
     ``{"kind": "event", "name": ..., "data": {...}}``.  Events are ``status``
     (idle / running / paused), ``light`` (step and loss, cheap, every step),
-    ``frame`` (images and atoms, throttled), ``log`` (text) and ``error``.
+    ``frame`` (images and atoms, throttled), ``log`` (text) and ``error``.  A ``frame``
+    carries a sequence number ``seq`` which the client returns with the one-way command
+    ``ack_frame`` once it has drawn the frame; the core sends no further frame while two
+    are unanswered (Part IV, Section 3).  The images of a ``frame`` event travel as float16 and
+    its target only when it changed: a ``target`` event (header field ``key``) precedes the first
+    frame that refers to it (``target_key``); :class:`~temsim.service.client.Client` puts it back
+    and returns float32, so a handler sees a complete frame.  A frame with ``partial`` set lacks the optional extras
+    (optics, strain, potentials, gradients); the client keeps the last ones.
 
 Data classes of :mod:`temsim.data.schema` travel as the JSON of
 :mod:`temsim.data.codec`; the bulk arrays of the training settings (masks, group
@@ -47,6 +54,7 @@ neither PyTorch nor the physics.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -54,15 +62,37 @@ import numpy as np
 from ..data import codec
 from ..data.schema import Experiment, ModelState, TrainSettings
 
+ENDPOINT_PATTERN = re.compile(r"^(tcp://[^/\\\s]+:(\d+|\*)|ipc://\S+|inproc://\S+)$")
+
+
+def endpoint_argument(text: str) -> str:
+    """``argparse`` type for an endpoint."""
+
+    import argparse
+    try:
+        return check_endpoint(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def check_endpoint(endpoint: str) -> str:
+    """``endpoint`` if it looks like ``tcp://host:port`` (or ``ipc://``); else a ValueError with a hint."""
+
+    if not ENDPOINT_PATTERN.match(endpoint):
+        raise ValueError(f"invalid endpoint {endpoint!r}; expected e.g. tcp://127.0.0.1:5555 (forward slashes)")
+    return endpoint
+
+
 PROTOCOL_VERSION = 1
 
 #: dtypes that may be sent (little endian, C order)
-ARRAY_DTYPES = ("float32", "float64", "int32", "int64", "uint8", "bool")
+ARRAY_DTYPES = ("float16", "float32", "float64", "int32", "int64", "uint8", "bool")
 
 #: the commands of the core, with one line each (the table in the documentation)
 COMMANDS: Dict[str, str] = {
     "hello": "register for events; returns the protocol version",
     "info": "description of the loaded model",
+    "workspace": "the entries (runs and data folders) of the workspace directory",
     "open_run": "load a run directory (any layout, old or new)",
     "open_dataset": "load a data folder or init.json (lattice start or empty seeding start)",
     "get_experiment": "specification with the current atoms",
@@ -81,13 +111,18 @@ COMMANDS: Dict[str, str] = {
     "resume": "continue a paused job",
     "stop": "end the job",
     "frame": "images, atoms and optional extras now",
+    "ack_frame": "one-way: a frame event (header field seq) has been drawn; no reply",
     "edit": "model edit between steps (remove low occupancy, reset ..., see Session)",
     "minima": "candidate sites from the difference image",
     "insert_minima": "insert candidate sites that pass the seeding criteria",
     "seeding_config": "read or patch the seeding configuration",
-    "save": "write a run directory",
+    "save": "write a run directory (to a directory, or to a name inside the workspace)",
     "shutdown": "end the core",
 }
+
+
+#: commands the core does not answer
+NO_REPLY = frozenset({"ack_frame"})
 
 
 # ---------------------------------------------------------------------------

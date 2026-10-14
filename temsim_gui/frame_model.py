@@ -75,6 +75,7 @@ class FrameModel:
     strain: Dict[str, np.ndarray] = field(default_factory=dict)
     seeding: Optional[Dict[str, Any]] = None
     group_names: List[str] = field(default_factory=list)
+    seq: Optional[int] = None          # number to acknowledge (None: the frame answered a request)
 
     @property
     def stem(self) -> bool:
@@ -86,7 +87,10 @@ class FrameModel:
 
     # -- construction -----------------------------------------------------------
     @classmethod
-    def from_wire(cls, data: Dict[str, Any], arrays: Dict[str, np.ndarray]) -> "FrameModel":
+    def from_wire(cls, data: Dict[str, Any], arrays: Dict[str, np.ndarray],
+                  previous: Optional["FrameModel"] = None) -> "FrameModel":
+        """``previous`` supplies the extras (optics, strain, potentials, gradients) that a ``partial`` frame lacks."""
+
         layers = []
         for i, meta in enumerate(data["layers"]):
             layers.append(LayerView(
@@ -102,13 +106,31 @@ class FrameModel:
         for layer in layers:
             if layer.group not in groups:
                 groups.append(layer.group)
-        return cls(loss=float(data["loss"]), data=_parts(data.get("data")), prior=_parts(data.get("prior")),
+        frame = cls(loss=float(data["loss"]), data=_parts(data.get("data")), prior=_parts(data.get("prior")),
                    step=int(data.get("steps", 0)), mode=data.get("mode", "tem"),
                    active_group=data.get("active_group"), revision=int(data.get("revision", 0)),
                    sim=arrays["sim"], target=arrays["target"], diff=arrays["diff"], layers=layers,
                    mask=None if mask is None else np.asarray(mask) > 0,
                    ctf_phase=arrays.get("ctf_phase"), ctf_ring=arrays.get("ctf_ring"), probe=arrays.get("probe"),
-                   strain=strain, seeding=data.get("seeding"), group_names=groups)
+                   strain=strain, seeding=data.get("seeding"), group_names=groups, seq=data.get("seq"))
+        if data.get("partial") and previous is not None:
+            frame._take_extras(previous)
+        return frame
+
+    def _take_extras(self, old: "FrameModel") -> None:
+        """Keep what a partial frame does not carry; atoms of another count get no stale potentials or arrows."""
+
+        for name in ("ctf_phase", "ctf_ring", "probe"):
+            if getattr(self, name) is None:
+                setattr(self, name, getattr(old, name))
+        if not self.strain:
+            self.strain = old.strain
+        if len(old.layers) == len(self.layers):
+            for new, before in zip(self.layers, old.layers):
+                if new.potential is None:
+                    new.potential = before.potential
+                if new.gradient is None and before.gradient is not None and len(before.gradient) == len(new.pos):
+                    new.gradient = before.gradient
 
     # -- derived views ------------------------------------------------------------
     def active_layers(self) -> List[int]:

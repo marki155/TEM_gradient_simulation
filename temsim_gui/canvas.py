@@ -24,6 +24,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+from matplotlib.transforms import Bbox, IdentityTransform
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6 import QtCore
 
@@ -70,6 +72,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.axes_by_key: Dict[str, object] = {}
         self.images: Dict[str, object] = {}
         self.loss_line = None
+        self._loss_box = None
         self.target_scatter = None
         self.pot_scatters: List[object] = []
         self.hist_lines: list = []
@@ -150,6 +153,7 @@ class PlotCanvas(FigureCanvasQTAgg):
             return artist
 
         self.loss_line = None
+        self._loss_box = None
         if "loss" in self.axes_by_key:
             ax = self.axes_by_key["loss"]
             self.loss_line, = ax.plot([], [])
@@ -223,9 +227,18 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._draw_history()
         try:
             renderer = self.get_renderer()
-            ax.draw(renderer)
             box = ax.get_tightbbox(renderer)
-            self.blit(box.expanded(1.15, 1.15) if box is not None else ax.bbox)
+            box = (box if box is not None else ax.bbox).expanded(1.15, 1.15)
+            if self._loss_box is not None:
+                box = Bbox.union([box, self._loss_box])
+            box = Bbox.intersection(box, self.fig.bbox) or box
+            self._loss_box = box
+            # erase the old ticks and labels, otherwise every update is drawn over the last one
+            wipe = Rectangle((box.x0, box.y0), box.width, box.height, transform=IdentityTransform(),
+                             facecolor=self.fig.get_facecolor(), edgecolor="none")
+            wipe.draw(renderer)
+            ax.draw(renderer)
+            self.blit(box)
             return True
         except Exception:
             self.draw_idle()

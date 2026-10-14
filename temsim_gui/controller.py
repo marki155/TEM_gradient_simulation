@@ -47,7 +47,8 @@ from . import tiles
 from .canvas import PlotCanvas
 from .connection import Connection
 from .frame_model import FrameModel
-from .panels import ControlPanel, MinimaPanel, SeedingPanel, StrainPanel
+from .open_dialog import OpenDialog
+from .panels import INSERT, TRAINING, ControlPanel, InsertPanel, StrainPanel
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
 
@@ -59,18 +60,21 @@ MINIMA_DELAY_MS = 250
 class Controller(QtCore.QObject):
     notified = QtCore.Signal(str)
 
-    def __init__(self, connection: Connection, canvas: PlotCanvas, control: ControlPanel, minima: MinimaPanel,
-                 seeding: SeedingPanel, strain: StrainPanel, values: ValuesEditor, train: TrainEditor,
+    def __init__(self, connection: Connection, canvas: PlotCanvas, control: ControlPanel, insert: InsertPanel,
+                 strain: StrainPanel, values: ValuesEditor, train: TrainEditor,
                  parent: Optional[QtCore.QObject] = None):
         super().__init__(parent)
         self.connection, self.canvas, self.control = connection, canvas, control
-        self.minima, self.seeding, self.strain = minima, seeding, strain
+        self.insert, self.strain = insert, strain
+        self.minima, self.seeding = insert.minima, insert.seeding
         self.values, self.train = values, train
         self.info: Dict[str, Any] = {}
         self.experiment: Optional[Experiment] = None
         self.state, self.job_kind = "idle", None
         self.seeded = False
         self.remote = False
+        #: the core's workspace directory (from ``info``) or ``None``
+        self.workspace: Optional[str] = None
         self.errors: List[str] = []
         self._minima_pending = False
         self._values_asked = 0.0
@@ -117,7 +121,7 @@ class Controller(QtCore.QObject):
             spin.valueChanged.connect(lambda value, k=key: self.on_minima_radius(k, value))
         m.insert_btn.clicked.connect(self.insert_minima)
 
-        self.seeding.config_changed.connect(self.on_seeding_config)
+        self.insert.config_changed.connect(self.on_seeding_config)
         self.strain.apply_clicked.connect(self.apply_control_points)
         self.train.active_group_changed.connect(lambda _=None: self.render())
         self.values.save_clicked.connect(lambda: self.save(None))
@@ -150,14 +154,10 @@ class Controller(QtCore.QObject):
     def on_model(self, result) -> None:
         info, experiment, settings, config = result
         self.info = info
+        self.workspace = info.get("workspace")
         self.experiment = experiment
         self.control.set_state(self.state, self.job_kind, open_=bool(info.get("open")))
-        self.seeding.show_values(config)
-        self.minima.spins["touch_A"].blockSignals(True)
-        for key, spin in self.minima.spins.items():
-            if key in config:
-                spin.setValue(float(config[key]))
-        self.minima.spins["touch_A"].blockSignals(False)
+        self.insert.show_values(config)
         if experiment is None:
             return
         self.seeding.set_stem(info.get("mode") == "stem_haadf")
@@ -179,6 +179,8 @@ class Controller(QtCore.QObject):
         self.state = data.get("state", "idle")
         self.job_kind = job.get("kind") if self.state != "idle" else None
         self.control.set_state(self.state, self.job_kind, open_=bool(data.get("open", True)))
+        if self.job_kind is not None:
+            self.control.set_mode(INSERT if self.job_kind == "seeding" else TRAINING)
         if previous != "idle" and self.state == "idle":
             self.render()
             self.request_values()
@@ -196,9 +198,12 @@ class Controller(QtCore.QObject):
             self.canvas.update_loss()
 
     def on_frame(self, frame: FrameModel) -> None:
-        if self.canvas.configure([layer.name for layer in frame.layers], frame.stem):
-            self.fill_tiles()
-        self.canvas.update_frame(frame)
+        try:
+            if self.canvas.configure([layer.name for layer in frame.layers], frame.stem):
+                self.fill_tiles()
+            self.canvas.update_frame(frame)
+        finally:
+            self.connection.acknowledge(frame)
         if self.state == "idle":
             self.control.set_progress(frame.step, frame.loss)
         now = time.monotonic()
@@ -258,7 +263,9 @@ class Controller(QtCore.QObject):
 
         def done(result) -> None:
             data, arrays = result
-            self.on_frame(FrameModel.from_wire(data, arrays))
+            frame = FrameModel.from_wire(data, arrays)
+            self.connection.remember(frame)
+            self.on_frame(frame)
 
         if self.info.get("open"):
             self.send(lambda: self.client.frame(extras=extras), done)
@@ -320,8 +327,6 @@ class Controller(QtCore.QObject):
 
     def on_minima_radius(self, key: str, value: float) -> None:
         self.send(lambda: self.client.seeding_config({key: float(value)}))
-        if key in self.seeding.spins:
-            self.seeding.show_values({key: float(value)})
         self._later()
 
     def request_minima(self) -> None:
@@ -360,11 +365,6 @@ class Controller(QtCore.QObject):
 
     def on_seeding_config(self, patch: Dict[str, Any]) -> None:
         self.send(lambda: self.client.seeding_config(patch))
-        for key in ("touch_A", "merge_A"):
-            if key in patch:
-                self.minima.spins[key].blockSignals(True)
-                self.minima.spins[key].setValue(float(patch[key]))
-                self.minima.spins[key].blockSignals(False)
 
     # ------------------------------------------------------------------ files
     def save(self, directory: Optional[str] = None) -> None:
@@ -379,19 +379,44 @@ class Controller(QtCore.QObject):
         return QtWidgets.QFileDialog.getExistingDirectory(self.canvas, title)
 
     def save_as(self) -> None:
+        """With a workspace only a name is asked (the core writes into the workspace)."""
+
+        if self.workspace:
+            name, ok = QtWidgets.QInputDialog.getText(self.canvas, "Speichern unter ...",
+                                                      f"Name im Workspace ({self.workspace}):")
+            if ok and name.strip():
+                self.save_named(name.strip())
+            return
         directory = self.ask_directory("Speichern unter ...")
         if directory:
             self.save(directory)
 
+    def save_named(self, name: str) -> None:
+        self.send(lambda: self.client.save(name=name), lambda path: self.notify(f"gespeichert: {path}"))
+
     def load(self) -> None:
-        directory = self.ask_directory("Run laden")
-        if directory:
-            self.open_run(directory)
+        """With a workspace: pick from its list; otherwise ask for a path on the core's machine."""
 
-    def finish(self, save: bool) -> None:
-        """Stop the job and, if asked, save; the queued commands are completed by ``Connection.close``."""
+        if self.workspace:
+            self.send(self.client.workspace, self.choose_entry)
+            return
+        path = self.ask_directory("Laden (Lauf oder Datenordner)")
+        if path:
+            self.open_dataset(path)
 
-        if self.state != "idle":
+    def choose_entry(self, listing: Dict[str, Any]) -> None:
+        dialog = OpenDialog(listing, self.canvas)
+        if dialog.exec() and dialog.selected() is not None:
+            self.open_entry(dialog.selected(), dialog.resume)
+
+    def open_entry(self, entry: Dict[str, Any], resume: bool = True) -> None:
+        self.open_dataset(entry["path"], resume=resume)
+
+    def finish(self, save: bool, stop_job: bool = True) -> None:
+        """Stop the job (unless ``stop_job`` is false: a core that outlives the window keeps working)
+        and, if asked, save; the queued commands are completed by ``Connection.close``."""
+
+        if stop_job and self.state != "idle":
             self.connection.submit(self.client.stop)
         if save and self.info.get("open"):
             self.connection.submit(self.client.save)

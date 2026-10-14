@@ -77,3 +77,20 @@ def test_locality_of_an_endpoint():
     from temsim_gui.main_window import is_local
     assert is_local("tcp://127.0.0.1:5555") and is_local("tcp://localhost:1") and is_local("ipc:///tmp/x")
     assert not is_local("tcp://10.0.0.5:5555") and not is_local("tcp://gpu-box:5555")
+
+
+def test_partial_frame_inherits_the_extras_of_the_previous_one():
+    data, arrays = wire(gradients=True)
+    arrays["potential.0"] = np.ones((8, 8))
+    arrays["ctf_phase"] = np.ones((4, 4))
+    arrays["strain.ux"] = np.ones((4, 4))
+    old = FrameModel.from_wire(data, arrays)
+    data2, arrays2 = wire()
+    data2["partial"], data2["seq"] = True, 5
+    new = FrameModel.from_wire(data2, arrays2, old)
+    assert new.seq == 5 and new.ctf_phase is old.ctf_phase and "ux" in new.strain
+    assert new.layers[0].potential is old.layers[0].potential and new.layers[1].gradient is old.layers[1].gradient
+    assert FrameModel.from_wire(*wire(), old).ctf_phase is None          # a complete frame replaces the extras
+    data3, arrays3 = wire(n=4)
+    data3["partial"] = True
+    assert FrameModel.from_wire(data3, arrays3, old).layers[0].gradient is None   # other atom count: no stale arrows

@@ -30,8 +30,11 @@ tensors that stay trainable (Part II, Section 5).
 
 The *frame* is the picture of the state that a client draws.  It contains
 
-* the simulated image :math:`s`, the measured image :math:`t` and the difference
-  :math:`\delta = x - y` of the standardised images (Part II, Eq. 2.2),
+* the standardised simulated image :math:`x`, the standardised measured image :math:`y`
+  and their difference :math:`\delta = x - y` (Part II, Eq. 2.2), each multiplied by the
+  *loss mask* :math:`M`, so that what is not part of the loss is dark (as the images
+  of the earlier interface were); with a target of its own for the active group there is
+  no mask and the images are shown whole,
 * the mask of the active group,
 * for every layer the effective positions :math:`\mathbf r^{\rm eff}`
   (Part I, Eq. 1.2), the occupancies :math:`o` and the intensities :math:`I`,
@@ -52,6 +55,7 @@ import copy
 import dataclasses
 import math
 import os
+import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -64,7 +68,7 @@ from ..learning.model import Model
 from ..learning.seeding import SeedConfig, Seeder, minima_positions
 from ..learning.trainer import Trainer
 from ..physics import optics, strain as strain_fields
-from . import assemble
+from . import assemble, workspace as workspaces
 from .assemble import Assembly
 
 STRAIN_MAP_RESOLUTION = 256
@@ -72,6 +76,21 @@ CTF_MAX_ANGLE_MRAD = 42.0
 PROBE_WINDOW_PX = 64
 
 Arrays = Dict[str, np.ndarray]
+
+
+@dataclasses.dataclass
+class Capture:
+    """What a training step leaves behind for a frame: tensors that nobody modifies any more
+    (so that another thread can turn them into arrays) and plain numbers."""
+
+    x: torch.Tensor
+    y: torch.Tensor
+    loss_mask: Optional[torch.Tensor]
+    mask: Optional[np.ndarray]
+    atoms: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+    layers: List[Dict[str, Any]]
+    data: Dict[str, Any]
+    seq: int = 0
 
 
 class SessionError(RuntimeError):
@@ -103,6 +122,8 @@ class Session:
         self.seed_layer = 0
         self.revision = 0
         self.last_save: Optional[str] = None
+        #: the directory of ``--workspace``: relative paths are read from and named runs written to it
+        self.workspace: Optional[str] = None
         self.candidates = np.zeros((0, 2))
 
     # ------------------------------------------------------------------ opening
@@ -124,16 +145,29 @@ class Session:
         self.revision += 1
         return self.info()
 
-    def open_run(self, directory: str, target_path: Optional[str] = None) -> Dict[str, Any]:
-        return self.open_assembly(assemble.run_assembly(directory, target_path))
+    def set_workspace(self, directory: Optional[str]) -> None:
+        if directory:
+            directory = os.path.abspath(directory)
+            os.makedirs(directory, exist_ok=True)
+        self.workspace = directory or None
 
-    def open_dataset(self, path: str, route: str = "auto", **options) -> Dict[str, Any]:
+    def workspace_entries(self) -> Dict[str, Any]:
+        if self.workspace is None:
+            raise SessionError("the core runs without a workspace (start it with --workspace DIR)")
+        return {"root": self.workspace, "entries": workspaces.scan(self.workspace)}
+
+    def open_run(self, directory: str, target_path: Optional[str] = None) -> Dict[str, Any]:
+        return self.open_assembly(assemble.run_assembly(workspaces.resolve(self.workspace, directory), target_path))
+
+    def open_dataset(self, path: str, route: str = "auto", resume: bool = True, **options) -> Dict[str, Any]:
         """``route``: ``"lattice"``, ``"seed"``, ``"run"`` or ``"auto"``.
 
         ``auto``: a directory with an experiment file is a run; an ``init.json`` with layers and a
-        lattice starts the lattice route; everything else the seeding route.
+        lattice starts the lattice route; everything else the seeding route.  ``resume``: continue
+        from the autosave of the output folder if there is one.
         """
 
+        path = workspaces.resolve(self.workspace, path)
         is_run = os.path.isdir(path) and any(os.path.exists(os.path.join(path, n)) for n in store.EXPERIMENT_FILES)
         if route == "run" or (route == "auto" and is_run):
             return self.open_run(path)
@@ -142,10 +176,12 @@ class Session:
         if route == "auto":
             route = "lattice" if spec is not None and spec.layers and spec.lattices else "seed"
         if route == "lattice":
-            return self.open_assembly(assemble.lattice_assembly(data))
-        if route == "seed":
-            return self.open_assembly(assemble.seeding_assembly(data, **options))
-        raise SessionError(f"unknown route {route!r}")
+            built = assemble.lattice_assembly(data)
+        elif route == "seed":
+            built = assemble.seeding_assembly(data, **options)
+        else:
+            raise SessionError(f"unknown route {route!r}")
+        return self.open_assembly(assemble.resume_assembly(built) if resume else built)
 
     # ------------------------------------------------------------------ description
     def experiment(self) -> Experiment:
@@ -158,10 +194,10 @@ class Session:
 
     def info(self) -> Dict[str, Any]:
         if self.model is None:
-            return {"open": False}
+            return {"open": False, "workspace": self.workspace}
         model, a = self.model, self.assembly
         imaging = model.experiment.imaging
-        return {"open": True, "kind": a.kind, "revision": self.revision, "device": self.device,
+        return {"open": True, "workspace": self.workspace, "kind": a.kind, "revision": self.revision, "device": self.device,
                 "shape": list(imaging.shape), "pixel_size_nm": imaging.pixel_size_nm, "mode": imaging.mode,
                 "voltage_kV": imaging.voltage_kV,
                 "layers": [{"name": s.name, "group": s.group, "element": s.element, "z_nm": s.z_nm,
@@ -419,7 +455,7 @@ class Session:
     # ------------------------------------------------------------------ candidate sites
     def minima(self, threshold: float = 0.5, distance_px: float = 3.0, layer: Any = None,
                atom_distance: bool = True, verify: Optional[Dict[str, bool]] = None) -> np.ndarray:
-        """Candidate sites of Part II, Eq. (7.1) of ``layer`` (``(n, 2)``).
+        """Candidate sites of Part II, Eq. (7.1) of ``layer`` (``(n, 2)``), only inside the loss mask.
 
         ``atom_distance``: drop sites closer than ``distance_px`` to an existing atom.
         ``verify``: ``{check_margin, check_collisions, check_loss}``; if given, the sites are
@@ -428,6 +464,9 @@ class Session:
 
         model = self.require_model()
         diff = model.evaluate()["diff"]
+        _, loss_mask, _ = model.objective.regions()
+        if loss_mask is not None:
+            diff = np.where(loss_mask.detach().cpu().numpy() > 0, diff, 0.0)
         index = self.layer_index(layer)
         with torch.no_grad():
             atoms = model.params.positions(index).cpu().numpy() if atom_distance else None
@@ -458,11 +497,8 @@ class Session:
 
         model = self.require_model()
         ev = model.evaluate()
-        arrays: Arrays = {"sim": ev["image"].astype(np.float32), "target": ev["target"].astype(np.float32),
-                          "diff": ev["diff"].astype(np.float32)}
-        if standardised:
-            arrays["x"] = ev["standardised"].astype(np.float32)
-            arrays["y"] = ev["standardised_target"].astype(np.float32)
+        _, loss_mask, _ = model.objective.regions()
+        arrays = self._images(ev["standardised"], ev["standardised_target"], loss_mask, standardised)
         mask = model.settings.mask_for(model.settings.active_group)
         if mask is not None:
             arrays["mask"] = (np.asarray(mask) > 0).astype(np.uint8)
@@ -489,6 +525,58 @@ class Session:
         if self.seeder is not None:
             data["seeding"] = self.seeding_status()
         return data, arrays
+
+    @staticmethod
+    def _images(x, y, loss_mask, standardised: bool = False) -> Arrays:
+        """``sim``, ``target``, ``diff`` (times the loss mask); ``x`` and ``y`` are tensors or arrays."""
+
+        x = x.cpu().numpy() if torch.is_tensor(x) else np.asarray(x)
+        y = y.cpu().numpy() if torch.is_tensor(y) else np.asarray(y)
+        if loss_mask is None:
+            shown = 1.0
+        else:
+            shown = ((loss_mask.cpu().numpy() if torch.is_tensor(loss_mask) else np.asarray(loss_mask)) > 0)
+            shown = shown.astype(np.float32)
+        arrays: Arrays = {"sim": (x * shown).astype(np.float32, copy=False),
+                          "target": (y * shown).astype(np.float32, copy=False),
+                          "diff": ((x - y) * shown).astype(np.float32, copy=False)}
+        if standardised:
+            arrays["x"] = x.astype(np.float32, copy=False)
+            arrays["y"] = y.astype(np.float32, copy=False)
+        return arrays
+
+    @torch.no_grad()
+    def capture(self, kept: Dict[str, Any], result) -> Capture:
+        """Take what a training step computed (``Trainer.step(keep=True)``); cheap, no synchronisation.
+
+        The atoms are copied because the optimiser changes them in place; the images need no copy.
+        """
+
+        model = self.require_model()
+        atoms, layers = [], []
+        for i, spec in enumerate(model.experiment.layers):
+            lp = model.params.layers[i]
+            atoms.append((model.params.positions(i).detach().clone(), model.params.occupancy(i).detach().clone(),
+                          lp.intensity.detach().clone()))
+            layers.append({"name": spec.name, "group": spec.group, "element": spec.element, "atoms": len(lp)})
+        data = {"loss": result.loss, "data": result.data, "prior": result.prior, "layers": layers,
+                "active_group": model.settings.active_group, "revision": self.revision, "steps": result.step,
+                "mode": model.experiment.imaging.mode, "partial": True}
+        mask = model.settings.mask_for(model.settings.active_group)
+        return Capture(kept["x"], kept["y"], kept["loss_mask"], mask, atoms, layers, data)
+
+    @staticmethod
+    def compose(capture: Capture) -> Tuple[Dict[str, Any], Arrays]:
+        """A frame without extras from a :class:`Capture`; touches no model, so any thread may call it."""
+
+        arrays = Session._images(capture.x, capture.y, capture.loss_mask)
+        if capture.mask is not None:
+            arrays["mask"] = (np.asarray(capture.mask) > 0).astype(np.uint8)
+        for i, (pos, occ, intensity) in enumerate(capture.atoms):
+            arrays[f"atoms.{i}.pos"] = pos.cpu().numpy().astype(np.float32, copy=False)
+            arrays[f"atoms.{i}.occ"] = occ.cpu().numpy().astype(np.float32, copy=False)
+            arrays[f"atoms.{i}.int"] = intensity.cpu().numpy().astype(np.float32, copy=False)
+        return dict(capture.data), arrays
 
     @torch.no_grad()
     def _optics(self, arrays: Arrays) -> None:
@@ -560,13 +648,32 @@ class Session:
                 arrays[f"grad.{i}"] = g.detach().cpu().numpy().astype(np.float32)
 
     # ------------------------------------------------------------------ saving
-    def save(self, directory: Optional[str] = None) -> str:
+    def save(self, directory: Optional[str] = None, name: Optional[str] = None) -> str:
+        """Write a run directory: ``name`` inside the workspace, else ``directory``, else the autosave folder."""
+
         model = self.require_model()
-        directory = directory or (self.assembly.out_dir if self.assembly else None)
+        if name:
+            if self.workspace is None:
+                raise SessionError("a name needs a workspace (start the core with --workspace DIR)")
+            try:
+                directory = workspaces.child(self.workspace, name)
+            except ValueError as exc:
+                raise SessionError(str(exc)) from None
+            if os.path.isdir(directory) and workspaces.kind(directory) != "run":
+                raise SessionError(f"{name!r} exists and is not a saved run; it is not overwritten")
+        elif directory:
+            directory = workspaces.resolve(self.workspace, directory)
+        if not directory and self.assembly is not None and self.assembly.out_dir:
+            directory = os.path.join(self.assembly.out_dir, assemble.AUTOSAVE_DIR)
         if not directory:
             raise SessionError("no directory given and the session has no default one")
         run = store.Run(self.experiment(), model.settings, model.state(), self.assembly.target,
                         list(self.assembly.notes))
-        store.save_run(directory, run)
+        staging = directory.rstrip("/\\") + ".writing"
+        shutil.rmtree(staging, ignore_errors=True)
+        store.save_run(staging, run)
+        if os.path.isdir(directory):
+            shutil.rmtree(directory)
+        os.replace(staging, directory)
         self.last_save = directory
         return directory

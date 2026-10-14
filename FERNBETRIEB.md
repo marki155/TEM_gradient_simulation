@@ -28,8 +28,28 @@ python -m temsim.service serve --endpoint tcp://127.0.0.1:5555 --device cuda
 # -> "temsim core on tcp://127.0.0.1:5555 (device cuda)"
 ```
 
-Optionen: `--device auto|cpu|cuda`, `--frame-interval 1.5` (Sekunden zwischen Bildern an die
-GUI), `--save-interval 120` (Autosave in `<Run-Ordner>/autosave`).
+Optionen: `--workspace <Ordner>` (siehe unten), `--device auto|cpu|cuda`, `--frame-interval 1.5` (Sekunden zwischen den vollständigen Bildern an die
+GUI), `--frame-steps 10` (Training: Bild alle N Schritte), `--save-interval 120` (Autosave in `<Run-Ordner>/autosave`).
+
+**Workspace.** Mit `--workspace ~/daten` hat der Core einen festen Ordner für Laden und Speichern. Die GUI
+(Knopf „Laden ...“) zeigt daraus eine Liste der Läufe und Datenordner (bis 3 Ebenen tief, neueste zuerst);
+Autosave-Ordner werden nicht aufgelistet, ein Datenordner mit Autosave macht dort weiter (Haken „neu
+beginnen“ ignoriert ihn). „Speichern unter ...“ fragt nur noch einen Namen und schreibt nach
+`<Workspace>/<Name>` (ein vorhandener Datenordner wird nie überschrieben). Relative Pfade in `--open`
+und in den Befehlen gelten ebenfalls relativ zum Workspace. Ohne `--workspace` fragt die GUI wie bisher
+nach einem Pfad auf dem Core-Rechner.
+
+**Speichern und Fortsetzen.** Der Core schreibt den Stand nach `<Ausgabeordner>/autosave`
+(Seeding: `<Datenordner>/config_random/autosave`, Run: `<Run-Ordner>/autosave`) bei Pause, Stop,
+Jobende, Fehler, Edits (Minima einfügen, Atome entfernen ...), vor dem Öffnen von etwas anderem,
+beim Beenden und alle `--save-interval` Sekunden. Wird derselbe Datenordner erneut geöffnet
+(`--open <Ordner>` bzw. `--dataset`), macht der Core automatisch dort weiter ("continued from ..." in
+den Notizen); `--fresh` ignoriert den Autosave. Ein Autosave ist ein normaler Run und lässt sich auch
+mit `--run <Ordner>/autosave` öffnen.
+
+Schließt man die GUI, die an einen fremden Core (`--endpoint`) angeschlossen ist, läuft dessen Job
+weiter und speichert weiter; nur ein von der GUI selbst gestarteter Core wird mit ihr beendet.
+"Beim Schliessen speichern" schreibt ebenfalls nach `<Ausgabeordner>/autosave`.
 
 Damit der Core eine SSH-Sitzung überlebt, in `tmux`/`screen` starten:
 
@@ -96,10 +116,16 @@ Text ab; sonst durchsucht der Datei-Dialog den lokalen Rechner.
 
 ## 6. Bandbreite
 
-Die GUI bekommt etwa alle `--frame-interval` Sekunden ein Bild (Simulation, Target, Differenz
-und Atomlisten als float32). Für große Bilder über langsame Leitungen: Intervall erhöhen
-(`--frame-interval 5`). Potentiale und Gradientenpfeile werden nur übertragen, wenn sie in der
-GUI eingeschaltet sind.
+Beim Training schickt der Core alle `--frame-steps 10` Schritte die Bilder **aus dem Trainingsschritt
+selbst** (Simulation, Differenz und Bilder x/y als float16, Atome als float32; Target und Maske nur
+einmal, danach nur wenn sie sich ändern; grob 17–21 MB bei 2048² statt 50 MB).
+Aufbereitung und Versand laufen in einem eigenen Thread, das Training wartet nicht darauf; ein
+neueres Bild ersetzt ein noch nicht verschicktes. Die GUI bestätigt jedes gezeichnete Bild; der Core
+schickt höchstens zwei unbestätigte, eine langsame Leitung oder ein langsamer Laptop bremst also nie
+das Training. Optik, Dehnung, Potentiale und Gradientenpfeile brauchen eine eigene Simulation und
+kommen weiterhin nur alle `--frame-interval` Sekunden (und nur, wenn die GUI sie anfordert); dazwischen
+behält die GUI die letzten. `--frame-steps 0` schaltet das schnelle Verfahren ab. Beim Seeding gilt
+weiter `--frame-interval`.
 
 ## 7. Fehlersuche
 

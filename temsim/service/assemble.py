@@ -47,7 +47,7 @@ model.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -61,6 +61,8 @@ from ..physics import structure as lattices
 DEFAULT_BORDER_PX = 10
 DEFAULT_SEED_LOGIT = 6.0
 SEED_OUT_DIR = "config_random"
+#: Sub-folder of the output directory that holds the periodic and event-driven saves.
+AUTOSAVE_DIR = "autosave"
 
 
 @dataclass
@@ -289,5 +291,23 @@ def run_assembly(directory: str, target_path: Optional[str] = None) -> Assembly:
         target = datasets.prepare_target(datasets.read_image(path))
     if tuple(target.shape) != tuple(run.experiment.imaging.shape):
         raise ValueError(f"target {tuple(target.shape)} does not fit the run {tuple(run.experiment.imaging.shape)}")
+    path = os.path.abspath(directory)
+    out_dir = os.path.dirname(path) if os.path.basename(path) == AUTOSAVE_DIR else directory
     return Assembly(run.experiment, run.train, np.asarray(target, dtype=np.float32), run.state, "run",
-                    None, directory, notes=list(run.notes))
+                    None, out_dir, notes=list(run.notes))
+
+
+def resume_assembly(assembly: Assembly) -> Assembly:
+    """``assembly`` continued from the autosave of its output directory, if there is a matching one."""
+
+    path = os.path.join(assembly.out_dir or "", AUTOSAVE_DIR)
+    if not assembly.out_dir or not os.path.isdir(path):
+        return assembly
+    try:
+        run = store.load_run(path)
+    except Exception as exc:
+        return replace(assembly, notes=assembly.notes + [f"autosave {path} not readable ({exc}); starting afresh"])
+    if tuple(run.experiment.imaging.shape) != tuple(assembly.experiment.imaging.shape):
+        return replace(assembly, notes=assembly.notes + [f"autosave {path} has another image size; starting afresh"])
+    return replace(assembly, experiment=run.experiment, settings=run.train, state=run.state,
+                   notes=assembly.notes + [f"continued from {path}"])
