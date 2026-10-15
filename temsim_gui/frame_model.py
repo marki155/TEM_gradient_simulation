@@ -177,10 +177,13 @@ class FrameModel:
             return None
         return np.concatenate(found_pos), np.concatenate(found_grad)
 
-    def histogram(self, min_occupancy: float = 0.0, bins: int = HISTOGRAM_BINS) -> Tuple[List[np.ndarray], np.ndarray]:
-        """Intensity histograms of all layers over common bin edges."""
+    def histogram(self, min_occupancy: float = 0.0, bins: int = HISTOGRAM_BINS,
+                  weighted: bool = False) -> Tuple[List[np.ndarray], np.ndarray]:
+        """Histograms of all layers over common bin edges: the intensities ``I`` of the atoms with
+        occupancy of at least ``min_occupancy``, or with ``weighted`` the effective ones, occupancy times ``I``."""
 
-        values = [layer.intensity[layer.visible(min_occupancy)] for layer in self.layers]
+        values = [(layer.intensity * layer.occupancy if weighted else layer.intensity)[layer.visible(min_occupancy)]
+                  for layer in self.layers]
         finite = np.concatenate(values) if values else np.zeros(0)
         if finite.size == 0:
             return [np.zeros(bins) for _ in values], np.linspace(0.0, 1.0, bins + 1)

@@ -357,17 +357,21 @@ class Session:
             return model.params.layer_index(layer)
         return int(layer)
 
-    def make_seeder(self, layer: Any = None) -> Seeder:
-        """The seeder for ``layer`` (default: first layer of the active group), synchronised with the state."""
+    def make_seeder(self, layer: Any = None, sync_store: bool = True) -> Seeder:
+        """The seeder for ``layer`` (default: first layer of the active group), synchronised with the state.
+
+        Synchronising drops the atoms with occupancy below one half from the model; a read-only caller
+        passes ``sync_store=False``.
+        """
 
         model = self.require_model()
         index = self.layer_index(layer)
         if self.seeder is None or self.seed_layer != index:
             region = self.assembly.region if self.assembly is not None else None
-            self.seeder = Seeder(model, index, self.seed_config, region=region)
+            self.seeder = Seeder(model, index, self.seed_config, region=region, sync=sync_store)
             self.seed_layer = index
         else:
-            self.seeder.resync(sync_store=True)
+            self.seeder.resync(sync_store=sync_store)
         return self.seeder
 
     def seeding_status(self) -> Dict[str, Any]:
@@ -397,8 +401,10 @@ class Session:
         """Named edits between two steps; returns a small report.
 
         ``reset_occupancies``, ``reset_intensities``, ``reset_free_positions``,
-        ``remove_low_occupancy`` (``threshold``), ``resample_control`` (``control_points``);
-        all act on the layers of ``group`` (default: the active group).
+        ``remove_low_occupancy`` (``threshold``), ``merge_close`` (``distance_A``, default the merge distance
+        of the regularisation; ``min_occupancy``), ``resample_control`` (``control_points``);
+        all act on the layers of ``group`` (default: the active group).  ``merge`` (``layer``, ``atoms``: a
+        list of atom indices) fuses those atoms of one layer into one.
         """
 
         model = self.require_model()
@@ -427,6 +433,19 @@ class Session:
                 if not keep.all():
                     params.remove_atoms(i, keep)
             report["removed"] = removed
+            self.revision += 1
+        elif name == "merge_close":
+            reg = model.settings.regularisation
+            distance_A = float(args.get("distance_A", reg.merge_distance_A))
+            distance_px = distance_A / (spec.imaging.pixel_size_nm * 10.0)
+            merged = 0
+            for i in self._layers_of(group):
+                merged += params.merge_close(i, distance_px, float(args.get("min_occupancy", 0.5)))
+            report["merged"] = merged
+            self.revision += 1
+        elif name == "merge":
+            i = self.layer_index(args.get("layer"))
+            report["merged"] = params.merge_atoms(i, [args["atoms"]])
             self.revision += 1
         elif name == "resample_control":
             report.update(self._resample_control(group, args.get("control_points")))
@@ -472,7 +491,7 @@ class Session:
             atoms = model.params.positions(index).cpu().numpy() if atom_distance else None
         points = minima_positions(diff, threshold, distance_px, atoms)
         if verify is not None and len(points):
-            points = self.make_seeder(layer).filter_points(points, commit=False, **verify)
+            points = self.make_seeder(layer, sync_store=False).filter_points(points, commit=False, **verify)
         self.candidates = points
         return self.candidates
 

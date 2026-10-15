@@ -186,7 +186,9 @@ class Client:
 
     # ------------------------------------------------------------------ typed helpers
     def hello(self, extras=None) -> Dict[str, Any]:
-        args = {} if extras is None else {"extras": list(extras)}
+        args = {"acks": True}
+        if extras is not None:
+            args["extras"] = list(extras)
         result = self.call("hello", args).result
         if result.get("protocol") != protocol.PROTOCOL_VERSION:
             raise RemoteError(f"protocol {result.get('protocol')} != {protocol.PROTOCOL_VERSION}")

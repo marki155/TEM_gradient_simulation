@@ -89,10 +89,12 @@ class Flow:
     def __init__(self, limit: int = MAX_IN_FLIGHT, timeout: float = ACK_TIMEOUT, now=time.monotonic):
         self.limit, self.timeout, self.now = limit, timeout, now
         self._open: Dict[bytes, List[Any]] = {}          # identity -> [count, time of last send]
+        #: clients that do not say they acknowledge (older versions): never held back
+        self.unlimited: set = set()
 
     def can_send(self, identity: bytes) -> bool:
         entry = self._open.get(identity)
-        if entry is None or entry[0] < self.limit:
+        if identity in self.unlimited or entry is None or entry[0] < self.limit:
             return True
         if self.now() - entry[1] > self.timeout:
             entry[0] = 0

@@ -79,7 +79,8 @@ def test_training_start_changes_a_copy(tmp_path):
     assert t.layer(name).free_positions.enabled and t.layer(name).intensities.enabled
     assert t.regularisation.repulsion_a == 10.0 and t.regularisation.occ_entropy_a == 0.0
     assert t.aberration_flags["C10"] and not t.aberration_flags.get("C12", False)
-    assert not a.settings.layer(name).free_positions.enabled and a.settings.regularisation.repulsion_a == 0.0
+    assert not a.settings.layer(name).free_positions.enabled and a.settings.regularisation.repulsion_a == 10.0
+    assert a.settings.regularisation.repulsion_distance_A == 1.42 and a.settings.regularisation.occ_entropy_a == 0.0
 
 
 def test_run_route(tmp_path):

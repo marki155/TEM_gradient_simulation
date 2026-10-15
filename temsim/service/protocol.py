@@ -31,7 +31,8 @@ Three kinds of messages exist.
     (idle / running / paused), ``light`` (step and loss, cheap, every step),
     ``frame`` (images and atoms, throttled), ``log`` (text) and ``error``.  A ``frame``
     carries a sequence number ``seq`` which the client returns with the one-way command
-    ``ack_frame`` once it has drawn the frame; the core sends no further frame while two
+    ``ack_frame`` once it has drawn the frame (a client announces this with ``acks`` in its ``hello``; one that
+    does not is never held back); the core sends no further frame while two
     are unanswered (Part IV, Section 3).  The images of a ``frame`` event travel as float16 and
     its target only when it changed: a ``target`` event (header field ``key``) precedes the first
     frame that refers to it (``target_key``); :class:`~temsim.service.client.Client` puts it back
@@ -112,7 +113,7 @@ COMMANDS: Dict[str, str] = {
     "stop": "end the job",
     "frame": "images, atoms and optional extras now",
     "ack_frame": "one-way: a frame event (header field seq) has been drawn; no reply",
-    "edit": "model edit between steps (remove low occupancy, reset ..., see Session)",
+    "edit": "model edit between steps (remove low occupancy, merge close atoms, reset ..., see Session)",
     "minima": "candidate sites from the difference image",
     "insert_minima": "insert candidate sites that pass the seeding criteria",
     "seeding_config": "read or patch the seeding configuration",

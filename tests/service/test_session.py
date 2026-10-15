@@ -119,6 +119,33 @@ def test_set_param_loss_regularisation_group(run):
         s.set_active_group("zz")
 
 
+def test_merge_edits_by_hand_and_by_the_training_job(run):
+    from temsim.service.jobs import TrainingJob
+    s, *_ = run
+    params = s.model.params
+    n = len(params.layers[0])
+    with torch.no_grad():
+        params.layers[0].base[1] = params.layers[0].base[0] + torch.tensor([0.0, 0.1])
+        params.layers[0].logit.fill_(4.0)
+    assert s.edit("merge", layer=0, atoms=[0, 1])["merged"] == 1
+    assert len(params.layers[0]) == n - 1
+    with torch.no_grad():
+        params.layers[0].base[1] = params.layers[0].base[0] + torch.tensor([0.0, 0.1])
+    report = s.edit("merge_close", distance_A=0.5)
+    assert report["merged"] >= 1 and report["atoms"][0] <= n - 2
+    with torch.no_grad():
+        params.layers[0].base[1] = params.layers[0].base[0] + torch.tensor([0.0, 0.1])
+    count = len(params.layers[0])
+    s.model.settings.regularisation.merge_every = 2
+    s.model.settings.regularisation.merge_distance_A = 0.5
+    job = TrainingJob(s)
+    job.advance()
+    assert len(params.layers[0]) == count
+    job.advance()
+    job.advance()
+    assert job.merged >= 1 and len(params.layers[0]) < count
+
+
 def test_edits(run):
     s, *_ = run
     params = s.model.params
@@ -162,6 +189,18 @@ def test_minima_options(stem):
     checked = s.minima(threshold=0.2, distance_px=3.0,
                        verify={"check_margin": True, "check_collisions": True, "check_loss": False})
     assert len(checked) <= len(near)
+
+
+def test_showing_minima_does_not_remove_atoms(run):
+    s, *_ = run
+    params = s.model.params
+    with torch.no_grad():
+        params.layers[0].logit[:5] = -10.0
+    n = len(params.layers[0])
+    verify = {"check_margin": True, "check_collisions": True, "check_loss": True}
+    for _ in range(2):                                   # the first call creates the seeder, the second one reuses it
+        s.minima(threshold=0.2, distance_px=3.0, verify=verify)
+        assert len(params.layers[0]) == n
 
 
 def test_seeding_config_validates(stem):

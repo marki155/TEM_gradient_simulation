@@ -295,6 +295,7 @@ class Server:
     def cmd_hello(self, identity, args, arrays) -> Result:
         if identity not in self.subscribers:
             self.subscribers.append(identity)
+        (self.flow.unlimited.discard if args.get("acks") else self.flow.unlimited.add)(identity)
         if "extras" in args:
             self.frame_extras = tuple(args["extras"] or ())
         return {"protocol": protocol.PROTOCOL_VERSION, "commands": protocol.COMMANDS,

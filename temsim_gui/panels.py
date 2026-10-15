@@ -157,6 +157,12 @@ class ControlPanel(QtWidgets.QWidget):
                                    "rechts liegt, endgueltig aus dem Modell (Adam-Zustand wird zurueckgesetzt).")
         self.remove_spin = double_spin(0.5, 0.0, 1.0, 0.05, 2, prefix="Occ < ")
         section.content_layout.addWidget(row_of(self.remove_btn, self.remove_spin))
+        self.merge_btn = button("Nahe Atome verschmelzen")
+        self.merge_btn.setToolTip("Fuehrt alle besetzten Atome der aktiven Gruppe, die naeher als der Wert rechts\n"
+                                  "beieinander liegen, zu einem Atom zusammen (Position und Intensitaet gemittelt).\n"
+                                  "Der Optimierer tut das selbst, wenn 'merge_every' der Regularisierung gesetzt ist.")
+        self.merge_spin = double_spin(0.7, 0.05, 5.0, 0.05, 2, prefix="d < ", suffix=" A")
+        section.content_layout.addWidget(row_of(self.merge_btn, self.merge_spin))
         return section
 
     def add_mode_panel(self, widget: QtWidgets.QWidget) -> None:

@@ -18,8 +18,8 @@ last done, which decides two conveniences of the old interface:
 
 * after a seeding, the first start of training releases the positions and intensities
   of the seeded atoms (unless the person has chosen the trainable quantities);
-* the seeding view leaves out the strain tiles, because the displacement field is
-  not trained while seeding.
+* the strain tiles are not shown for now (``tiles.SHOW_STRAIN``); while seeding they would be left
+  out anyway, because the displacement field is not trained then.
 
 **Where files live.**  Paths in commands (open, save) are read and written by the *core*.
 If the core runs on another machine, a local file dialog would offer the wrong file
@@ -52,7 +52,7 @@ from .panels import INSERT, TRAINING, ControlPanel, InsertPanel, StrainPanel
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
 
-BASE_EXTRAS = ("optics", "strain", "potentials")
+BASE_EXTRAS = ("optics", "potentials")
 VALUES_INTERVAL = 2.0
 MINIMA_DELAY_MS = 250
 
@@ -107,6 +107,7 @@ class Controller(QtCore.QObject):
         p.reset_losses_btn.clicked.connect(self.reset_losses)
         p.reset_zoom_btn.clicked.connect(self.canvas.reset_zoom)
         p.remove_btn.clicked.connect(self.remove_low_occupancy)
+        p.merge_btn.clicked.connect(self.merge_close)
         for widget in (p.gradients, p.descent, p.relative):
             widget.toggled.connect(self.on_gradient_settings)
         p.length_spin.valueChanged.connect(self.on_gradient_settings)
@@ -291,6 +292,9 @@ class Controller(QtCore.QObject):
 
     def remove_low_occupancy(self) -> None:
         self.edit("remove_low_occupancy", threshold=float(self.control.remove_spin.value()))
+
+    def merge_close(self) -> None:
+        self.edit("merge_close", distance_A=float(self.control.merge_spin.value()))
 
     def apply_control_points(self) -> None:
         if self.experiment is None:

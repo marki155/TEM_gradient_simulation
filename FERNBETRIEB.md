@@ -76,6 +76,39 @@ nicht gleich sein, z. B. `-L 6000:127.0.0.1:5555` und dann `tcp://127.0.0.1:6000
 Test: `python -m temsim.service ping --endpoint tcp://127.0.0.1:5555` gibt Status und
 Beschreibung des Cores aus (braucht auf dem Laptop nur `pyzmq`, kein torch).
 
+### Gemeinsames venv für den Core (mehrere Benutzer)
+
+Torch liegt derzeit im Benutzerpaketordner `~/.local` eines einzelnen Benutzers; andere sehen es nicht.
+Ein venv **außerhalb** des Projektordners (der Pfad ist in dessen Skripten fest eingetragen) löst das:
+
+```bash
+python3 -m venv /home/remote_python/envs/temsim
+/home/remote_python/envs/temsim/bin/pip install -r requirements-core.txt
+sudo chgrp -R remote_python /home/remote_python/envs && sudo chmod -R g+rX /home/remote_python/envs
+# Core starten (ohne activate, der Pfad genügt):
+/home/remote_python/envs/temsim/bin/python -m temsim.service serve --endpoint tcp://127.0.0.1:9097 --device cuda --workspace ...
+```
+
+### Komfortabel: `~/.ssh/config` auf dem Laptop
+
+```
+Host emdata
+    HostName <voller-name-von-emdata>
+    User koegelmarco
+
+Host hillier
+    HostName hillier
+    User koegelmarco
+    ProxyJump emdata
+    # Tunnel gleich mitnehmen: GUI-Endpoint tcp://127.0.0.1:9097
+    LocalForward 9097 127.0.0.1:9097
+    ServerAliveInterval 30
+```
+
+Dann gibt `ssh hillier` direkt eine Konsole auf dem GPU-Server (und baut nebenbei den Tunnel auf);
+`ssh -t hillier tmux new -A -s temsim` hängt sich direkt an die tmux-Sitzung des Cores,
+`ssh -N hillier` baut nur den Tunnel.
+
 ## 4. GUI auf dem Laptop starten
 
 ```bash

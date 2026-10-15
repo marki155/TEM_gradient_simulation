@@ -291,3 +291,21 @@ def test_the_target_travels_once_and_the_client_restores_float32(core, tmp_path)
         assert a["mask"].dtype == np.uint8
     assert len({d["target_key"] for d, _ in frames}) == 1
     assert not any(n == "target" for n in events.names())      # consumed by the client, not forwarded
+
+
+def test_a_client_that_does_not_announce_acknowledgements_is_not_held_back(tmp_path):
+    server = Server("tcp://127.0.0.1:*", device="cpu", frame_steps=2,
+                    clock=Clock(frame_interval=3600.0, save_interval=0))
+    server.start()
+    events = Events()
+    client = Client(server.endpoint, on_event=events, timeout=60.0, auto_ack=False)
+    try:
+        path, *_ = make_run(tmp_path / "run")
+        client.call("hello", {"extras": []})                            # an older client: no ``acks``
+        client.open_run(path)
+        client.start_training()
+        events.wait(lambda n, d, a: n == "frame" and d.get("partial") and d["steps"] >= 8)
+        client.stop()
+    finally:
+        client.close()
+        server.stop()

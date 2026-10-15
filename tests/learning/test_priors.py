@@ -79,6 +79,42 @@ def test_repulsion_gradient_pushes_apart():
     assert g[0, 1] > 0 and g[1, 1] < 0 and abs(float(g[0, 1] + g[1, 1])) < 1e-6   # descent separates them
 
 
+def test_attraction_pulls_close_pairs_together():
+    exp, ps, s = setup(n=(2, 1))
+    s.layer("top").free_positions.enabled = True
+    s.regularisation.merge_distance_A = 1.0
+    dm = 1.0 / (PX * 10)
+    with torch.no_grad():
+        ps.layers[0].base.copy_(torch.tensor([[20.0, 20.0], [20.0, 20.0 + 0.5 * dm]]))
+        ps.layers[0].logit.fill_(3.0)
+    ps.apply_flags(s)
+    value = priors.attraction(ps, s)
+    assert float(value) == pytest.approx(0.25 / 2.0, rel=1e-4)
+    value.backward()
+    g = ps.layers[0].shifts.grad
+    assert g[0, 1] < 0 and g[1, 1] > 0                       # descent brings them together
+    with torch.no_grad():
+        ps.layers[0].base[1, 1] = 20.0 + 1.5 * dm
+    assert float(priors.attraction(ps, s)) == 0.0
+
+
+def test_merge_close_fuses_chains_and_keeps_the_rest():
+    exp, ps, s = setup(n=(5, 1))
+    with torch.no_grad():
+        ps.layers[0].base.copy_(torch.tensor([[20.0, 20.0], [20.0, 21.0], [20.0, 22.0], [20.0, 40.0], [30.0, 30.0]]))
+        ps.layers[0].logit.copy_(torch.tensor([4.0, 4.0, 4.0, 4.0, -4.0]))
+        ps.layers[0].intensity.copy_(torch.tensor([6.0, 6.0, 9.0, 6.0, 6.0]))
+    assert ps.merge_close(0, 1.5) == 2
+    assert len(ps.layers[0]) == 3
+    base = ps.layers[0].base.detach()
+    assert float(base[0, 0]) == pytest.approx(20.0) and 20.9 < float(base[0, 1]) < 21.6   # weighted by occ * I
+    assert float(base[1, 1]) == 40.0 and float(base[2, 0]) == 30.0
+    assert 6.0 < float(ps.layers[0].intensity[0]) < 9.0 and float(ps.layers[0].logit[0]) == pytest.approx(4.0)
+    assert ps.merge_close(0, 1.5) == 0
+    with pytest.raises(ValueError):
+        ps.merge_atoms(0, [[0, 1], [1, 2]])
+
+
 def strain_experiment(e):
     exp, ps, s = setup(groups=[Group("g1", control_points=[5, 5])])
     s.group("g1").strain_field.enabled = True
@@ -122,5 +158,7 @@ def test_zero_weight_terms_are_not_evaluated():
     _, ps, s = setup()
     s.regularisation.occ_entropy_a = 0.0
     s.regularisation.position_shifts_a = 0.0
+    s.regularisation.repulsion_a = 0.0
+    s.regularisation.attraction_a = 0.0
     value, parts = priors.prior_loss(ps, s)
     assert float(value) == 0.0 and parts == {}

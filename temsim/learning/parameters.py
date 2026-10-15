@@ -437,6 +437,68 @@ class ParameterSet:
             flag = getattr(lp, k).requires_grad
             setattr(lp, k, getattr(lp, k).detach()[keep].clone().requires_grad_(flag))
 
+    def merge_atoms(self, index: int, groups) -> int:
+        """Replace every set of atoms in ``groups`` (lists of indices) by one atom.
+
+        The atom takes the place of the first member.  Its initial position and shift are the means of
+        the members weighted with occupancy times intensity (so the effective position is that mean),
+        its intensity and reference the occupancy-weighted means, its logit the largest one: two views
+        of one atom become one atom, not a heavier one.  Returns the number of atoms removed.
+        """
+
+        lp = self.layers[index]
+        groups = [sorted({int(k) for k in g}) for g in groups if len({int(k) for k in g}) > 1]
+        if not groups:
+            return 0
+        grabbed = [k for g in groups for k in g]
+        if len(grabbed) != len(set(grabbed)) or min(grabbed) < 0 or max(grabbed) >= len(lp):
+            raise ValueError("merge groups must be disjoint and index existing atoms")
+        occupancy = self.occupancy(index).detach().cpu().numpy().astype(np.float64)
+        arrays = {k: getattr(lp, k).detach().cpu().numpy().astype(np.float64)
+                  for k in ("base", "reference", "shifts", "intensity", "logit")}
+        for g in groups:
+            g = np.asarray(g)
+            for key, weight in (("base", occupancy[g] * arrays["intensity"][g]), ("shifts", occupancy[g] * arrays["intensity"][g]),
+                                ("intensity", occupancy[g]), ("reference", occupancy[g])):
+                w = weight if weight.sum() > 0 else np.ones(len(g))
+                arrays[key][g[0]] = (arrays[key][g] * w.reshape((-1,) + (1,) * (arrays[key].ndim - 1))).sum(axis=0) / w.sum()
+            arrays["logit"][g[0]] = arrays["logit"][g].max()
+        keep = np.ones(len(lp), dtype=bool)
+        for g in groups:
+            keep[g[1:]] = False
+        for key, values in arrays.items():
+            flag = getattr(lp, key).requires_grad
+            setattr(lp, key, _leaf(values[keep], self.device, flag))
+        return int(len(keep) - keep.sum())
+
+    def close_pairs(self, index: int, distance_px: float, min_occupancy: float = 0.5) -> list:
+        """Sets of occupied atoms of layer ``index`` linked by distances below ``distance_px`` (initial frame
+        plus free shifts, as the repulsion sees them)."""
+
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        from scipy.spatial import cKDTree
+
+        lp = self.layers[index]
+        occupied = np.nonzero(self.occupancy(index).detach().cpu().numpy() >= min_occupancy)[0]
+        if len(occupied) < 2:
+            return []
+        xy = (lp.base + lp.shifts).detach().cpu().numpy()[occupied]
+        pairs = cKDTree(xy).query_pairs(float(distance_px), output_type="ndarray")
+        if len(pairs) == 0:
+            return []
+        n = len(occupied)
+        _, label = connected_components(coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n)), directed=False)
+        found = {}
+        for atom, lab in zip(occupied, label):
+            found.setdefault(int(lab), []).append(int(atom))
+        return [g for g in found.values() if len(g) > 1]
+
+    def merge_close(self, index: int, distance_px: float, min_occupancy: float = 0.5) -> int:
+        """Merge atoms of layer ``index`` that are closer than ``distance_px`` (chains included); count removed."""
+
+        return self.merge_atoms(index, self.close_pairs(index, distance_px, min_occupancy))
+
     # ------------------------------------------------------------------ export
     def to_state(self) -> ModelState:
         def np_(t):

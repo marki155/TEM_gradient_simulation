@@ -30,6 +30,8 @@ def test_frame_model_filters_by_group_and_occupancy():
     assert len(frame.atoms(active_only=False)[0]) == 10
     hist, edges = frame.histogram()
     assert len(hist) == 2 and len(edges) == 102 and sum(h.sum() for h in hist) == 10
+    weighted, _ = frame.histogram(weighted=True)
+    assert len(weighted) == 2 and sum(h.sum() for h in weighted) == 10
     assert frame.gradients() is None
 
 
@@ -51,6 +53,7 @@ def test_loss_history_stays_bounded():
 def test_tile_plans():
     assert tiles.tile_keys(2)[:5] == ["loss", "sim", "diff", "target", "ctf"]
     assert "ux" not in tiles.tile_keys(2, seeding=True) and "hist" in tiles.tile_keys(2, seeding=True)
+    assert "ux" not in tiles.tile_keys(2) and tiles.tile_keys(2)[-2:] == ["hist", "hist_w"]
     plan = tiles.plan(None, 2)
     assert plan.columns == 5 and plan.rows == -(-len(plan.keys) // 5)
     assert tiles.plan(tiles.COMPARE, 2).share == ("sim", "target", "diff")

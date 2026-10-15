@@ -102,8 +102,13 @@ class TrainingJob(Job):
         self.limit = None if steps is None else int(steps)
         self.count = 0
         self.last: Dict[str, Any] = {}
+        #: atoms removed by the last automatic merge
+        self.merged = 0
 
     def advance(self, capture: bool = False) -> Dict[str, Any]:
+        every = int(self.session.require_model().settings.regularisation.merge_every)
+        if every > 0 and self.count > 0 and self.count % every == 0:
+            self.merged = self.session.edit("merge_close").get("merged", 0)
         result = self.session.trainer.step(keep=capture)
         if capture:
             self.captured = self.session.capture(result.kept, result)
