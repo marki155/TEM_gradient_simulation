@@ -24,6 +24,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+from matplotlib.transforms import Bbox, IdentityTransform
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6 import QtCore
 
@@ -70,9 +72,10 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.axes_by_key: Dict[str, object] = {}
         self.images: Dict[str, object] = {}
         self.loss_line = None
+        self._loss_box = None
         self.target_scatter = None
         self.pot_scatters: List[object] = []
-        self.hist_lines: list = []
+        self.hist_lines: Dict[str, list] = {}
         self.compare_scatters: Dict[str, object] = {}
 
         self._timer = QtCore.QTimer(self)
@@ -131,7 +134,7 @@ class PlotCanvas(FigureCanvasQTAgg):
             first = self.axes_by_key.get(plan.share[0]) if key in plan.share and plan.share[0] in self.axes_by_key else None
             ax = self.fig.add_subplot(spec, sharex=first, sharey=first) if first is not None else self.fig.add_subplot(spec)
             ax.set_title(titles.get(key, key))
-            if key not in ("loss", "hist"):
+            if key not in ("loss", *tiles.HISTOGRAMS):
                 ax.set_xticks([])
                 ax.set_yticks([])
             self.axes_by_key[key] = ax
@@ -150,6 +153,7 @@ class PlotCanvas(FigureCanvasQTAgg):
             return artist
 
         self.loss_line = None
+        self._loss_box = None
         if "loss" in self.axes_by_key:
             ax = self.axes_by_key["loss"]
             self.loss_line, = ax.plot([], [])
@@ -190,13 +194,16 @@ class PlotCanvas(FigureCanvasQTAgg):
                 self.compare_scatters[key] = self.axes_by_key[key].scatter(
                     [], [], s=20, facecolors="none", edgecolors="white", linewidths=0.8)
 
-        self.hist_lines = []
-        if "hist" in self.axes_by_key:
-            for i in range(max(len(self.layer_names), 1)):
-                label = self.layer_names[i] if i < len(self.layer_names) else str(i)
-                line, = self.axes_by_key["hist"].plot([], [], label=label)
-                self.hist_lines.append(line)
-            self.axes_by_key["hist"].legend(fontsize="x-small")
+        self.hist_lines = {}
+        for key in tiles.HISTOGRAMS:
+            if key in self.axes_by_key:
+                lines = []
+                for i in range(max(len(self.layer_names), 1)):
+                    label = self.layer_names[i] if i < len(self.layer_names) else str(i)
+                    line, = self.axes_by_key[key].plot([], [], label=label)
+                    lines.append(line)
+                self.hist_lines[key] = lines
+                self.axes_by_key[key].legend(fontsize="x-small")
 
         self._quivers, self._minima_artists = [], []
         if self.frame is not None:
@@ -223,9 +230,18 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._draw_history()
         try:
             renderer = self.get_renderer()
-            ax.draw(renderer)
             box = ax.get_tightbbox(renderer)
-            self.blit(box.expanded(1.15, 1.15) if box is not None else ax.bbox)
+            box = (box if box is not None else ax.bbox).expanded(1.15, 1.15)
+            if self._loss_box is not None:
+                box = Bbox.union([box, self._loss_box])
+            box = Bbox.intersection(box, self.fig.bbox) or box
+            self._loss_box = box
+            # erase the old ticks and labels, otherwise every update is drawn over the last one
+            wipe = Rectangle((box.x0, box.y0), box.width, box.height, transform=IdentityTransform(),
+                             facecolor=self.fig.get_facecolor(), edgecolor="none")
+            wipe.draw(renderer)
+            ax.draw(renderer)
+            self.blit(box)
             return True
         except Exception:
             self.draw_idle()
@@ -284,15 +300,15 @@ class PlotCanvas(FigureCanvasQTAgg):
                 self._set_image(artist, potential[::stride, ::stride])
                 artist.set_extent((-0.5, potential.shape[1] - 0.5, -0.5, potential.shape[0] - 0.5))
 
-        if "hist" in axes:
-            counts, edges = frame.histogram(self.min_occupancy)
+        for key, lines in self.hist_lines.items():
+            counts, edges = frame.histogram(self.min_occupancy, weighted=key == "hist_w")
             centres = 0.5 * (edges[:-1] + edges[1:])
             top = 1.0
-            for line, values in zip(self.hist_lines, counts):
+            for line, values in zip(lines, counts):
                 line.set_data(centres, values)
                 top = max(top, float(values.max()) if len(values) else 0.0)
-            axes["hist"].set_xlim(float(centres[0]), float(centres[-1]))
-            axes["hist"].set_ylim(0, top * 1.05)
+            axes[key].set_xlim(float(centres[0]), float(centres[-1]))
+            axes[key].set_ylim(0, top * 1.05)
 
         self._arrow_data = frame.gradients(self.min_occupancy)
         self._reference = overlays.reference_gradient(None if self._arrow_data is None else self._arrow_data[1])

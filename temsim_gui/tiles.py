@@ -8,10 +8,12 @@ order of the tiles follows from the model alone:
 
 .. code-block:: text
 
-    loss  sim  diff  target  ctf | pot0 ... pot(L-1) | hist  ux  uy  eps_xx  eps_yy  eps_xy
+    loss  sim  diff  target  ctf | pot0 ... pot(L-1) | hist  hist_w  [ux  uy  eps_xx  eps_yy  eps_xy]
 
-(``ctf`` is the probe in STEM; ``L`` is the number of layers).  While seeding the
-displacement field is not trained, so the five strain tiles are left out.
+(``ctf`` is the probe in STEM; ``L`` is the number of layers).  ``hist`` is the histogram of the
+intensities, ``hist_w`` that of occupancy times intensity.  The five strain tiles are left out
+for now (:data:`SHOW_STRAIN`); while seeding they would be left out anyway, the displacement
+field is not trained then.
 
 Three *views* exist: all tiles in a grid of five columns; one tile large with the
 loss curve beside it; and the *comparison* ``sim | target | diff`` with a common
@@ -28,9 +30,12 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 LEADING = ("loss", "sim", "diff", "target", "ctf")
-TRAILING = ("hist", "ux", "uy", "eps_xx", "eps_yy", "eps_xy")
+TRAILING = ("hist", "hist_w", "ux", "uy", "eps_xx", "eps_yy", "eps_xy")
 STRAIN = ("ux", "uy", "eps_xx", "eps_yy", "eps_xy")
 IMAGE_TILES = ("sim", "diff", "target", "ctf") + STRAIN
+HISTOGRAMS = ("hist", "hist_w")
+#: strain maps are not shown for now (the core is told not to send them either)
+SHOW_STRAIN = False
 COMPARE = "compare"
 COMPARE_TILES = ("sim", "target", "diff", "loss")
 COLUMNS = 5
@@ -39,14 +44,14 @@ COLUMNS = 5
 def tile_keys(n_layers: int, seeding: bool = False) -> List[str]:
     """All tiles in grid order."""
 
-    trailing = [k for k in TRAILING if not (seeding and k in STRAIN)]
+    trailing = [k for k in TRAILING if not (k in STRAIN and (seeding or not SHOW_STRAIN))]
     return list(LEADING) + [f"pot{i}" for i in range(max(n_layers, 1))] + trailing
 
 
 def titles(layer_names: Sequence[str], stem: bool = False) -> Dict[str, str]:
     out = {COMPARE: "Zoom-Vergleich (Sim | Target | Diff + Loss)",
            "loss": "Loss", "sim": "Simulated", "diff": "Diff", "target": "Target",
-           "ctf": "Probe" if stem else "CTF", "hist": "Histogramm",
+           "ctf": "Probe" if stem else "CTF", "hist": "Histogramm Intensitaet I", "hist_w": "Histogramm Besetzung * I",
            "ux": "ux", "uy": "uy", "eps_xx": "eps xx", "eps_yy": "eps yy", "eps_xy": "eps xy"}
     for i in range(max(len(layer_names), 1)):
         out[f"pot{i}"] = f"Potential {layer_names[i] if i < len(layer_names) else i}"

@@ -19,6 +19,9 @@ change as the smallest command that expresses it:
 * the flag dictionaries and the two presets, which change many things at once
   ->  ``set_train`` without the bulk arrays (the core keeps its masks and targets).
 
+The sections are folded (:class:`~temsim_gui.widgets.CollapsibleSection`); only the active group and
+the layers, which one touches most, are open.
+
 Two presets are common enough to have buttons.  :meth:`TrainEditor.train_only_group`
 freezes everything except the rigid transformation (shift, rotation, scale) of one
 group, makes that group active and keeps the optics free unless the group is simulated
@@ -41,7 +44,7 @@ from PySide6 import QtCore, QtWidgets
 from temsim.data.schema import Experiment, TrainSettings
 
 from .connection import Connection
-from .widgets import double_spin, set_quietly
+from .widgets import CollapsibleSection, double_spin, set_quietly
 
 MAIN_ENTRY = "Main (alle Gruppen)"
 
@@ -84,13 +87,22 @@ class TrainEditor(QtWidgets.QGroupBox):
         self._build_weights("Regularisierung", "regularisation", self.settings.regularisation, self._send_regularisation)
         self._build_flags("Aberrationen (Betrag + Winkel)", "aberration_flags")
         self._build_flags("Envelope-Parameter", "envelope_flags")
+        self.root.addStretch(1)
+
+    def _section(self, title: str, expanded: bool):
+        """A foldable box that is already in the editor; returns it and its content layout."""
+
+        section = CollapsibleSection(title, expanded=expanded)
+        self.root.addWidget(section)
+        return section, section.content_layout
 
     def _group_names(self) -> List[str]:
         return self.experiment.group_names if self.experiment is not None else list(self.settings.groups)
 
     def _build_active_group(self) -> None:
-        box = QtWidgets.QGroupBox("Aktive Gruppe")
-        form = QtWidgets.QFormLayout(box)
+        box, content = self._section("Aktive Gruppe", True)
+        form = QtWidgets.QFormLayout()
+        content.addLayout(form)
         self.combo = QtWidgets.QComboBox()
         self.combo.addItem(MAIN_ENTRY, None)
         for name in self._group_names():
@@ -111,20 +123,17 @@ class TrainEditor(QtWidgets.QGroupBox):
         free.clicked.connect(self.free_positions_training)
         layout.addWidget(free)
         form.addRow("Presets", presets)
-        self.root.addWidget(box)
 
     def _build_groups(self) -> None:
         if not self.settings.groups:
             return
-        box = QtWidgets.QGroupBox("Gruppen (Shift / Rotation / Scale / Strain)")
-        outer = QtWidgets.QVBoxLayout(box)
+        box, outer = self._section("Gruppen (Shift / Rotation / Scale / Strain)", False)
         for gname, train in self.settings.groups.items():
             sub = QtWidgets.QGroupBox(gname)
             form = QtWidgets.QFormLayout(sub)
             for f in fields(train):
                 form.addRow(f.name, self._param_row(f"groups.{gname}.{f.name}"))
             outer.addWidget(sub)
-        self.root.addWidget(box)
 
     def _layer_title(self, name: str) -> str:
         if self.experiment is not None:
@@ -136,22 +145,20 @@ class TrainEditor(QtWidgets.QGroupBox):
     def _build_layers(self) -> None:
         if not self.settings.layers:
             return
-        box = QtWidgets.QGroupBox("Schichten (Positionen / Intensitaeten / Occupancies)")
-        outer = QtWidgets.QVBoxLayout(box)
+        box, outer = self._section("Schichten (Positionen / Intensitaeten / Occupancies)", True)
         for lname, train in self.settings.layers.items():
             sub = QtWidgets.QGroupBox(self._layer_title(lname))
             form = QtWidgets.QFormLayout(sub)
             for f in fields(train):
                 form.addRow(f.name, self._param_row(f"layers.{lname}.{f.name}"))
             outer.addWidget(sub)
-        self.root.addWidget(box)
 
     def _build_global(self) -> None:
-        box = QtWidgets.QGroupBox("Global")
-        form = QtWidgets.QFormLayout(box)
+        box, content = self._section("Global", False)
+        form = QtWidgets.QFormLayout()
+        content.addLayout(form)
         for name in TrainSettings.GLOBAL_PARAMS:
             form.addRow(name, self._param_row(name))
-        self.root.addWidget(box)
 
     def _param_row(self, key: str) -> QtWidgets.QWidget:
         param = self.settings.param(key)
@@ -171,21 +178,22 @@ class TrainEditor(QtWidgets.QGroupBox):
         return holder
 
     def _build_weights(self, title: str, attr: str, target, send: Callable) -> None:
-        box = QtWidgets.QGroupBox(title)
-        form = QtWidgets.QFormLayout(box)
+        box, content = self._section(title, False)
+        form = QtWidgets.QFormLayout()
+        content.addLayout(form)
         for f in fields(target):
             spin = double_spin(float(getattr(target, f.name)), 0.0, 1e9, 0.05, 6)
             spin.valueChanged.connect(lambda value, n=f.name, a=attr: send(a, n, float(value)))
             form.addRow(f.name, spin)
             self.weights[f"{attr}.{f.name}"] = spin
-        self.root.addWidget(box)
 
     def _build_flags(self, title: str, attr: str) -> None:
         flags = getattr(self.settings, attr)
         if not flags:
             return
-        box = QtWidgets.QGroupBox(title)
-        form = QtWidgets.QFormLayout(box)
+        box, content = self._section(title, False)
+        form = QtWidgets.QFormLayout()
+        content.addLayout(form)
         self.flags[attr] = {}
         for key, value in flags.items():
             check = QtWidgets.QCheckBox()
@@ -194,7 +202,6 @@ class TrainEditor(QtWidgets.QGroupBox):
             label = f"{key} (+ phi{key[1:]})" if attr == "aberration_flags" and key[1:2] != "" and key[-1:] != "0" else key
             form.addRow(label, check)
             self.flags[attr][key] = check
-        self.root.addWidget(box)
 
     # ------------------------------------------------------------------ changes
     def _send(self, call: Callable) -> None:

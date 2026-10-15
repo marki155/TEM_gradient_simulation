@@ -42,10 +42,10 @@ class Model:
 
         return self.simulator.image(self.layers(), self.params.optics_state())
 
-    def loss(self) -> Tuple[torch.Tensor, Dict[str, float], Dict[str, float]]:
-        """``(total, data terms, prior terms)``, Eq. (3.1)."""
+    def loss(self, keep: Optional[dict] = None) -> Tuple[torch.Tensor, Dict[str, float], Dict[str, float]]:
+        """``(total, data terms, prior terms)``, Eq. (3.1).  ``keep``: see :meth:`Objective.__call__`."""
 
-        data, data_parts = self.objective(self.image(), self.params.normalisation)
+        data, data_parts = self.objective(self.image(), self.params.normalisation, keep)
         prior, prior_parts = prior_loss(self.params, self.settings)
         return data + prior, data_parts, prior_parts
 

@@ -37,24 +37,42 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import zmq
 
-from . import protocol
+from . import assemble, protocol
 from .jobs import Clock, Job, SeedingJob, TrainingJob
+from .sender import Flow, FrameSender, Packet, package
 from .session import Session, SessionError
 
 MAX_BATCH = 50
 IDLE_POLL_MS = 50
+
+#: commands that change what a save would contain
+CHANGES_MODEL = frozenset({"set_values", "set_train", "set_param", "set_loss", "set_regularisation",
+                           "set_active_group", "edit", "insert_minima", "seeding_config"})
+#: commands after which the model is saved at once (the user has done something that is expensive to redo)
+#: commands after which a picture that is waiting to be sent would be wrong
+CANCELS_FRAMES = frozenset({"set_values", "set_train", "set_active_group", "edit", "insert_minima"})
+SAVES_AT_ONCE = frozenset({"pause", "stop", "edit", "insert_minima"})
 LIGHT_INTERVAL = 0.05
+#: while training, every this many steps the images of that step are sent (0: only the paced frames)
+FRAME_STEPS = 10
 
 Result = Tuple[Dict[str, Any], Dict[str, np.ndarray]]
 
 
 class Server:
     def __init__(self, endpoint: str = "tcp://127.0.0.1:5555", device: str = "auto",
-                 clock: Optional[Clock] = None):
+                 clock: Optional[Clock] = None, frame_steps: int = FRAME_STEPS,
+                 workspace: Optional[str] = None):
         self.requested_endpoint = endpoint
         self.endpoint = endpoint
         self.session = Session(device)
+        self.session.set_workspace(workspace)
         self.clock = clock or Clock()
+        self.frame_steps = int(frame_steps)
+        self.flow = Flow()
+        self.target_keys: Dict[bytes, int] = {}          # the target each client holds
+        self.sender: Optional[FrameSender] = None
+        self._since_capture = 0
         self.job: Optional[Job] = None
         self.paused = False
         self.subscribers: List[bytes] = []
@@ -65,6 +83,7 @@ class Server:
         self._socket: Optional[zmq.Socket] = None
         self._error: Optional[BaseException] = None
         self._last_light = 0.0
+        self.dirty = False
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, timeout: float = 30.0) -> str:
@@ -96,10 +115,13 @@ class Server:
             socket.close()
             return
         self._socket = socket
+        self.sender = FrameSender(Session.compose)
         self._ready.set()
         try:
             self._loop()
         finally:
+            self._autosave("shutdown")
+            self.sender.close()
             socket.close()
             self._socket = None
 
@@ -120,51 +142,107 @@ class Server:
                 timeout = 0
                 if self._stop.is_set():
                     return
+            self._pump_frames()
             if self.running:
                 self._advance()
+            elif self.dirty and self.clock.save_due():
+                self._autosave("changes")
+
+    def _fast_frames(self) -> bool:
+        """Training sends the images of its own steps; the paced frame is then only for the extras."""
+
+        return self.frame_steps > 0 and isinstance(self.job, TrainingJob)
+
+    def _wants_capture(self) -> bool:
+        if not self._fast_frames() or not self.session.is_open:
+            return False
+        self._since_capture += 1
+        return self._since_capture >= self.frame_steps and self._can_send()
+
+    def _can_send(self) -> bool:
+        return any(self.flow.can_send(identity) for identity in self.subscribers)
 
     def _advance(self) -> None:
         job = self.job
+        capture = self._wants_capture()
         try:
-            light = job.advance()
+            light = job.advance(capture)
         except BaseException as exc:
             self.job, self.paused = None, False
             self._emit("error", {"error": str(exc), "trace": traceback.format_exc(), "where": "job"})
             self._emit_status()
+            self._autosave("error")
             return
         now = time.monotonic()
         if job.done or now - self._last_light >= LIGHT_INTERVAL:
             self._last_light = now
             self._emit("light", light)
-        if job.done or self.clock.frame_due():
+        if capture and job.captured is not None:
+            self._since_capture = 0
+            self.sender.submit(job.captured)
+            job.captured = None
+        paced = self.clock.frame_due() and (bool(self.frame_extras) or not self._fast_frames())
+        if job.done or self.clock.urgent or paced:
             self._emit_frame()
+        self.dirty = True
         if self.clock.save_due():
-            self._autosave()
+            self._autosave("interval")
         if job.done:
             self.job = None
-            self._autosave()
+            self._autosave("job finished")
             self._emit_status()
 
     def _emit_frame(self) -> None:
-        if not self.subscribers or not self.session.is_open:
+        """A complete frame (with the extras), computed here: it needs a simulation of its own."""
+
+        if not self.subscribers or not self.session.is_open or not self._can_send():
             return
         start = time.monotonic()
+        self.sender.cancel()
         try:
             data, arrays = self.session.frame(self.frame_extras)
         except BaseException as exc:
             self._emit("error", {"error": str(exc), "trace": traceback.format_exc(), "where": "frame"})
             return
-        self._emit("frame", data, arrays)
+        data["seq"] = self.sender.next_seq()
+        self._send_frame(package(data, arrays))
         self.clock.frame_done(time.monotonic() - start)
 
-    def _autosave(self) -> None:
+    def _pump_frames(self) -> None:
+        """Send the message the frame thread has finished, to the clients that can take it."""
+
+        if self.sender is None:
+            return
+        if self.sender.error is not None:
+            error, self.sender.error = self.sender.error, None
+            self._emit("error", {"error": f"frame: {error}", "where": "frame",
+                                 "trace": "".join(traceback.format_exception(error))})
+        if self._can_send():
+            packet = self.sender.take()
+            if packet is not None:
+                self._send_frame(packet)
+
+    def _send_frame(self, packet: Packet) -> None:
+        for identity in list(self.subscribers):
+            if not self.flow.can_send(identity):
+                continue
+            if packet.target_frames is not None and self.target_keys.get(identity) != packet.key:
+                self._socket.send_multipart([identity] + packet.target_frames, copy=False)
+                self.target_keys[identity] = packet.key
+            self._socket.send_multipart([identity] + packet.frames, copy=False)
+            self.flow.sent(identity)
+
+    def _autosave(self, reason: str = "") -> None:
+        """Write ``<out_dir>/autosave``; a failure is reported, never raised."""
+
         self.clock.save_done()
         session = self.session
         if not session.is_open or not session.assembly.out_dir:
             return
         try:
-            path = session.save(os.path.join(session.assembly.out_dir, "autosave"))
-            self._emit("log", {"text": f"saved {path}"})
+            path = session.save(os.path.join(session.assembly.out_dir, assemble.AUTOSAVE_DIR))
+            self.dirty = False
+            self._emit("log", {"text": f"saved {path}" + (f" ({reason})" if reason else "")})
         except BaseException as exc:
             self._emit("error", {"error": f"autosave failed: {exc}", "trace": traceback.format_exc(),
                                  "where": "autosave"})
@@ -199,7 +277,14 @@ class Server:
                 raise SessionError(f"unknown command {name!r}; known: {sorted(protocol.COMMANDS)}")
             method: Callable = getattr(self, "cmd_" + name)
             result, out = method(identity, header.get("args") or {}, arrays)
-            self._send(identity, protocol.reply(identifier, result), out)
+            if name not in protocol.NO_REPLY:
+                self._send(identity, protocol.reply(identifier, result), out)
+            if name in CHANGES_MODEL:
+                self.dirty = True
+            if name in CANCELS_FRAMES or name.startswith("open_"):
+                self.sender.cancel()
+            if name in SAVES_AT_ONCE:
+                self._autosave(name)
         except BaseException as exc:
             self._send(identity, protocol.failure(identifier, f"{type(exc).__name__}: {exc}",
                                                   traceback.format_exc()))
@@ -210,15 +295,24 @@ class Server:
     def cmd_hello(self, identity, args, arrays) -> Result:
         if identity not in self.subscribers:
             self.subscribers.append(identity)
+        (self.flow.unlimited.discard if args.get("acks") else self.flow.unlimited.add)(identity)
         if "extras" in args:
             self.frame_extras = tuple(args["extras"] or ())
         return {"protocol": protocol.PROTOCOL_VERSION, "commands": protocol.COMMANDS,
                 "info": self.session.info(), "status": self.status()}, {}
 
+    def cmd_ack_frame(self, identity, args, arrays) -> Result:
+        self.flow.acknowledged(identity)
+        return {}, {}
+
     def cmd_info(self, identity, args, arrays) -> Result:
         return {"info": self.session.info(), "status": self.status()}, {}
 
+    def cmd_workspace(self, identity, args, arrays) -> Result:
+        return self.session.workspace_entries(), {}
+
     def cmd_open_run(self, identity, args, arrays) -> Result:
+        self._autosave("before opening")
         self._end_job()
         info = self.session.open_run(args["directory"], args.get("target_path"))
         self.clock.frame_now()
@@ -226,6 +320,7 @@ class Server:
         return {"info": info}, {}
 
     def cmd_open_dataset(self, identity, args, arrays) -> Result:
+        self._autosave("before opening")
         self._end_job()
         info = self.session.open_dataset(args["path"], args.get("route", "auto"), **(args.get("options") or {}))
         self.clock.frame_now()
@@ -327,7 +422,7 @@ class Server:
         return {"config": self.session.seeding_config(args.get("patch"))}, {}
 
     def cmd_save(self, identity, args, arrays) -> Result:
-        return {"directory": self.session.save(args.get("directory"))}, {}
+        return {"directory": self.session.save(args.get("directory"), args.get("name"))}, {}
 
     def cmd_shutdown(self, identity, args, arrays) -> Result:
         self._stop.set()

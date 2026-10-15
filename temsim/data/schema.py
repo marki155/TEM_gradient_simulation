@@ -349,11 +349,16 @@ class LossWeights:
 class Regularisation:
     """Weights and ranges of the priors (Part II, Section 3)."""
 
-    occ_entropy_a: float = 1.0
-    position_shifts_a: float = 1.0
-    #: Pairwise repulsion: weight, and distance [Angstrom] below which it acts.
-    repulsion_a: float = 0.0
-    repulsion_distance_A: float = 1.0
+    occ_entropy_a: float = 0.0
+    position_shifts_a: float = 0.0
+    #: Pairwise repulsion: weight, and distance [Angstrom] below which it acts (default: the C-C bond).
+    repulsion_a: float = 10.0
+    repulsion_distance_A: float = 1.42
+    #: Attraction of occupied atoms closer than ``merge_distance_A`` [Angstrom] (weight 0: off).  The training
+    #: job merges atoms that close every ``merge_every`` steps (0: never); see ``Session.edit("merge_close")``.
+    attraction_a: float = 0.0
+    merge_distance_A: float = 0.7
+    merge_every: int = 0
     #: Elastic energy of the strain field: weight and Lame parameters.
     strain_energy_a: float = 0.0
     strain_energy_lambda: float = 1.0

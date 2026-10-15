@@ -17,6 +17,9 @@ are needed on the interface side; they import neither PyTorch nor the physics.
 .. automodule:: temsim.service.assemble
    :members:
 
+.. automodule:: temsim.service.workspace
+   :members:
+
 .. automodule:: temsim.service.jobs
    :members:
 

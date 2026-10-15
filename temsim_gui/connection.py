@@ -12,6 +12,11 @@ must not wait for a simulation.  :class:`Connection` bridges the two.
 :class:`~temsim_gui.frame_model.FrameModel`) and re-emitted as Qt signals; Qt queues
 a signal that is emitted from another thread, so the slots run in the GUI thread.
 
+A frame is *acknowledged* by the controller once it has been drawn
+(:meth:`Connection.acknowledge`); the core sends the next frames only then, so that a slow
+laptop or link is never flooded.  A frame that lacks the extras (``partial``) inherits them
+from the previous one.
+
 *Commands* are submitted to a single worker thread, in order, and their result is
 handed back by a signal.  Because there is one worker, the order in which the user
 pressed buttons is the order in which the core sees the commands - the guarantee
@@ -80,7 +85,8 @@ class Connection(QtCore.QObject):
     def __init__(self, endpoint: str, extras=(), timeout: float = 600.0, parent=None):
         super().__init__(parent)
         self.endpoint = endpoint
-        self.client = Client(endpoint, on_event=self._on_event, timeout=timeout)
+        self.client = Client(endpoint, on_event=self._on_event, timeout=timeout, auto_ack=False)
+        self._last_frame: Optional[FrameModel] = None
         self._result.connect(self._deliver)
         self._worker = _Worker(self._result.emit)
         self._worker.start()
@@ -90,7 +96,9 @@ class Connection(QtCore.QObject):
     # ------------------------------------------------------------------ events
     def _on_event(self, name: str, data: Dict[str, Any], arrays: Dict[str, np.ndarray]) -> None:
         if name == "frame":
-            self.frame.emit(FrameModel.from_wire(data, arrays))
+            frame = FrameModel.from_wire(data, arrays, self._last_frame)
+            self._last_frame = frame
+            self.frame.emit(frame)
         elif name == "light":
             self.light.emit(data)
         elif name == "status":
@@ -99,6 +107,17 @@ class Connection(QtCore.QObject):
             self.log.emit(str(data.get("text", "")))
         elif name == "error":
             self.error.emit(str(data.get("error", "")), str(data.get("trace", "")))
+
+    def remember(self, frame: FrameModel) -> None:
+        """Make ``frame`` (a reply to a request) the one that later partial frames inherit extras from."""
+
+        self._last_frame = frame
+
+    def acknowledge(self, frame: FrameModel) -> None:
+        """Tell the core that ``frame`` has been drawn; it sends the next one only then."""
+
+        if frame.seq is not None:
+            self.client.ack_frame(frame.seq)
 
     @property
     def extras(self) -> tuple:

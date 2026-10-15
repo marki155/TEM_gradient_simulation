@@ -23,6 +23,8 @@ class StepResult:
     loss: float
     data: Dict[str, float] = field(default_factory=dict)
     prior: Dict[str, float] = field(default_factory=dict)
+    #: standardised images of this step's forward pass (only if asked for, see :meth:`Trainer.step`)
+    kept: Optional[Dict[str, object]] = None
 
 
 class Trainer:
@@ -47,9 +49,12 @@ class Trainer:
         self.optimiser.sync_lrs()
         return not self.optimiser.empty
 
-    def step(self) -> StepResult:
+    def step(self, keep: bool = False) -> StepResult:
+        """One optimiser step.  ``keep``: return the images of the forward pass in ``StepResult.kept``."""
+
         trainable = self.prepare()
-        loss, data, prior = self.model.loss()
+        kept: Optional[Dict[str, object]] = {} if keep else None
+        loss, data, prior = self.model.loss(kept)
         if trainable:
             self.optimiser.zero_grad()
             loss.backward()
@@ -57,7 +62,7 @@ class Trainer:
         value = float(loss.detach())
         self.steps += 1
         self.history.append(value)
-        return StepResult(self.steps, value, data, prior)
+        return StepResult(self.steps, value, data, prior, kept)
 
     def run(self, n: int, callback: Optional[Callable[[StepResult], None]] = None,
             should_stop: Optional[Callable[[], bool]] = None) -> List[StepResult]:

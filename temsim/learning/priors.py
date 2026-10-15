@@ -72,6 +72,24 @@ lattice, because the repulsion belongs to the free positions
 change relative distances noticeably, and treating it this way keeps the term
 independent of the other parameters.
 
+Attraction and merging
+----------------------
+The repulsion keeps two atoms apart; a pair that is really *one* atom, seen twice, needs the
+opposite.  For the occupied pairs closer than the merge distance :math:`d_m`
+
+.. math::
+
+    \mathcal L_{\rm att} = \sum_{\ell\in\mathcal F}\frac{1}{n_\ell}
+    \sum_{(i,j):\,d_{ij}<d_m}\Big(\frac{d_{ij}}{d_m}\Big)^2 ,
+    \qquad (3.4a)
+
+which pulls the two towards each other (it is zero beyond :math:`d_m`; choose
+:math:`d_m < d_0` of Eq. (3.4), else the two terms work against each other).  The attraction is
+differentiable, but *fusing* two atoms into one is not: the number of atoms is an integer.  The
+fusion is therefore a separate edit between two steps (``merge_close``,
+:meth:`~temsim.learning.parameters.ParameterSet.merge_close`), by hand or by the training job
+every ``merge_every`` steps; the attraction only brings the pairs into reach.
+
 Elastic energy of the strain field
 ----------------------------------
 For the field of Part I, Section 5 with strain tensor
@@ -106,7 +124,7 @@ The total prior, with the weights of
 .. math::
 
     \mathcal L_{\rm prior} = a_{\rm ent}\mathcal L_{\rm ent} + a_{\rm pos}\mathcal L_{\rm pos}
-    + a_{\rm rep}\mathcal L_{\rm rep} + a_{\rm el}\mathcal L_{\rm el}.
+    + a_{\rm rep}\mathcal L_{\rm rep} + a_{\rm att}\mathcal L_{\rm att} + a_{\rm el}\mathcal L_{\rm el}.
     \qquad (3.6)
 
 A term with weight zero is not evaluated.
@@ -166,6 +184,28 @@ def repulsion(ps: ParameterSet, settings: TrainSettings) -> torch.Tensor:
     return total
 
 
+def attraction(ps: ParameterSet, settings: TrainSettings) -> torch.Tensor:
+    """Eq. (3.4a): the counterpart of the repulsion for pairs closer than the merge distance."""
+
+    d_merge = float(settings.regularisation.merge_distance_A) / (ps.experiment.imaging.pixel_size_nm * 10.0)
+    total = torch.zeros((), device=ps.device)
+    for i, spec in enumerate(ps.experiment.layers):
+        if not settings.layer_enabled(spec.name, "free_positions"):
+            continue
+        lp = ps.layers[i]
+        index = torch.nonzero(torch.sigmoid(lp.logit.detach()) > 0.5).squeeze(1)
+        if len(index) < 2:
+            continue
+        xy = (lp.base + lp.shifts)[index]
+        pairs = cKDTree(xy.detach().cpu().numpy()).query_pairs(d_merge, output_type="ndarray")
+        if len(pairs) == 0:
+            continue
+        pairs = torch.as_tensor(pairs, device=xy.device)
+        distance = torch.linalg.norm(xy[pairs[:, 0]] - xy[pairs[:, 1]], dim=1)
+        total = total + ((distance / d_merge) ** 2).sum() / len(index)
+    return total
+
+
 def elastic_energy(ps: ParameterSet, settings: TrainSettings) -> torch.Tensor:
     """Eq. (3.5)."""
 
@@ -202,5 +242,6 @@ def prior_loss(ps: ParameterSet, settings: TrainSettings) -> Tuple[torch.Tensor,
     add("entropy", reg.occ_entropy_a, lambda: entropy(ps))
     add("position_shifts", reg.position_shifts_a, lambda: position_norm(ps, settings))
     add("repulsion", reg.repulsion_a, lambda: repulsion(ps, settings))
+    add("attraction", reg.attraction_a, lambda: attraction(ps, settings))
     add("strain_energy", reg.strain_energy_a, lambda: elastic_energy(ps, settings))
     return total, parts

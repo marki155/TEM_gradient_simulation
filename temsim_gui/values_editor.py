@@ -72,8 +72,8 @@ class ValuesEditor(QtWidgets.QFrame):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         buttons = QtWidgets.QHBoxLayout()
-        for label, signal in (("Parameter speichern", self.save_clicked), ("Speichern unter ...", self.save_as_clicked),
-                              ("Parameter laden", self.load_clicked)):
+        for label, signal in (("Laden ...", self.load_clicked), ("Speichern", self.save_clicked),
+                              ("Speichern unter ...", self.save_as_clicked)):
             button = QtWidgets.QPushButton(label)
             button.clicked.connect(lambda _=False, s=signal: s.emit())
             buttons.addWidget(button)

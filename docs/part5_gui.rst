@@ -30,6 +30,9 @@ the window and start it.
 .. automodule:: temsim_gui.values_editor
    :members:
 
+.. automodule:: temsim_gui.open_dialog
+   :members:
+
 .. automodule:: temsim_gui.train_editor
    :members:
 

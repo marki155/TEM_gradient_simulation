@@ -1,0 +1,9 @@
+# Core (python -m temsim.service); the GUI needs PySide6 and matplotlib in addition (see FERNBETRIEB.md)
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.7.1+cu118
+numpy>=1.26,<2
+scipy>=1.15
+pyzmq>=27
+tifffile
+ase
+pytest

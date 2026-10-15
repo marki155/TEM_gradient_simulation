@@ -30,6 +30,8 @@ def test_frame_model_filters_by_group_and_occupancy():
     assert len(frame.atoms(active_only=False)[0]) == 10
     hist, edges = frame.histogram()
     assert len(hist) == 2 and len(edges) == 102 and sum(h.sum() for h in hist) == 10
+    weighted, _ = frame.histogram(weighted=True)
+    assert len(weighted) == 2 and sum(h.sum() for h in weighted) == 10
     assert frame.gradients() is None
 
 
@@ -51,6 +53,7 @@ def test_loss_history_stays_bounded():
 def test_tile_plans():
     assert tiles.tile_keys(2)[:5] == ["loss", "sim", "diff", "target", "ctf"]
     assert "ux" not in tiles.tile_keys(2, seeding=True) and "hist" in tiles.tile_keys(2, seeding=True)
+    assert "ux" not in tiles.tile_keys(2) and tiles.tile_keys(2)[-2:] == ["hist", "hist_w"]
     plan = tiles.plan(None, 2)
     assert plan.columns == 5 and plan.rows == -(-len(plan.keys) // 5)
     assert tiles.plan(tiles.COMPARE, 2).share == ("sim", "target", "diff")
@@ -77,3 +80,20 @@ def test_locality_of_an_endpoint():
     from temsim_gui.main_window import is_local
     assert is_local("tcp://127.0.0.1:5555") and is_local("tcp://localhost:1") and is_local("ipc:///tmp/x")
     assert not is_local("tcp://10.0.0.5:5555") and not is_local("tcp://gpu-box:5555")
+
+
+def test_partial_frame_inherits_the_extras_of_the_previous_one():
+    data, arrays = wire(gradients=True)
+    arrays["potential.0"] = np.ones((8, 8))
+    arrays["ctf_phase"] = np.ones((4, 4))
+    arrays["strain.ux"] = np.ones((4, 4))
+    old = FrameModel.from_wire(data, arrays)
+    data2, arrays2 = wire()
+    data2["partial"], data2["seq"] = True, 5
+    new = FrameModel.from_wire(data2, arrays2, old)
+    assert new.seq == 5 and new.ctf_phase is old.ctf_phase and "ux" in new.strain
+    assert new.layers[0].potential is old.layers[0].potential and new.layers[1].gradient is old.layers[1].gradient
+    assert FrameModel.from_wire(*wire(), old).ctf_phase is None          # a complete frame replaces the extras
+    data3, arrays3 = wire(n=4)
+    data3["partial"] = True
+    assert FrameModel.from_wire(data3, arrays3, old).layers[0].gradient is None   # other atom count: no stale arrows

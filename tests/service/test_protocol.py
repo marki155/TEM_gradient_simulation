@@ -27,9 +27,9 @@ def test_pack_unpack_roundtrip_keeps_dtype_and_shape():
 
 def test_non_contiguous_and_unusual_dtypes_are_converted():
     a = np.arange(20, dtype=np.float64).reshape(4, 5).T
-    header, out = protocol.unpack(protocol.pack({}, {"a": a, "h": np.arange(3, dtype=np.float16), "i": np.arange(3, dtype=np.int16)}))
+    header, out = protocol.unpack(protocol.pack({}, {"a": a, "h": np.arange(3, dtype=np.float16), "i": np.arange(3, dtype=np.int16), "u": np.arange(3, dtype=np.uint16)}))
     np.testing.assert_array_equal(out["a"], a)
-    assert out["h"].dtype == np.float64 and out["i"].dtype == np.int64
+    assert out["h"].dtype == np.float16 and out["i"].dtype == np.int64 and out["u"].dtype == np.int64
 
 
 def test_unpack_rejects_inconsistent_messages():
@@ -87,3 +87,13 @@ def test_client_side_needs_no_torch(module):
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        cwd=__import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.dirname(__file__))))
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_endpoint_check():
+    import pytest
+    from temsim.service.protocol import check_endpoint
+    for good in ("tcp://127.0.0.1:5555", "tcp://gpu-box:9097", "tcp://127.0.0.1:*", "ipc:///tmp/x"):
+        assert check_endpoint(good) == good
+    for bad in ("tcp:\\\\127.0.0.1:9097", "127.0.0.1:5555", "tcp://127.0.0.1", "http://x:1"):
+        with pytest.raises(ValueError, match="invalid endpoint"):
+            check_endpoint(bad)
