@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.learning.seeding.local_loss &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.learning.seeding.local_loss</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part II, Section 6.4: the seeding loss from running sums.</span>
+
+<span class="sd">Seeding evaluates thousands of trials; each should cost a window, not an image.</span>
+<span class="sd">The loss used for the decision is the negative normalised cross-correlation of</span>
+<span class="sd">the simulated image :math:`s` with the target :math:`t` (Section 2, Eq. 2.1,</span>
+<span class="sd">:math:`\mathcal L_{\rm ncc}` without the constant):</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \mathcal L = -\frac{1}{|K|}\sum_{p\in K} x_p\,y_p,\qquad</span>
+<span class="sd">    x = \frac{s - a}{\sigma_s},\quad y = \frac{t - \bar t}{\sigma_t},</span>
+<span class="sd">    \qquad (6.2)</span>
+
+<span class="sd">where the statistics come from the reference region :math:`R` (all pixels that</span>
+<span class="sd">carry any mask) with :math:`n = |R|` and the loss region :math:`K\subseteq R`:</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \bar s = \frac{S_R}{n},\quad</span>
+<span class="sd">    \operatorname{std}\,s = \sqrt{\frac{S^{2}_R - n\bar s^2}{n-1}},\quad</span>
+<span class="sd">    a = \bar s + \nu_0\operatorname{std}\,s,\quad</span>
+<span class="sd">    \sigma_s = \operatorname{std}\,s\cdot\max(1+\nu_1, 0.1),</span>
+<span class="sd">    \qquad (6.3)</span>
+
+<span class="sd">and :math:`\bar t,\sigma_t` are computed in the same way from the target.  With</span>
+<span class="sd">the four sums of the simulated image</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    S_R=\sum_R s,\quad S^2_R=\sum_R s^2,\quad S_K=\sum_K s,\quad C_K=\sum_K s\,t</span>
+<span class="sd">    \qquad (6.4)</span>
+
+<span class="sd">the loss is a closed expression, :math:`T_K=\sum_K t`,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \mathcal L = -\frac{C_K - a\,T_K - \bar t\,S_K + |K|\,a\,\bar t}{|K|\,\sigma_s\sigma_t}.</span>
+<span class="sd">    \qquad (6.5)</span>
+
+<span class="sd">A change of the image by :math:`d = s^{\rm new}-s^{\rm old}` in a window :math:`\Omega`</span>
+<span class="sd">changes the sums by</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \Delta S_R = \sum_{R\cap\Omega} d,\quad</span>
+<span class="sd">    \Delta S^2_R = \sum_{R\cap\Omega} d\,(s^{\rm new}+s^{\rm old}),\quad</span>
+<span class="sd">    \Delta S_K = \sum_{K\cap\Omega} d,\quad</span>
+<span class="sd">    \Delta C_K = \sum_{K\cap\Omega} t\,d,</span>
+<span class="sd">    \qquad (6.6)</span>
+
+<span class="sd">so a trial costs the window of Part I, Section 10 and a handful of sums.  The</span>
+<span class="sd">sums are exact; the only approximation is that of the window.  They are rebuilt</span>
+<span class="sd">from the full image when the image is refreshed.</span>
+
+<span class="sd">Insertion gain</span>
+<span class="sd">--------------</span>
+<span class="sd">In STEM the image is linear in the atoms, Eq. (10.1): an atom of amplitude</span>
+<span class="sd">:math:`A` at :math:`\mathbf p` adds :math:`d(\mathbf x) = A\,k(\mathbf x-\mathbf p)` with the probe</span>
+<span class="sd">intensity :math:`k`.  Eq. (6.6) then reads</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \Delta S_R(\mathbf p) = A\,(\chi_R \star k)(\mathbf p),\quad</span>
+<span class="sd">    \Delta S^2_R(\mathbf p) = 2A\,(\chi_R s \star k)(\mathbf p) + A^2(\chi_R\star k^2)(\mathbf p),</span>
+<span class="sd">    \qquad (6.7)</span>
+
+<span class="sd">and analogously for :math:`S_K` and :math:`C_K` with :math:`\chi_K` and :math:`\chi_K t`</span>
+<span class="sd">(:math:`\chi` the indicator of a region, :math:`\star` cross-correlation).  The</span>
+<span class="sd">loss change of a new atom at *every* pixel therefore costs four FFT correlations,</span>
+<span class="sd">without a single simulation.  This &quot;landscape&quot; drives the gradient seeding of</span>
+<span class="sd">Section 6.3 and is exact up to the truncation of the probe.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">contextlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">...physics.window</span><span class="w"> </span><span class="kn">import</span> <span class="n">ImageChange</span><span class="p">,</span> <span class="n">LocalImage</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..objective</span><span class="w"> </span><span class="kn">import</span> <span class="n">standardise</span>
+
+<span class="n">EPS</span> <span class="o">=</span> <span class="mf">1e-8</span>
+
+
+<div class="viewcode-block" id="Trial">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.local_loss.Trial">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Trial</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;A proposed change with the sums and the loss it would give.&quot;&quot;&quot;</span>
+
+    <span class="n">change</span><span class="p">:</span> <span class="n">ImageChange</span>
+    <span class="n">sums</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+    <span class="n">loss</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">n_after</span><span class="p">:</span> <span class="nb">int</span></div>
+
+
+
+<div class="viewcode-block" id="negative_correlation">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.local_loss.negative_correlation">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">negative_correlation</span><span class="p">(</span><span class="n">simulation</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">reference</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">],</span>
+                         <span class="n">keep</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">],</span> <span class="n">normalisation</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (6.2) evaluated on the full image (the reference the running sums must reproduce).&quot;&quot;&quot;</span>
+
+    <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">standardise</span><span class="p">(</span><span class="n">simulation</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">reference</span><span class="p">,</span> <span class="n">normalisation</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">keep</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">x</span><span class="p">[</span><span class="n">keep</span><span class="p">],</span> <span class="n">y</span><span class="p">[</span><span class="n">keep</span><span class="p">]</span>
+    <span class="k">return</span> <span class="o">-</span><span class="nb">float</span><span class="p">((</span><span class="n">x</span> <span class="o">*</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="p">())</span></div>
+
+
+
+<div class="viewcode-block" id="LocalLoss">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.local_loss.LocalLoss">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">LocalLoss</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (6.5) with running sums for a :class:`LocalImage`.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">local</span><span class="p">:</span> <span class="n">LocalImage</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">reference</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">],</span>
+                 <span class="n">keep</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">],</span> <span class="n">normalisation</span><span class="p">,</span> <span class="n">n_atoms</span><span class="p">:</span> <span class="nb">int</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local</span> <span class="o">=</span> <span class="n">local</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">device</span> <span class="o">=</span> <span class="n">local</span><span class="o">.</span><span class="n">device</span>
+        <span class="n">shape</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">local</span><span class="o">.</span><span class="n">sim</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">mask</span><span class="p">(</span><span class="n">m</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">m</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">m</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">t</span> <span class="o">=</span> <span class="n">target</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ref</span> <span class="o">=</span> <span class="n">mask</span><span class="p">(</span><span class="n">reference</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">keep</span> <span class="o">=</span> <span class="n">mask</span><span class="p">(</span><span class="n">keep</span><span class="p">)</span>
+        <span class="n">values</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">normalisation</span><span class="p">)</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">norm0</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm1</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">values</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="nb">float</span><span class="p">(</span><span class="n">values</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_ref</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_keep</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">keep</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">t_ref</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tt_ref</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">t_keep</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">keep</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset</span><span class="p">(</span><span class="n">n_atoms</span><span class="p">)</span>
+
+    <span class="c1"># ------------------------------------------------------------------ sums</span>
+<div class="viewcode-block" id="LocalLoss.reset">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.local_loss.LocalLoss.reset">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">reset</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_atoms</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Rebuild the four sums of Eq. (6.4) from ``local.image``.&quot;&quot;&quot;</span>
+
+        <span class="n">s</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">image</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span> <span class="o">*</span> <span class="n">s</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span> <span class="o">*</span> <span class="n">s</span> <span class="o">*</span> <span class="n">s</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">keep</span> <span class="o">*</span> <span class="n">s</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span> <span class="o">=</span> <span class="nb">float</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">keep</span> <span class="o">*</span> <span class="n">s</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_atoms</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">n_atoms</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_atoms</span> <span class="o">==</span> <span class="mi">0</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">_loss</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_loss</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">s_ref</span><span class="p">,</span> <span class="n">ss_ref</span><span class="p">,</span> <span class="n">s_keep</span><span class="p">,</span> <span class="n">st_keep</span><span class="p">):</span>
+        <span class="n">n</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_ref</span>
+        <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_keep</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span>
+        <span class="n">mean_s</span> <span class="o">=</span> <span class="n">s_ref</span> <span class="o">/</span> <span class="n">n</span>
+        <span class="n">std_s</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="nb">max</span><span class="p">((</span><span class="n">ss_ref</span> <span class="o">-</span> <span class="n">n</span> <span class="o">*</span> <span class="n">mean_s</span> <span class="o">*</span> <span class="n">mean_s</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mf">1.0</span><span class="p">),</span> <span class="mf">0.0</span><span class="p">))</span>
+        <span class="n">mean_t</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_ref</span> <span class="o">/</span> <span class="n">n</span>
+        <span class="n">std_t</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="nb">max</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">tt_ref</span> <span class="o">-</span> <span class="n">n</span> <span class="o">*</span> <span class="n">mean_t</span> <span class="o">*</span> <span class="n">mean_t</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mf">1.0</span><span class="p">),</span> <span class="mf">0.0</span><span class="p">))</span>
+        <span class="n">a</span> <span class="o">=</span> <span class="n">mean_s</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm0</span> <span class="o">*</span> <span class="n">std_s</span>
+        <span class="n">sigma_s</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">std_s</span> <span class="o">*</span> <span class="nb">max</span><span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm1</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">),</span> <span class="n">EPS</span><span class="p">)</span>
+        <span class="n">sigma_t</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">std_t</span><span class="p">,</span> <span class="n">EPS</span><span class="p">)</span>
+        <span class="n">cross</span> <span class="o">=</span> <span class="n">st_keep</span> <span class="o">-</span> <span class="n">a</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_keep</span> <span class="o">-</span> <span class="n">mean_t</span> <span class="o">*</span> <span class="n">s_keep</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_keep</span> <span class="o">*</span> <span class="n">a</span> <span class="o">*</span> <span class="n">mean_t</span>
+        <span class="n">loss</span> <span class="o">=</span> <span class="o">-</span><span class="n">cross</span> <span class="o">/</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_keep</span> <span class="o">*</span> <span class="n">sigma_s</span> <span class="o">*</span> <span class="n">sigma_t</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">loss</span> <span class="k">if</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">loss</span><span class="p">)</span> <span class="k">else</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span>
+
+    <span class="c1"># ------------------------------------------------------------------ trial</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">propose</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">layer</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">changes</span><span class="p">,</span> <span class="n">n_after</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Trial</span><span class="p">]:</span>
+        <span class="n">change</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">propose</span><span class="p">(</span><span class="n">layer</span><span class="p">,</span> <span class="n">changes</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">change</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span> <span class="o">=</span> <span class="n">change</span><span class="o">.</span><span class="n">rows</span><span class="p">,</span> <span class="n">change</span><span class="o">.</span><span class="n">cols</span>
+        <span class="n">new</span><span class="p">,</span> <span class="n">old</span> <span class="o">=</span> <span class="n">change</span><span class="o">.</span><span class="n">new</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float64</span><span class="p">),</span> <span class="n">change</span><span class="o">.</span><span class="n">old</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">new</span> <span class="o">-</span> <span class="n">old</span>
+        <span class="n">ref</span><span class="p">,</span> <span class="n">keep</span><span class="p">,</span> <span class="n">t</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ref</span><span class="p">[</span><span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">keep</span><span class="p">[</span><span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">[</span><span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">]</span>
+        <span class="n">sums</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([(</span><span class="n">ref</span> <span class="o">*</span> <span class="n">d</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">(),</span> <span class="p">(</span><span class="n">ref</span> <span class="o">*</span> <span class="n">d</span> <span class="o">*</span> <span class="p">(</span><span class="n">new</span> <span class="o">+</span> <span class="n">old</span><span class="p">))</span><span class="o">.</span><span class="n">sum</span><span class="p">(),</span>
+                            <span class="p">(</span><span class="n">keep</span> <span class="o">*</span> <span class="n">d</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">(),</span> <span class="p">(</span><span class="n">keep</span> <span class="o">*</span> <span class="n">t</span> <span class="o">*</span> <span class="n">d</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()])</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">n_after</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_loss</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span> <span class="o">+</span> <span class="n">sums</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span> <span class="o">+</span> <span class="n">sums</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span> <span class="o">+</span> <span class="n">sums</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span>
+                              <span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span> <span class="o">+</span> <span class="n">sums</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+        <span class="k">return</span> <span class="n">Trial</span><span class="p">(</span><span class="n">change</span><span class="p">,</span> <span class="n">sums</span><span class="p">,</span> <span class="n">loss</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">n_after</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">commit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">trial</span><span class="p">:</span> <span class="n">Trial</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">commit</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">change</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">sums</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">sums</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">sums</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">sums</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="n">trial</span><span class="o">.</span><span class="n">loss</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_atoms</span> <span class="o">=</span> <span class="n">trial</span><span class="o">.</span><span class="n">n_after</span>
+
+<div class="viewcode-block" id="LocalLoss.hypothetical">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.local_loss.LocalLoss.hypothetical">[docs]</a>
+    <span class="nd">@contextlib</span><span class="o">.</span><span class="n">contextmanager</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">hypothetical</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">trial</span><span class="p">:</span> <span class="n">Trial</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Accept ``trial`` only temporarily (STEM; the TEM state has more than the image).&quot;&quot;&quot;</span>
+
+        <span class="n">local</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">local</span><span class="o">.</span><span class="n">stem</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;a hypothetical state is only supported in STEM mode&quot;</span><span class="p">)</span>
+        <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span> <span class="o">=</span> <span class="n">trial</span><span class="o">.</span><span class="n">change</span><span class="o">.</span><span class="n">rows</span><span class="p">,</span> <span class="n">trial</span><span class="o">.</span><span class="n">change</span><span class="o">.</span><span class="n">cols</span>
+        <span class="n">saved</span> <span class="o">=</span> <span class="p">(</span><span class="n">local</span><span class="o">.</span><span class="n">image</span><span class="p">[</span><span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">]</span><span class="o">.</span><span class="n">clone</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span><span class="p">,</span>
+                 <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_atoms</span><span class="p">,</span> <span class="n">local</span><span class="o">.</span><span class="n">accepted_since_refresh</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">commit</span><span class="p">(</span><span class="n">trial</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">yield</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="n">local</span><span class="o">.</span><span class="n">image</span><span class="p">[</span><span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">]</span> <span class="o">=</span> <span class="n">saved</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_atoms</span><span class="p">,</span>
+             <span class="n">local</span><span class="o">.</span><span class="n">accepted_since_refresh</span><span class="p">)</span> <span class="o">=</span> <span class="n">saved</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ landscape</span>
+<div class="viewcode-block" id="LocalLoss.insertion_gain">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.local_loss.LocalLoss.insertion_gain">[docs]</a>
+    <span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">insertion_gain</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">amplitude</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Eqs. (6.7): loss change of a new atom of amplitude ``amplitude`` at every pixel (``(H, W)``).</span>
+
+<span class="sd">        ``inf`` where the loss is undefined; ``None`` if not applicable (TEM, no atoms).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">local</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">local</span><span class="o">.</span><span class="n">stem</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_atoms</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">n</span><span class="p">,</span> <span class="n">n_keep</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_ref</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_keep</span>
+        <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span> <span class="ow">or</span> <span class="n">n_keep</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">pad</span><span class="p">,</span> <span class="p">(</span><span class="n">H</span><span class="p">,</span> <span class="n">W</span><span class="p">)</span> <span class="o">=</span> <span class="n">local</span><span class="o">.</span><span class="n">pad</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">local</span><span class="o">.</span><span class="n">sim</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="p">(</span><span class="n">local</span><span class="o">.</span><span class="n">Nh</span><span class="p">,</span> <span class="n">local</span><span class="o">.</span><span class="n">Nw</span><span class="p">)</span>
+        <span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">float64</span>
+        <span class="n">kernel</span> <span class="o">=</span> <span class="n">local</span><span class="o">.</span><span class="n">probe_kernel</span><span class="p">()</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="n">kernel_ft</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">kernel</span><span class="p">)</span><span class="o">.</span><span class="n">conj</span><span class="p">()</span>
+        <span class="n">kernel2_ft</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">kernel</span> <span class="o">*</span> <span class="n">kernel</span><span class="p">)</span><span class="o">.</span><span class="n">conj</span><span class="p">()</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="n">local</span><span class="o">.</span><span class="n">image</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">dtype</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">correlate</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">k_ft</span><span class="p">):</span>
+            <span class="n">padded</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">size</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+            <span class="n">padded</span><span class="p">[</span><span class="n">pad</span><span class="p">:</span><span class="n">pad</span> <span class="o">+</span> <span class="n">H</span><span class="p">,</span> <span class="n">pad</span><span class="p">:</span><span class="n">pad</span> <span class="o">+</span> <span class="n">W</span><span class="p">]</span> <span class="o">=</span> <span class="n">image</span>
+            <span class="n">out</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">irfft2</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">padded</span><span class="p">)</span> <span class="o">*</span> <span class="n">k_ft</span><span class="p">,</span> <span class="n">s</span><span class="o">=</span><span class="n">size</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">out</span><span class="p">[</span><span class="n">pad</span><span class="p">:</span><span class="n">pad</span> <span class="o">+</span> <span class="n">H</span><span class="p">,</span> <span class="n">pad</span><span class="p">:</span><span class="n">pad</span> <span class="o">+</span> <span class="n">W</span><span class="p">]</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+
+        <span class="n">a_amp</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">amplitude</span><span class="p">)</span>
+        <span class="n">d_s_ref</span> <span class="o">=</span> <span class="n">a_amp</span> <span class="o">*</span> <span class="n">correlate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span><span class="p">,</span> <span class="n">kernel_ft</span><span class="p">)</span>
+        <span class="n">d_ss_ref</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="n">a_amp</span> <span class="o">*</span> <span class="n">correlate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span> <span class="o">*</span> <span class="n">s</span><span class="p">,</span> <span class="n">kernel_ft</span><span class="p">)</span> <span class="o">+</span> <span class="n">a_amp</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">correlate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ref</span><span class="p">,</span> <span class="n">kernel2_ft</span><span class="p">)</span>
+        <span class="n">d_s_keep</span> <span class="o">=</span> <span class="n">a_amp</span> <span class="o">*</span> <span class="n">correlate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">keep</span><span class="p">,</span> <span class="n">kernel_ft</span><span class="p">)</span>
+        <span class="n">d_st_keep</span> <span class="o">=</span> <span class="n">a_amp</span> <span class="o">*</span> <span class="n">correlate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">keep</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">,</span> <span class="n">kernel_ft</span><span class="p">)</span>
+
+        <span class="n">mean_t</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_ref</span> <span class="o">/</span> <span class="n">n</span>
+        <span class="n">std_t</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="nb">max</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">tt_ref</span> <span class="o">-</span> <span class="n">n</span> <span class="o">*</span> <span class="n">mean_t</span> <span class="o">*</span> <span class="n">mean_t</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mf">1.0</span><span class="p">),</span> <span class="mf">0.0</span><span class="p">))</span>
+        <span class="n">mean_s</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">s_ref</span> <span class="o">+</span> <span class="n">d_s_ref</span><span class="p">)</span> <span class="o">/</span> <span class="n">n</span>
+        <span class="n">var_s</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ss_ref</span> <span class="o">+</span> <span class="n">d_ss_ref</span> <span class="o">-</span> <span class="n">n</span> <span class="o">*</span> <span class="n">mean_s</span> <span class="o">*</span> <span class="n">mean_s</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mf">1.0</span><span class="p">)</span>
+        <span class="n">std_s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">var_s</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">))</span>
+        <span class="n">a</span> <span class="o">=</span> <span class="n">mean_s</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm0</span> <span class="o">*</span> <span class="n">std_s</span>
+        <span class="n">sigma_s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">std_s</span> <span class="o">*</span> <span class="nb">max</span><span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm1</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">),</span> <span class="n">EPS</span><span class="p">)</span>
+        <span class="n">cross</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">st_keep</span> <span class="o">+</span> <span class="n">d_st_keep</span><span class="p">)</span> <span class="o">-</span> <span class="n">a</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_keep</span> <span class="o">-</span> <span class="n">mean_t</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">s_keep</span> <span class="o">+</span> <span class="n">d_s_keep</span><span class="p">)</span> \
+            <span class="o">+</span> <span class="n">n_keep</span> <span class="o">*</span> <span class="n">a</span> <span class="o">*</span> <span class="n">mean_t</span>
+        <span class="n">loss</span> <span class="o">=</span> <span class="o">-</span><span class="n">cross</span> <span class="o">/</span> <span class="p">(</span><span class="n">n_keep</span> <span class="o">*</span> <span class="n">sigma_s</span> <span class="o">*</span> <span class="nb">max</span><span class="p">(</span><span class="n">std_t</span><span class="p">,</span> <span class="n">EPS</span><span class="p">))</span>
+        <span class="n">gain</span> <span class="o">=</span> <span class="p">(</span><span class="n">loss</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">gain</span><span class="p">),</span> <span class="n">gain</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span><span class="p">)</span></div>
+</div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

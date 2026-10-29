@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.data.dataset &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.data.dataset</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;Part III, Section 2: the data-folder convention.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">A measurement is a folder.  Convention (every item optional unless stated)::</span>
+
+<span class="sd">    &lt;folder&gt;/</span>
+<span class="sd">        target.tif | target.npy       the measured image (required)</span>
+<span class="sd">        mask_&lt;group&gt;.tif | &lt;group&gt;_mask.tif | mask.tif</span>
+<span class="sd">                                      region in which atoms of &lt;group&gt; are expected</span>
+<span class="sd">        init.json | init_random.json  setup (pixel size, voltage, mode, lattices ...)</span>
+<span class="sd">        &lt;config_dir&gt;/                 run directories written by the programs</span>
+
+<span class="sd">The image is dimensionless; Part II normalises it (Eq. 5.1), so the file&#39;s grey</span>
+<span class="sd">values are irrelevant except for one defect: detectors write exact zeros for</span>
+<span class="sd">pixels that were never read.  Those would pull the minimum of the image to zero and</span>
+<span class="sd">distort the normalisation, therefore ``target_zero_handling == &quot;median&quot;`` (the</span>
+<span class="sd">default, as in the ImageJ plug-in) replaces exact zeros by the image median.</span>
+
+<span class="sd">``init.json`` is written by the ImageJ plug-in (``version`` 2) and, in reduced</span>
+<span class="sd">form, by the headless seeding command (``init_random.json``).  Length units in it</span>
+<span class="sd">follow the plug-in&#39;s conventions (shift in pixels, rotation in *degrees*); this</span>
+<span class="sd">module converts to the internal convention of :mod:`temsim.data.schema` (radians).</span>
+<span class="sd">Turning lattice recipes into atoms is physics and lives in</span>
+<span class="sd">:mod:`temsim.physics.structure`.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.legacy</span><span class="w"> </span><span class="kn">import</span> <span class="n">LOSS_KEY_ALIASES</span><span class="p">,</span> <span class="n">TRAIN_KEY_ALIASES</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.schema</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">DatasetSpec</span><span class="p">,</span> <span class="n">Group</span><span class="p">,</span> <span class="n">InitTrain</span><span class="p">,</span> <span class="n">Layer</span><span class="p">,</span> <span class="n">LatticeSpec</span><span class="p">,</span> <span class="n">LayerSource</span><span class="p">,</span>
+                     <span class="n">TrainSettings</span><span class="p">)</span>
+
+<span class="n">TARGET_NAMES</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;target.tif&quot;</span><span class="p">,</span> <span class="s2">&quot;target.tiff&quot;</span><span class="p">,</span> <span class="s2">&quot;target.npy&quot;</span><span class="p">)</span>
+<span class="n">INIT_NAMES</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;init.json&quot;</span><span class="p">,</span> <span class="s2">&quot;init_random.json&quot;</span><span class="p">)</span>
+<span class="n">DEFAULT_GROUP</span> <span class="o">=</span> <span class="s2">&quot;Gr&quot;</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Images</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="read_image">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.read_image">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">read_image</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;``.npy`` or ``.tif`` -&gt; array (as stored).&quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;.npy&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">tifffile</span>                                   <span class="c1"># imported lazily: optional dependency</span>
+    <span class="k">return</span> <span class="n">tifffile</span><span class="o">.</span><span class="n">imread</span><span class="p">(</span><span class="n">path</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="prepare_target">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.prepare_target">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">prepare_target</span><span class="p">(</span><span class="n">image</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">zero_handling</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;median&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Float32 copy; exact zeros replaced by the median if requested.&quot;&quot;&quot;</span>
+
+    <span class="n">image</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">zero_handling</span> <span class="o">==</span> <span class="s2">&quot;median&quot;</span><span class="p">:</span>
+        <span class="n">zeros</span> <span class="o">=</span> <span class="n">image</span> <span class="o">==</span> <span class="mf">0.0</span>
+        <span class="k">if</span> <span class="n">zeros</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+            <span class="n">image</span> <span class="o">=</span> <span class="n">image</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+            <span class="n">image</span><span class="p">[</span><span class="n">zeros</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">median</span><span class="p">(</span><span class="n">image</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">image</span></div>
+
+
+
+<div class="viewcode-block" id="group_name_from_mask">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.group_name_from_mask">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">group_name_from_mask</span><span class="p">(</span><span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;``mask_Gr.tif`` -&gt; ``Gr``, ``gr_mask.tif`` -&gt; ``gr``, ``mask.tif`` -&gt; default.&quot;&quot;&quot;</span>
+
+    <span class="n">stem</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">filename</span><span class="p">))[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">stem</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;mask_&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">stem</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="s2">&quot;mask_&quot;</span><span class="p">):]</span>
+    <span class="k">if</span> <span class="n">stem</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;_mask&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">stem</span><span class="p">[:</span><span class="o">-</span><span class="nb">len</span><span class="p">(</span><span class="s2">&quot;_mask&quot;</span><span class="p">)]</span>
+    <span class="k">return</span> <span class="n">DEFAULT_GROUP</span></div>
+
+
+
+<div class="viewcode-block" id="find_masks">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.find_masks">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_masks</span><span class="p">(</span><span class="n">folder</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Mask files of a folder, sorted, ``.tif``/``.tiff``/``.npy`` only.&quot;&quot;&quot;</span>
+
+    <span class="n">found</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">folder</span><span class="p">)):</span>
+        <span class="n">low</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">low</span><span class="o">.</span><span class="n">endswith</span><span class="p">((</span><span class="s2">&quot;.tif&quot;</span><span class="p">,</span> <span class="s2">&quot;.tiff&quot;</span><span class="p">,</span> <span class="s2">&quot;.npy&quot;</span><span class="p">)):</span>
+            <span class="k">continue</span>
+        <span class="n">stem</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">low</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">stem</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;mask&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">stem</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;_mask&quot;</span><span class="p">):</span>
+            <span class="n">found</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">name</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">found</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">find_target</span><span class="p">(</span><span class="n">folder</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">TARGET_NAMES</span><span class="p">:</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">path</span>
+    <span class="k">return</span> <span class="kc">None</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># init.json</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_group_from_init</span><span class="p">(</span><span class="n">entry</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Group</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">Group</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">],</span>
+        <span class="n">control_points</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;control_points&quot;</span><span class="p">,</span> <span class="p">[</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">])),</span>
+        <span class="n">max_shift</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;max_shift_px&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;max_shift_px&quot;</span><span class="p">]),</span>
+        <span class="n">max_rotation</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;max_rotation_deg&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span>
+        <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">deg2rad</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;max_rotation_deg&quot;</span><span class="p">])),</span>
+        <span class="n">init_shift</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_shift_px&quot;</span><span class="p">,</span> <span class="p">[</span><span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">])),</span>
+        <span class="n">init_rotation</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">deg2rad</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_rotation_deg&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">))),</span>
+        <span class="n">init_scale</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_scale&quot;</span><span class="p">,</span> <span class="p">[</span><span class="mf">1.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">])),</span>
+        <span class="n">init_contrast_factor</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_contrast_factor&quot;</span><span class="p">,</span>
+                                             <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_potential_factor&quot;</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">))),</span>
+        <span class="n">mask_file</span><span class="o">=</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;mask_file&quot;</span><span class="p">),</span> <span class="n">target_file</span><span class="o">=</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;target_file&quot;</span><span class="p">),</span>
+        <span class="n">isolate_when_active</span><span class="o">=</span><span class="nb">bool</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;isolate_when_active&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_layer_from_init</span><span class="p">(</span><span class="n">entry</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Layer</span><span class="p">:</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">.schema</span><span class="w"> </span><span class="kn">import</span> <span class="n">TYPICAL_DEBYE_WALLER_U</span>
+    <span class="n">element</span> <span class="o">=</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;element&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="s2">&quot;C&quot;</span>
+    <span class="k">return</span> <span class="n">Layer</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">],</span> <span class="n">element</span><span class="o">=</span><span class="n">element</span><span class="p">,</span> <span class="n">z_nm</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;z_nm&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)),</span>
+        <span class="n">group</span><span class="o">=</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;group&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">entry</span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">],</span>
+        <span class="n">init_occupancy</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_occupancy&quot;</span><span class="p">,</span> <span class="mf">2.0</span><span class="p">)),</span>
+        <span class="n">occ_entropy</span><span class="o">=</span><span class="nb">bool</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;occ_entropy&quot;</span><span class="p">,</span> <span class="kc">True</span><span class="p">)),</span>
+        <span class="n">elements</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;elements&quot;</span><span class="p">,</span> <span class="p">[])),</span>
+        <span class="n">debye_waller_u</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;debye_waller_u&quot;</span><span class="p">,</span> <span class="n">TYPICAL_DEBYE_WALLER_U</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">))))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_lattice_from_init</span><span class="p">(</span><span class="n">entry</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LatticeSpec</span><span class="p">:</span>
+    <span class="n">spec</span> <span class="o">=</span> <span class="n">LatticeSpec</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;name&quot;</span><span class="p">,</span> <span class="s2">&quot;lattice&quot;</span><span class="p">))</span>
+    <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">,</span> <span class="s2">&quot;formula&quot;</span><span class="p">,</span> <span class="s2">&quot;file&quot;</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">entry</span><span class="p">[</span><span class="n">key</span><span class="p">])</span>
+    <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="s2">&quot;gamma_deg&quot;</span><span class="p">,</span> <span class="s2">&quot;rotation_deg&quot;</span><span class="p">,</span> <span class="s2">&quot;z_offset_nm&quot;</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="n">key</span><span class="p">]))</span>
+    <span class="n">spec</span><span class="o">.</span><span class="n">b</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;b&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;b&quot;</span><span class="p">])</span>
+    <span class="n">spec</span><span class="o">.</span><span class="n">basis</span> <span class="o">=</span> <span class="p">[</span><span class="nb">list</span><span class="p">(</span><span class="n">b</span><span class="p">)</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;basis&quot;</span><span class="p">,</span> <span class="p">[])]</span>
+    <span class="n">spec</span><span class="o">.</span><span class="n">offset_px</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">entry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;offset_px&quot;</span><span class="p">,</span> <span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)))</span>
+    <span class="k">return</span> <span class="n">spec</span>
+
+
+<div class="viewcode-block" id="train_key">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.train_key">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">train_key</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Switch name written by the plug-in (old names allowed) -&gt; key of ``TrainSettings.params()``.&quot;&quot;&quot;</span>
+
+    <span class="k">return</span> <span class="n">TRAIN_KEY_ALIASES</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="apply_init_train">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.apply_init_train">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">apply_init_train</span><span class="p">(</span><span class="n">settings</span><span class="p">:</span> <span class="n">TrainSettings</span><span class="p">,</span> <span class="n">init</span><span class="p">:</span> <span class="n">InitTrain</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Apply the ``train`` block of an init file; returns the keys that were not understood.&quot;&quot;&quot;</span>
+
+    <span class="n">unknown</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">init</span><span class="o">.</span><span class="n">losses</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">name</span> <span class="o">=</span> <span class="n">LOSS_KEY_ALIASES</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">unknown</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">init</span><span class="o">.</span><span class="n">enable</span><span class="p">:</span>
+        <span class="n">param</span> <span class="o">=</span> <span class="n">settings</span><span class="o">.</span><span class="n">param</span><span class="p">(</span><span class="n">train_key</span><span class="p">(</span><span class="n">key</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">param</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">unknown</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">param</span><span class="o">.</span><span class="n">enabled</span> <span class="o">=</span> <span class="kc">True</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">lr</span> <span class="ow">in</span> <span class="n">init</span><span class="o">.</span><span class="n">learning_rates</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">param</span> <span class="o">=</span> <span class="n">settings</span><span class="o">.</span><span class="n">param</span><span class="p">(</span><span class="n">train_key</span><span class="p">(</span><span class="n">key</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">param</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">unknown</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">param</span><span class="o">.</span><span class="n">lr</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">lr</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">init</span><span class="o">.</span><span class="n">active_group</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">settings</span><span class="o">.</span><span class="n">active_group</span> <span class="o">=</span> <span class="n">init</span><span class="o">.</span><span class="n">active_group</span>
+    <span class="k">return</span> <span class="n">unknown</span></div>
+
+
+
+<div class="viewcode-block" id="spec_from_init">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.spec_from_init">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">spec_from_init</span><span class="p">(</span><span class="n">init</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DatasetSpec</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Parsed ``init.json`` / ``init_random.json`` -&gt; :class:`DatasetSpec`.&quot;&quot;&quot;</span>
+
+    <span class="n">version</span> <span class="o">=</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;version&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">version</span> <span class="o">&gt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;init.json version </span><span class="si">{</span><span class="n">version</span><span class="si">}</span><span class="s2"> is newer than this program understands (2)&quot;</span><span class="p">)</span>
+
+    <span class="n">groups</span> <span class="o">=</span> <span class="p">[</span><span class="n">_group_from_init</span><span class="p">(</span><span class="n">g</span><span class="p">)</span> <span class="k">for</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;groups&quot;</span><span class="p">,</span> <span class="p">[])]</span>
+    <span class="n">layers</span> <span class="o">=</span> <span class="p">[</span><span class="n">_layer_from_init</span><span class="p">(</span><span class="n">l</span><span class="p">)</span> <span class="k">for</span> <span class="n">l</span> <span class="ow">in</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;layers&quot;</span><span class="p">,</span> <span class="p">[])]</span>
+
+    <span class="n">entries</span> <span class="o">=</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;lattices&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">entries</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">single</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;lattice&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span>
+        <span class="k">if</span> <span class="n">single</span><span class="p">:</span>
+            <span class="n">single</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;name&quot;</span><span class="p">,</span> <span class="n">groups</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="k">if</span> <span class="n">groups</span> <span class="k">else</span> <span class="s2">&quot;lattice&quot;</span><span class="p">)</span>
+            <span class="n">entries</span> <span class="o">=</span> <span class="p">[</span><span class="n">single</span><span class="p">]</span>
+    <span class="n">lattices</span> <span class="o">=</span> <span class="p">[</span><span class="n">_lattice_from_init</span><span class="p">(</span><span class="n">e</span><span class="p">)</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">entries</span> <span class="ow">or</span> <span class="p">[]]</span>
+    <span class="n">default_lattice</span> <span class="o">=</span> <span class="n">lattices</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="k">if</span> <span class="n">lattices</span> <span class="k">else</span> <span class="kc">None</span>
+
+    <span class="n">counters</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="n">sources</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">raw</span> <span class="ow">in</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;layers&quot;</span><span class="p">,</span> <span class="p">[]):</span>
+        <span class="n">lat</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;lattice&quot;</span><span class="p">,</span> <span class="n">default_lattice</span><span class="p">)</span>
+        <span class="n">index</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;lattice_layer&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">index</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">lat</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">index</span> <span class="o">=</span> <span class="n">counters</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">lat</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">counters</span><span class="p">[</span><span class="n">lat</span><span class="p">]</span> <span class="o">=</span> <span class="n">index</span> <span class="o">+</span> <span class="mi">1</span>
+        <span class="n">sources</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">LayerSource</span><span class="p">(</span><span class="n">layer</span><span class="o">=</span><span class="n">raw</span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">],</span> <span class="n">lattice</span><span class="o">=</span><span class="n">lat</span><span class="p">,</span> <span class="n">lattice_layer</span><span class="o">=</span><span class="n">index</span><span class="p">))</span>
+
+    <span class="n">t</span> <span class="o">=</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;train&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{}</span>
+    <span class="n">train</span> <span class="o">=</span> <span class="n">InitTrain</span><span class="p">(</span><span class="n">enable</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;enable&quot;</span><span class="p">,</span> <span class="p">[])),</span>
+                      <span class="n">learning_rates</span><span class="o">=</span><span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;learning_rates&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">()},</span>
+                      <span class="n">losses</span><span class="o">=</span><span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;losses&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">()},</span>
+                      <span class="n">active_group</span><span class="o">=</span><span class="n">t</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;active_group&quot;</span><span class="p">))</span>
+
+    <span class="n">shape</span> <span class="o">=</span> <span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;shape&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">DatasetSpec</span><span class="p">(</span>
+        <span class="n">pixel_size_nm</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">init</span><span class="p">[</span><span class="s2">&quot;pixel_size_nm&quot;</span><span class="p">]),</span> <span class="n">voltage_kV</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;voltage_kV&quot;</span><span class="p">,</span> <span class="mf">80.0</span><span class="p">)),</span>
+        <span class="n">shape</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">shape</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])),</span>
+        <span class="n">padding</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;padding&quot;</span><span class="p">,</span> <span class="mi">100</span><span class="p">)),</span> <span class="n">imaging</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;imaging&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{}),</span>
+        <span class="n">layers</span><span class="o">=</span><span class="n">layers</span><span class="p">,</span> <span class="n">groups</span><span class="o">=</span><span class="n">groups</span><span class="p">,</span> <span class="n">lattices</span><span class="o">=</span><span class="n">lattices</span><span class="p">,</span> <span class="n">layer_sources</span><span class="o">=</span><span class="n">sources</span><span class="p">,</span> <span class="n">train</span><span class="o">=</span><span class="n">train</span><span class="p">,</span>
+        <span class="n">target_file</span><span class="o">=</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;target_file&quot;</span><span class="p">),</span>
+        <span class="n">target_zero_handling</span><span class="o">=</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;target_zero_handling&quot;</span><span class="p">,</span> <span class="s2">&quot;median&quot;</span><span class="p">),</span>
+        <span class="n">config_dir</span><span class="o">=</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;config_dir&quot;</span><span class="p">,</span> <span class="s2">&quot;config&quot;</span><span class="p">),</span> <span class="n">source</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">init</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;source&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{}),</span>
+        <span class="n">version</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">version</span><span class="p">))</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># The folder as a whole</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="Dataset">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.Dataset">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Dataset</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;A loaded data folder.&quot;&quot;&quot;</span>
+
+    <span class="n">folder</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">spec</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DatasetSpec</span><span class="p">]</span>
+    <span class="c1">#: Raw target (zero handling applied), not yet normalised.</span>
+    <span class="n">target</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+    <span class="c1">#: Boolean masks by group name.</span>
+    <span class="n">masks</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span>
+    <span class="c1">#: Group targets (when ``group.target_file`` is set).</span>
+    <span class="n">group_targets</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span>
+    <span class="n">init_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">shape</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">target</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="load_dataset">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.dataset.load_dataset">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">load_dataset</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dataset</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Load a data folder or an ``init.json`` path.</span>
+
+<span class="sd">    The spec is ``None`` when no init file exists; the caller then has to supply</span>
+<span class="sd">    pixel size and voltage.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+        <span class="n">folder</span><span class="p">,</span> <span class="n">init_path</span> <span class="o">=</span> <span class="n">path</span><span class="p">,</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">INIT_NAMES</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">name</span><span class="p">)):</span>
+                <span class="n">init_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+                <span class="k">break</span>
+    <span class="k">elif</span> <span class="n">path</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;.json&quot;</span><span class="p">):</span>
+        <span class="n">folder</span><span class="p">,</span> <span class="n">init_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="n">path</span><span class="p">)),</span> <span class="n">path</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2"> is neither a folder nor an init file&quot;</span><span class="p">)</span>
+
+    <span class="n">spec</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">init_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">init_path</span><span class="p">,</span> <span class="s2">&quot;r&quot;</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">spec</span> <span class="o">=</span> <span class="n">spec_from_init</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">))</span>
+
+    <span class="n">zero</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="n">target_zero_handling</span> <span class="k">if</span> <span class="n">spec</span> <span class="k">else</span> <span class="s2">&quot;median&quot;</span>
+    <span class="n">target_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">target_file</span><span class="p">)</span> <span class="k">if</span> <span class="n">spec</span> <span class="ow">and</span> <span class="n">spec</span><span class="o">.</span><span class="n">target_file</span> <span class="k">else</span> <span class="n">find_target</span><span class="p">(</span><span class="n">folder</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">target_path</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">target_path</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;no target image in </span><span class="si">{</span><span class="n">folder</span><span class="si">}</span><span class="s2"> (expected one of </span><span class="si">{</span><span class="n">TARGET_NAMES</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+    <span class="n">target</span> <span class="o">=</span> <span class="n">prepare_target</span><span class="p">(</span><span class="n">read_image</span><span class="p">(</span><span class="n">target_path</span><span class="p">),</span> <span class="n">zero</span><span class="p">)</span>
+
+    <span class="n">masks</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="n">group_targets</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">if</span> <span class="n">spec</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">spec</span><span class="o">.</span><span class="n">groups</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">g</span><span class="o">.</span><span class="n">mask_file</span><span class="p">:</span>
+                <span class="n">masks</span><span class="p">[</span><span class="n">g</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">read_image</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">g</span><span class="o">.</span><span class="n">mask_file</span><span class="p">)))</span> <span class="o">&gt;</span> <span class="mi">0</span>
+            <span class="k">if</span> <span class="n">g</span><span class="o">.</span><span class="n">target_file</span><span class="p">:</span>
+                <span class="n">group_targets</span><span class="p">[</span><span class="n">g</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">prepare_target</span><span class="p">(</span><span class="n">read_image</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="n">g</span><span class="o">.</span><span class="n">target_file</span><span class="p">)))</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">masks</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">mask_path</span> <span class="ow">in</span> <span class="n">find_masks</span><span class="p">(</span><span class="n">folder</span><span class="p">):</span>
+            <span class="n">masks</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">group_name_from_mask</span><span class="p">(</span><span class="n">mask_path</span><span class="p">),</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">read_image</span><span class="p">(</span><span class="n">mask_path</span><span class="p">))</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">masks</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">m</span><span class="o">.</span><span class="n">shape</span> <span class="o">!=</span> <span class="n">target</span><span class="o">.</span><span class="n">shape</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;mask &#39;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&#39; has shape </span><span class="si">{</span><span class="n">m</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">, target has </span><span class="si">{</span><span class="n">target</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">spec</span> <span class="ow">and</span> <span class="n">spec</span><span class="o">.</span><span class="n">shape</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">target</span><span class="o">.</span><span class="n">shape</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;init file says shape </span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}</span><span class="s2">, target has </span><span class="si">{</span><span class="nb">tuple</span><span class="p">(</span><span class="n">target</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">Dataset</span><span class="p">(</span><span class="n">folder</span><span class="o">=</span><span class="n">folder</span><span class="p">,</span> <span class="n">spec</span><span class="o">=</span><span class="n">spec</span><span class="p">,</span> <span class="n">target</span><span class="o">=</span><span class="n">target</span><span class="p">,</span> <span class="n">masks</span><span class="o">=</span><span class="n">masks</span><span class="p">,</span>
+                   <span class="n">group_targets</span><span class="o">=</span><span class="n">group_targets</span><span class="p">,</span> <span class="n">init_path</span><span class="o">=</span><span class="n">init_path</span><span class="p">)</span></div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

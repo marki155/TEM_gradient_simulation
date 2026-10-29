@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim_gui.panels &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim_gui.panels</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part V, Section 9: the control panels.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">The right-hand column of the window consists of four panels.  A panel is *only* a set of</span>
+<span class="sd">widgets: it knows its defaults, how to show a state and how to hand its settings</span>
+<span class="sd">out, but nothing about the core; the :class:`~temsim_gui.controller.Controller` connects</span>
+<span class="sd">panels, canvas and connection.  This is what makes the panels testable without a core</span>
+<span class="sd">and keeps the interface replaceable: a new button needs a widget here and one line there.</span>
+
+<span class="sd">* :class:`ControlPanel` - state, training buttons, view options, resets, gradient</span>
+<span class="sd">  arrows, removal of weak atoms.</span>
+<span class="sd">* :class:`MinimaPanel` - candidate sites from the minima of the difference image</span>
+<span class="sd">  (Part II, Section 5) and the checks that a candidate has to pass.</span>
+<span class="sd">* :class:`SeedingPanel` - the options of the random seeding; the numbers are those of</span>
+<span class="sd">  :class:`~temsim.learning.seeding.seeder.SeedConfig` plus the three job options.</span>
+<span class="sd">* :class:`StrainPanel` - the number of control points of the displacement field of every</span>
+<span class="sd">  group.</span>
+
+<span class="sd">Implementation</span>
+<span class="sd">==============</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">PySide6</span><span class="w"> </span><span class="kn">import</span> <span class="n">QtCore</span><span class="p">,</span> <span class="n">QtWidgets</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.widgets</span><span class="w"> </span><span class="kn">import</span> <span class="n">double_spin</span><span class="p">,</span> <span class="n">int_spin</span><span class="p">,</span> <span class="n">set_quietly</span>
+
+
+<div class="viewcode-block" id="ControlPanel">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.ControlPanel">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ControlPanel</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QWidget</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Status, buttons and view options.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QWidget</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="n">layout</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QVBoxLayout</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="n">layout</span><span class="o">.</span><span class="n">setContentsMargins</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">layout</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_status_box</span><span class="p">())</span>
+        <span class="n">layout</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_control_box</span><span class="p">())</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">set_state</span><span class="p">(</span><span class="s2">&quot;idle&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_status_box</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">:</span>
+        <span class="n">box</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">(</span><span class="s2">&quot;Status&quot;</span><span class="p">)</span>
+        <span class="n">form</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QFormLayout</span><span class="p">(</span><span class="n">box</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">state_label</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="s2">&quot;idle&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">step_label</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="s2">&quot;step: -&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss_label</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="s2">&quot;loss: -&quot;</span><span class="p">)</span>
+        <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="s2">&quot;State&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">state_label</span><span class="p">)</span>
+        <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="s2">&quot;Step&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">step_label</span><span class="p">)</span>
+        <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="s2">&quot;Loss&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss_label</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">box</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_control_box</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">:</span>
+        <span class="n">box</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">(</span><span class="s2">&quot;Training control&quot;</span><span class="p">)</span>
+        <span class="n">grid</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGridLayout</span><span class="p">(</span><span class="n">box</span><span class="p">)</span>
+        <span class="n">button</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QPushButton</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">start_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">pause_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">resume_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Start&quot;</span><span class="p">),</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Pause&quot;</span><span class="p">),</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Resume&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stop_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">render_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Stop&quot;</span><span class="p">),</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Render&quot;</span><span class="p">),</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Start Seeding&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">seed_btn</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Atome zufaellig einfuegen und behalten, wenn die Korrelation besser wird.</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                 <span class="s2">&quot;Pause/Resume/Stop gelten auch hierfuer.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QComboBox</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Eine Kachel gross zeigen - Simulation, Diff, Target, CTF, Potential ...</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                   <span class="s2">&quot;Zoomen und Verschieben mit der Toolbar unter dem Bild.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">show_atoms</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Show atom positions on target&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">show_atoms</span><span class="o">.</span><span class="n">setChecked</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset_occ_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Reset occupancies (aktive Gruppe)&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset_int_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Reset intensities (aktive Gruppe)&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset_int_btn</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Intensitaeten zurueck auf die Startwerte -</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                      <span class="s2">&quot;nicht auf 0, die Intensitaet ist die Ordnungszahl.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset_free_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Reset free positions (aktive Gruppe)&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset_losses_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Reset losses&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reset_zoom_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Zoom zuruecksetzen&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">remove_btn</span> <span class="o">=</span> <span class="n">button</span><span class="p">(</span><span class="s2">&quot;Atome unter Occ entfernen&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">remove_btn</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Loescht alle Atome der aktiven Gruppe, deren sigmoid(Occupancy) unter dem Wert</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                   <span class="s2">&quot;rechts liegt, endgueltig aus dem Modell (Adam-Zustand wird zurueckgesetzt).&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">remove_spin</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;Occ &lt; &quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">show_occ_spin</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;Anzeige ab Occ &quot;</span><span class="p">,</span>
+                                         <span class="n">tip</span><span class="o">=</span><span class="s2">&quot;Nur Atome mit sigmoid(Occupancy) ab diesem Wert werden angezeigt &quot;</span>
+                                             <span class="s2">&quot;(Positionen, Pfeile,</span><span class="se">\n</span><span class="s2">Histogramm). 0 = alle. Das Modell bleibt unveraendert.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">save_on_close</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Beim Schliessen speichern&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">save_on_close</span><span class="o">.</span><span class="n">setChecked</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">save_on_close</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Speichert beim Schliessen des Fensters den Stand im Ausgabeordner des Kerns.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gradients</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Gradient-Vektoren je Atom&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gradients</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Pfeil je Atom: in welche Richtung der Loss sich beim Verschieben des Atoms</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                  <span class="s2">&quot;aendert. Der laengste sichtbare Pfeil hat die eingestellte Laenge, alle anderen</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                  <span class="s2">&quot;sind dazu proportional. Mausrad zoomt in die Bilder.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">descent</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Abstiegsrichtung (-Gradient)&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">descent</span><span class="o">.</span><span class="n">setChecked</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">length_spin</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="mf">3.0</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">200.0</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">suffix</span><span class="o">=</span><span class="s2">&quot; px&quot;</span><span class="p">,</span>
+                                       <span class="n">tip</span><span class="o">=</span><span class="s2">&quot;Das Atom mit dem groessten Gradienten bekommt diese Laenge.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">relative</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;auf Ausschnitt normieren&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">relative</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Aus: Bezug ist das Maximum aller Atome.</span><span class="se">\n</span><span class="s2">An: Bezug ist das Maximum im sichtbaren Ausschnitt.&quot;</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">pause_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">resume_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">stop_btn</span><span class="p">):</span>
+            <span class="n">b</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">row</span><span class="p">,</span> <span class="n">widget</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">start_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">pause_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">resume_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">stop_btn</span><span class="p">,</span>
+                                      <span class="bp">self</span><span class="o">.</span><span class="n">render_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed_btn</span><span class="p">)):</span>
+            <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">widget</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">row</span><span class="p">,</span> <span class="n">widget</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">show_atoms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">reset_occ_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">reset_int_btn</span><span class="p">,</span>
+                                      <span class="bp">self</span><span class="o">.</span><span class="n">reset_free_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">reset_losses_btn</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">reset_zoom_btn</span><span class="p">)):</span>
+            <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">widget</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gradients</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QHBoxLayout</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">widget</span> <span class="ow">in</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">descent</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">length_spin</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">relative</span><span class="p">):</span>
+            <span class="n">row</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">widget</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addLayout</span><span class="p">(</span><span class="n">row</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QHBoxLayout</span><span class="p">()</span>
+        <span class="n">row</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">remove_btn</span><span class="p">)</span>
+        <span class="n">row</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">remove_spin</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addLayout</span><span class="p">(</span><span class="n">row</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">show_occ_spin</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">save_on_close</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">box</span>
+
+    <span class="c1"># ------------------------------------------------------------------ showing</span>
+<div class="viewcode-block" id="ControlPanel.set_state">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.ControlPanel.set_state">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_state</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">state</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">job</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">open_</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Label and enabled buttons for ``state`` in ``idle | running | paused``.&quot;&quot;&quot;</span>
+
+        <span class="n">text</span> <span class="o">=</span> <span class="n">state</span> <span class="k">if</span> <span class="n">job</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">state</span> <span class="o">==</span> <span class="s2">&quot;idle&quot;</span> <span class="k">else</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">state</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">job</span><span class="si">}</span><span class="s2">)&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">state_label</span><span class="o">.</span><span class="n">setText</span><span class="p">(</span><span class="n">text</span><span class="p">)</span>
+        <span class="n">idle</span><span class="p">,</span> <span class="n">running</span><span class="p">,</span> <span class="n">paused</span> <span class="o">=</span> <span class="n">state</span> <span class="o">==</span> <span class="s2">&quot;idle&quot;</span><span class="p">,</span> <span class="n">state</span> <span class="o">==</span> <span class="s2">&quot;running&quot;</span><span class="p">,</span> <span class="n">state</span> <span class="o">==</span> <span class="s2">&quot;paused&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">start_btn</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="n">idle</span> <span class="ow">and</span> <span class="n">open_</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">seed_btn</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="n">idle</span> <span class="ow">and</span> <span class="n">open_</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pause_btn</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="n">running</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">resume_btn</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="n">paused</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stop_btn</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="n">running</span> <span class="ow">or</span> <span class="n">paused</span><span class="p">)</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_progress</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">step</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span> <span class="n">loss</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">step_label</span><span class="o">.</span><span class="n">setText</span><span class="p">(</span><span class="s2">&quot;step: -&quot;</span> <span class="k">if</span> <span class="n">step</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="sa">f</span><span class="s2">&quot;step: </span><span class="si">{</span><span class="n">step</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss_label</span><span class="o">.</span><span class="n">setText</span><span class="p">(</span><span class="s2">&quot;loss: -&quot;</span> <span class="k">if</span> <span class="n">loss</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="sa">f</span><span class="s2">&quot;loss: </span><span class="si">{</span><span class="n">loss</span><span class="si">:</span><span class="s2">.6g</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<div class="viewcode-block" id="ControlPanel.fill_tiles">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.ControlPanel.fill_tiles">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">fill_tiles</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">entries</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]]])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;``(label, key)`` of the tile combo; the chosen tile stays if it still exists.&quot;&quot;&quot;</span>
+
+        <span class="n">current</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">currentData</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">count</span><span class="p">()</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">blockSignals</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">label</span><span class="p">,</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">entries</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">addItem</span><span class="p">(</span><span class="n">label</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">setCurrentIndex</span><span class="p">(</span><span class="nb">max</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">findData</span><span class="p">(</span><span class="n">current</span><span class="p">),</span> <span class="mi">0</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_combo</span><span class="o">.</span><span class="n">blockSignals</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="MinimaPanel">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.MinimaPanel">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">MinimaPanel</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Candidate atom sites from the minima of the difference image.&quot;&quot;&quot;</span>
+
+    <span class="n">CHECKS</span> <span class="o">=</span> <span class="p">((</span><span class="s2">&quot;margin&quot;</span><span class="p">,</span> <span class="s2">&quot;Rand beachten&quot;</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;Minima naeher am Bildrand als &#39;Rand [px]&#39; entfallen.&quot;</span><span class="p">),</span>
+              <span class="p">(</span><span class="s2">&quot;collisions&quot;</span><span class="p">,</span> <span class="s2">&quot;Kollisionsregel&quot;</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span>
+               <span class="s2">&quot;Atome naeher als &#39;Entfernen bis&#39; werden beim Einfuegen entfernt,</span><span class="se">\n</span><span class="s2">&quot;</span>
+               <span class="s2">&quot;Atome bis &#39;Verschieben bis&#39; ziehen das neue Atom in die Mitte.&quot;</span><span class="p">),</span>
+              <span class="p">(</span><span class="s2">&quot;loss&quot;</span><span class="p">,</span> <span class="s2">&quot;Loss darf nicht schlechter werden&quot;</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span>
+               <span class="s2">&quot;Ein Minimum zaehlt nur, wenn das neue Atom den Loss nicht verschlechtert.&quot;</span><span class="p">))</span>
+    <span class="n">SPINS</span> <span class="o">=</span> <span class="p">((</span><span class="s2">&quot;touch_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Entfernen bis [A]&quot;</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="s2">&quot;Atome naeher als das werden beim Einfuegen entfernt.&quot;</span><span class="p">),</span>
+             <span class="p">(</span><span class="s2">&quot;merge_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Verschieben bis [A]&quot;</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="s2">&quot;Bis hierher rutscht das Atom mit dem Nachbarn in die Mitte.&quot;</span><span class="p">),</span>
+             <span class="p">(</span><span class="s2">&quot;margin_px&quot;</span><span class="p">,</span> <span class="s2">&quot;Rand [px]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="s2">&quot;Mindestabstand zum Bildrand.&quot;</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QWidget</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;Diff-Minima als neue Atome&quot;</span><span class="p">,</span> <span class="n">parent</span><span class="p">)</span>
+        <span class="n">grid</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGridLayout</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">show_check</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Minima im Diff-Bild zeigen&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">show_check</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Lokale Minima von Sim - Target: dort ist das Target heller, also fehlt ein Atom.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">threshold</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span>
+                                     <span class="n">tip</span><span class="o">=</span><span class="s2">&quot;Ein Minimum zaehlt, wenn es tiefer als dieser Bruchteil des tiefsten Minimums liegt.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">distance</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="mf">3.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">50.0</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">suffix</span><span class="o">=</span><span class="s2">&quot; px&quot;</span><span class="p">,</span> <span class="n">tip</span><span class="o">=</span><span class="s2">&quot;Mindestabstand der Minima untereinander.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">checks</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">label</span><span class="p">,</span> <span class="n">default</span><span class="p">,</span> <span class="n">tip</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">CHECKS</span><span class="p">:</span>
+            <span class="n">check</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="n">label</span><span class="p">)</span>
+            <span class="n">check</span><span class="o">.</span><span class="n">setChecked</span><span class="p">(</span><span class="n">default</span><span class="p">)</span>
+            <span class="n">check</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="n">tip</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">checks</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">check</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">atom_distance</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Abstand zu Atomen &gt;= Mindestabstand&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">atom_distance</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Minima naeher als &#39;Mindestabstand&#39; an einem vorhandenen Atom entfallen.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QDoubleSpinBox</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">show_check</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="s2">&quot;Schwelle (x tiefstes Minimum)&quot;</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">threshold</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="s2">&quot;Mindestabstand&quot;</span><span class="p">),</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">distance</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="mi">3</span>
+        <span class="k">for</span> <span class="n">widget</span> <span class="ow">in</span> <span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">checks</span><span class="o">.</span><span class="n">values</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">atom_distance</span><span class="p">):</span>
+            <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">widget</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+            <span class="n">row</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">label</span><span class="p">,</span> <span class="n">default</span><span class="p">,</span> <span class="n">tip</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">SPINS</span><span class="p">:</span>
+            <span class="n">spin</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="n">default</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">100.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">tip</span><span class="o">=</span><span class="n">tip</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">spin</span>
+            <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="n">label</span><span class="p">),</span> <span class="n">row</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">spin</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="n">row</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">save_check</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Nach dem Einfuegen speichern&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">save_check</span><span class="o">.</span><span class="n">setChecked</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">insert_btn</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QPushButton</span><span class="p">(</span><span class="s2">&quot;Minima als Atome einfuegen&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">insert_btn</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Setzt an jedem gezeigten Minimum ein neues Atom in die aktive Gruppe</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                   <span class="s2">&quot;(Occupancy/Intensitaet wie beim Seeding).&quot;</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">save_check</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">grid</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">insert_btn</span><span class="p">,</span> <span class="n">row</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+
+<div class="viewcode-block" id="MinimaPanel.verify">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.MinimaPanel.verify">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">verify</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Keys of ``Session.minima(verify=...)``.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;check_margin&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">checks</span><span class="p">[</span><span class="s2">&quot;margin&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">isChecked</span><span class="p">(),</span>
+                <span class="s2">&quot;check_collisions&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">checks</span><span class="p">[</span><span class="s2">&quot;collisions&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">isChecked</span><span class="p">(),</span>
+                <span class="s2">&quot;check_loss&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">checks</span><span class="p">[</span><span class="s2">&quot;loss&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">isChecked</span><span class="p">()}</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">config_patch</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="n">key</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">spin</span><span class="o">.</span><span class="n">value</span><span class="p">())</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">spin</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">insert_options</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;threshold&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">threshold</span><span class="o">.</span><span class="n">value</span><span class="p">()),</span> <span class="s2">&quot;distance_px&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">distance</span><span class="o">.</span><span class="n">value</span><span class="p">()),</span>
+                <span class="s2">&quot;atom_distance&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">atom_distance</span><span class="o">.</span><span class="n">isChecked</span><span class="p">(),</span> <span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">verify</span><span class="p">()}</span></div>
+
+
+
+<div class="viewcode-block" id="SeedingPanel">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.SeedingPanel">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">SeedingPanel</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Options of the random seeding; changes go to the core at once, also while it runs.&quot;&quot;&quot;</span>
+
+    <span class="c1">#: (key, label, minimum, maximum, step, decimals, tooltip); keys of SeedConfig or of the job</span>
+    <span class="n">FIELDS</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="p">(</span><span class="s2">&quot;touch_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Entfernen bis [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Atome, die naeher als das am neuen Atom liegen, werden entfernt.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;merge_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Verschieben bis [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span>
+         <span class="s2">&quot;Zwischen &#39;Entfernen bis&#39; und diesem Radius wird nicht neu eingefuegt:</span><span class="se">\n</span><span class="s2">&quot;</span>
+         <span class="s2">&quot;das Nachbaratom wandert in die Mitte zum neuen Punkt.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;move_prob&quot;</span><span class="p">,</span> <span class="s2">&quot;P(Atom verschieben)&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span>
+         <span class="s2">&quot;Anteil der Versuche, ein vorhandenes Atom zu verschieben statt eins einzufuegen.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;remove_prob&quot;</span><span class="p">,</span> <span class="s2">&quot;P(Atom entfernen)&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Anteil der Versuche, ein vorhandenes Atom wegzunehmen.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;move_sigma_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Verschiebung sigma [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Streuung der Gauss-Verschiebung eines Atoms.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;gradient_temperature&quot;</span><span class="p">,</span> <span class="s2">&quot;Gradient Temperatur&quot;</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mf">5.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span>
+         <span class="s2">&quot;Klein: fast immer die beste Stelle der Landschaft; gross: breiter gestreut.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;relax_prob&quot;</span><span class="p">,</span> <span class="s2">&quot;P(Einfuegen + Ausweichen)&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span>
+         <span class="s2">&quot;Anteil der Versuche: neues Atom an einer von einem Nachbarn blockierten Stelle, der Nachbar</span><span class="se">\n</span><span class="s2">&quot;</span>
+         <span class="s2">&quot;sucht sich den besten neuen Platz. Nur STEM.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;relax_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Ausweich-Reichweite [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Nachbaratome in diesem Abstand duerfen ausweichen.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;bond_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Bindungslaenge [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Wahrscheinlichster Abstand zum Nachbaratom.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;bond_sigma_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Bindung sigma [A]&quot;</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mf">5.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Breite der Gauss-Verteilung um die Bindungslaenge.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;neighbour_min_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Nachbar min. Abstand [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Harter Cutoff nach unten.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;neighbour_max_A&quot;</span><span class="p">,</span> <span class="s2">&quot;Nachbar max. Abstand [A]&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;Harter Cutoff nach oben.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;max_atoms&quot;</span><span class="p">,</span> <span class="s2">&quot;max. Atome (0 = frei)&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1_000_000</span><span class="p">,</span> <span class="mi">100</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;Seeding endet, sobald so viele Atome gesetzt sind.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;trials&quot;</span><span class="p">,</span> <span class="s2">&quot;max. Versuche&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">100_000_000</span><span class="p">,</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;tune_every&quot;</span><span class="p">,</span> <span class="s2">&quot;Training alle N Versuche (0 = aus)&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1_000_000</span><span class="p">,</span> <span class="mi">100</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+         <span class="s2">&quot;Zwischendurch ein paar Gradientenschritte auf Sonde/Mikroskop-Parametern.&quot;</span><span class="p">),</span>
+        <span class="p">(</span><span class="s2">&quot;tune_steps&quot;</span><span class="p">,</span> <span class="s2">&quot;Schritte je Training&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="n">JOB_KEYS</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;trials&quot;</span><span class="p">,</span> <span class="s2">&quot;tune_every&quot;</span><span class="p">,</span> <span class="s2">&quot;tune_steps&quot;</span><span class="p">)</span>
+    <span class="n">JOB_DEFAULTS</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;trials&quot;</span><span class="p">:</span> <span class="mi">100_000</span><span class="p">,</span> <span class="s2">&quot;tune_every&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;tune_steps&quot;</span><span class="p">:</span> <span class="mi">3</span><span class="p">}</span>
+
+    <span class="n">config_changed</span> <span class="o">=</span> <span class="n">QtCore</span><span class="o">.</span><span class="n">Signal</span><span class="p">(</span><span class="nb">dict</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QWidget</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;Seeding-Parameter&quot;</span><span class="p">,</span> <span class="n">parent</span><span class="p">)</span>
+        <span class="n">form</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QFormLayout</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">neighbour</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Nachbar-Seeding&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">neighbour</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Neue Atome der Reihe nach im Bindungsabstand um jedes vorhandene Atom setzen</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                  <span class="s2">&quot;statt gleichverteilt ueber das Bild. Das erste Atom wird zufaellig gesetzt.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">neighbour</span><span class="o">.</span><span class="n">toggled</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="k">lambda</span> <span class="n">on</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">config_changed</span><span class="o">.</span><span class="n">emit</span><span class="p">({</span><span class="s2">&quot;neighbour_seeding&quot;</span><span class="p">:</span> <span class="nb">bool</span><span class="p">(</span><span class="n">on</span><span class="p">)}))</span>
+        <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">neighbour</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QCheckBox</span><span class="p">(</span><span class="s2">&quot;Gradienten-Seeding (nur STEM)&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Positionen nach der Loss-Landschaft fuers Einfuegen ziehen statt gleichverteilt.</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                 <span class="s2">&quot;Angenommen wird weiterhin nur nach der exakten lokalen Loss.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="o">.</span><span class="n">toggled</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="k">lambda</span> <span class="n">on</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">config_changed</span><span class="o">.</span><span class="n">emit</span><span class="p">({</span><span class="s2">&quot;gradient_seeding&quot;</span><span class="p">:</span> <span class="nb">bool</span><span class="p">(</span><span class="n">on</span><span class="p">)}))</span>
+        <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weights</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLineEdit</span><span class="p">(</span><span class="s2">&quot;1&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Gewichte fuer neue Atome, getrennt durch Leerzeichen (z.B. 1 0.7 0.5 0.3).</span><span class="se">\n</span><span class="s2">&quot;</span>
+                                <span class="s2">&quot;Je Einfuegen gewinnt das Gewicht mit dem besten Loss.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="o">.</span><span class="n">editingFinished</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_on_weights</span><span class="p">)</span>
+        <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="s2">&quot;Gewichte&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QAbstractSpinBox</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">label</span><span class="p">,</span> <span class="n">low</span><span class="p">,</span> <span class="n">high</span><span class="p">,</span> <span class="n">step</span><span class="p">,</span> <span class="n">decimals</span><span class="p">,</span> <span class="n">tip</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">FIELDS</span><span class="p">:</span>
+            <span class="n">spin</span> <span class="o">=</span> <span class="n">double_spin</span><span class="p">(</span><span class="n">low</span><span class="p">,</span> <span class="n">low</span><span class="p">,</span> <span class="n">high</span><span class="p">,</span> <span class="n">step</span><span class="p">,</span> <span class="n">decimals</span><span class="p">,</span> <span class="n">tip</span><span class="o">=</span><span class="n">tip</span><span class="p">)</span> <span class="k">if</span> <span class="n">decimals</span> <span class="k">else</span> <span class="n">int_spin</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">low</span><span class="p">),</span> <span class="nb">int</span><span class="p">(</span><span class="n">low</span><span class="p">),</span> <span class="nb">int</span><span class="p">(</span><span class="n">high</span><span class="p">),</span> <span class="nb">int</span><span class="p">(</span><span class="n">step</span><span class="p">),</span> <span class="n">tip</span><span class="p">)</span>
+            <span class="n">spin</span><span class="o">.</span><span class="n">valueChanged</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="k">lambda</span> <span class="n">value</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="n">key</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_on_value</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">value</span><span class="p">))</span>
+            <span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="n">label</span><span class="p">,</span> <span class="n">spin</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">spin</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">show_values</span><span class="p">(</span><span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">JOB_DEFAULTS</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_on_weights</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">values</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">({</span><span class="nb">float</span><span class="p">(</span><span class="n">t</span><span class="p">)</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="o">.</span><span class="n">text</span><span class="p">()</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">&quot;,&quot;</span><span class="p">,</span> <span class="s2">&quot; &quot;</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">()},</span> <span class="n">reverse</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+            <span class="n">values</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">if</span> <span class="n">values</span> <span class="ow">and</span> <span class="nb">all</span><span class="p">(</span><span class="mf">0.0</span> <span class="o">&lt;</span> <span class="n">v</span> <span class="o">&lt;=</span> <span class="mf">1.5</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">values</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">config_changed</span><span class="o">.</span><span class="n">emit</span><span class="p">({</span><span class="s2">&quot;weight_options&quot;</span><span class="p">:</span> <span class="n">values</span><span class="p">})</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="o">.</span><span class="n">setText</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_weights_text</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_weights</span><span class="p">))</span>
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_weights_text</span><span class="p">(</span><span class="n">values</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">w</span><span class="si">:</span><span class="s2">g</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">values</span><span class="p">)</span>
+
+    <span class="n">_weights</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mf">1.0</span><span class="p">,)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_on_value</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">JOB_KEYS</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="o">==</span> <span class="s2">&quot;max_atoms&quot;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">config_changed</span><span class="o">.</span><span class="n">emit</span><span class="p">({</span><span class="s2">&quot;max_atoms&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="ow">or</span> <span class="kc">None</span><span class="p">})</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">config_changed</span><span class="o">.</span><span class="n">emit</span><span class="p">({</span><span class="n">key</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">)})</span>
+
+<div class="viewcode-block" id="SeedingPanel.show_values">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.SeedingPanel.show_values">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">show_values</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Show a SeedConfig dictionary (and job options) without sending anything.&quot;&quot;&quot;</span>
+
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">spin</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">config</span> <span class="ow">and</span> <span class="n">config</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">set_quietly</span><span class="p">(</span><span class="n">spin</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="n">key</span><span class="p">])</span>
+            <span class="k">elif</span> <span class="n">key</span> <span class="o">==</span> <span class="s2">&quot;max_atoms&quot;</span> <span class="ow">and</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+                <span class="n">set_quietly</span><span class="p">(</span><span class="n">spin</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;neighbour_seeding&quot;</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+            <span class="n">set_quietly</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">neighbour</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="s2">&quot;neighbour_seeding&quot;</span><span class="p">])</span>
+        <span class="k">if</span> <span class="s2">&quot;gradient_seeding&quot;</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+            <span class="n">set_quietly</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="s2">&quot;gradient_seeding&quot;</span><span class="p">])</span>
+        <span class="k">if</span> <span class="s2">&quot;weight_options&quot;</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_weights</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;weight_options&quot;</span><span class="p">])</span>
+            <span class="n">set_quietly</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_weights_text</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_weights</span><span class="p">))</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">job_options</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="n">key</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">[</span><span class="n">key</span><span class="p">]</span><span class="o">.</span><span class="n">value</span><span class="p">())</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">JOB_KEYS</span><span class="p">}</span>
+
+<div class="viewcode-block" id="SeedingPanel.set_stem">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.SeedingPanel.set_stem">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_stem</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stem</span><span class="p">:</span> <span class="nb">bool</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Gradient seeding needs the STEM landscape (Part II, Section 5).&quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="o">.</span><span class="n">setEnabled</span><span class="p">(</span><span class="n">stem</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">stem</span><span class="p">:</span>
+            <span class="n">set_quietly</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="StrainPanel">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.StrainPanel">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">StrainPanel</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QGroupBox</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Control points of the displacement field, per group.&quot;&quot;&quot;</span>
+
+    <span class="n">apply_clicked</span> <span class="o">=</span> <span class="n">QtCore</span><span class="o">.</span><span class="n">Signal</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QWidget</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;Strain-Kontrollgitter&quot;</span><span class="p">,</span> <span class="n">parent</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">setToolTip</span><span class="p">(</span><span class="s2">&quot;Zahl der Kontrollpunkte je Gruppe. Beim Uebernehmen wird das vorhandene Feld interpoliert -</span><span class="se">\n</span><span class="s2">&quot;</span>
+                        <span class="s2">&quot;Verfeinern kostet fast nichts, Vergroebern verliert Struktur.&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">form</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QFormLayout</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QSpinBox</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+
+<div class="viewcode-block" id="StrainPanel.build">
+<a class="viewcode-back" href="../../part5_gui.html#temsim_gui.panels.StrainPanel.build">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">build</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">control_points</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">int</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;One row per group; the rows are rebuilt when a different run is opened.&quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">rowCount</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">removeRow</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">points</span> <span class="ow">in</span> <span class="n">control_points</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">holder</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QWidget</span><span class="p">()</span>
+            <span class="n">layout</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QHBoxLayout</span><span class="p">(</span><span class="n">holder</span><span class="p">)</span>
+            <span class="n">layout</span><span class="o">.</span><span class="n">setContentsMargins</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">spins</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">for</span> <span class="n">index</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">points</span><span class="p">):</span>
+                <span class="n">spin</span> <span class="o">=</span> <span class="n">int_spin</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">value</span><span class="p">),</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">200</span><span class="p">)</span>
+                <span class="n">layout</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">spin</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">index</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="n">layout</span><span class="o">.</span><span class="n">addWidget</span><span class="p">(</span><span class="n">QtWidgets</span><span class="o">.</span><span class="n">QLabel</span><span class="p">(</span><span class="s2">&quot;x&quot;</span><span class="p">))</span>
+                <span class="n">spins</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">spin</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">spins</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">holder</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">apply_btn</span> <span class="o">=</span> <span class="n">QtWidgets</span><span class="o">.</span><span class="n">QPushButton</span><span class="p">(</span><span class="s2">&quot;uebernehmen (interpoliert)&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">apply_btn</span><span class="o">.</span><span class="n">clicked</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">apply_clicked</span><span class="o">.</span><span class="n">emit</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">addRow</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">apply_btn</span><span class="p">)</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">values</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">value</span><span class="p">())</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">spins</span><span class="p">]</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">spins</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">spins</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span></div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../part3_data.html">Part III - Data management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../part4_service.html">Part IV - Service</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../part5_gui.html">Part V - Graphical client</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  <li><a href="../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

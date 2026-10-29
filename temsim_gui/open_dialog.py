@@ -32,6 +32,10 @@ class OpenDialog(QtWidgets.QDialog):
         self.entries: List[Dict[str, Any]] = sorted(listing.get("entries", []), key=lambda e: -e.get("mtime", 0))
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(QtWidgets.QLabel(str(listing.get("root", ""))))
+        if not self.entries:
+            layout.addWidget(QtWidgets.QLabel(
+                "Keine Eintraege. Gesucht wird bis 3 Ebenen tief nach Ordnern mit target.tif / target.tiff / target.npy "
+                "(Daten) oder experiment.json / config.json (Laeufe)."))
         self.filter = QtWidgets.QLineEdit()
         self.filter.setPlaceholderText("Filter ...")
         self.filter.textChanged.connect(self._apply_filter)

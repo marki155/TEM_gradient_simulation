@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.physics.structure &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.physics.structure</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part I, Section 4: atomic structure.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">From atoms to a density map</span>
+<span class="sd">---------------------------</span>
+<span class="sd">A layer :math:`\ell` is a set of atoms at positions :math:`\mathbf r_i`</span>
+<span class="sd">(pixel coordinates, rows first) with weights :math:`w_i`.  The projected potential</span>
+<span class="sd">of the layer is the superposition of the atomic potentials :math:`v(\mathbf r)`</span>
+<span class="sd">(Section 3),</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    V_\ell(\mathbf r) = \sum_i w_i\; v(\mathbf r - \mathbf r_i)</span>
+<span class="sd">                      = (\rho_\ell * v)(\mathbf r),</span>
+<span class="sd">    \qquad</span>
+<span class="sd">    \rho_\ell(\mathbf r) = \sum_i w_i\,\delta(\mathbf r - \mathbf r_i).</span>
+<span class="sd">    \qquad (4.1)</span>
+
+<span class="sd">On the pixel grid the density :math:`\rho_\ell` is built by **bilinear</span>
+<span class="sd">rasterisation**: an atom at :math:`(y, x)` with :math:`y = j + f_y`,</span>
+<span class="sd">:math:`x = i + f_x` (integer parts :math:`j, i`, fractions :math:`f`) deposits its</span>
+<span class="sd">weight on the four neighbouring pixels with the weights</span>
+<span class="sd">:math:`(1-f_y)(1-f_x)`, :math:`(1-f_y)f_x`, :math:`f_y(1-f_x)`, :math:`f_y f_x`.</span>
+<span class="sd">This preserves the total weight and the centre of mass exactly and makes the map</span>
+<span class="sd">differentiable with respect to the positions.  The convolution of Eq. (4.1) is a</span>
+<span class="sd">product in Fourier space,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \tilde V_\ell(\mathbf k) = \tilde\rho_\ell(\mathbf k)\,\tilde v(\mathbf k),</span>
+<span class="sd">    \qquad (4.2)</span>
+
+<span class="sd">evaluated with real FFTs (:func:`rasterise`; the convolution itself lives in</span>
+<span class="sd">:mod:`temsim.physics.multislice`).  The grid is *padded* by a margin so that atoms</span>
+<span class="sd">near the border contribute correctly to the image area; the periodicity of the FFT</span>
+<span class="sd">then wraps only vacuum around.  An atom whose rasterisation cell does not lie</span>
+<span class="sd">completely inside the padded grid is dropped.</span>
+
+<span class="sd">Atom weights</span>
+<span class="sd">------------</span>
+<span class="sd">The weight of an atom combines two continuous numbers, both of which can be</span>
+<span class="sd">optimised: the **occupancy** :math:`p_i = \sigma(o_i) \in (0,1)` (logistic of the</span>
+<span class="sd">logit :math:`o_i`; &quot;is there an atom?&quot;) and the **effective atomic number**</span>
+<span class="sd">:math:`Z_i` (&quot;which atom?&quot;).  Two interpretations of :math:`Z_i` exist.</span>
+
+<span class="sd">*Single-element layer.*  The kernel is that of the layer&#39;s element with reference</span>
+<span class="sd">number :math:`Z_i^0` (its start value), and :math:`Z_i` scales the amplitude:</span>
+
+<span class="sd">.. math:: w_i = \frac{Z_i}{Z_i^0}\; p_i. \qquad (4.3)</span>
+
+<span class="sd">At the start this is exactly :math:`p_i`; &quot;from 6 to 7&quot; means &quot;scatters like N</span>
+<span class="sd">instead of C&quot; to first order, without distorting the scale of the whole potential.</span>
+
+<span class="sd">*Mixed layer* (list of elements :math:`E_1 &lt; E_2 &lt; \dots` with atomic numbers</span>
+<span class="sd">:math:`N_1 &lt; N_2 &lt; \dots`).  Here :math:`Z_i` selects the element by piecewise</span>
+<span class="sd">linear interpolation (&quot;tent functions&quot;, partition of unity):</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    m_k(Z) = \max\Big(0,\ \min\Big(\tfrac{Z - N_{k-1}}{N_k - N_{k-1}},\</span>
+<span class="sd">              \tfrac{N_{k+1} - Z}{N_{k+1} - N_k}\Big)\Big),</span>
+<span class="sd">    \qquad \sum_k m_k(Z) = 1,</span>
+<span class="sd">    \qquad (4.4)</span>
+
+<span class="sd">and the layer is the sum of one density per element, :math:`\rho_k = \sum_i</span>
+<span class="sd">m_k(Z_i)\, p_i\,\delta(\cdot - \mathbf r_i)`, each convolved with its own kernel.</span>
+<span class="sd">The number of atoms is conserved by the partition of unity, unlike with Eq. (4.3).</span>
+<span class="sd">:math:`Z` outside :math:`[N_1, N_{\mathrm{last}}]` is clamped (gradient zero there).</span>
+
+<span class="sd">Rigid group transformation</span>
+<span class="sd">--------------------------</span>
+<span class="sd">Atoms of one group move together.  With the group shift :math:`\mathbf s`,</span>
+<span class="sd">rotation angle :math:`\theta`, and per-axis scale :math:`(s_y, s_x)`, about the</span>
+<span class="sd">centre :math:`\mathbf c = (H/2, W/2)` of the image area,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \mathbf r&#39; = \mathbf c + \mathbf s + S\,R(\theta)\,(\mathbf r - \mathbf c),</span>
+<span class="sd">    \qquad</span>
+<span class="sd">    R = \begin{pmatrix}\cos\theta &amp; -\sin\theta\\ \sin\theta &amp; \cos\theta\end{pmatrix},</span>
+<span class="sd">    \quad S = \operatorname{diag}(s_y, s_x).</span>
+<span class="sd">    \qquad (4.5)</span>
+
+<span class="sd">The smooth strain field of Section 5 is applied afterwards (:func:`transform`).</span>
+<span class="sd">Bounds on :math:`\mathbf s`, :math:`\theta`, :math:`S` are optimisation constraints</span>
+<span class="sd">and belong to Part II.</span>
+
+<span class="sd">Building initial lattices</span>
+<span class="sd">-------------------------</span>
+<span class="sd">Starting structures come from a lattice recipe (:class:`~temsim.data.schema.LatticeSpec`):</span>
+<span class="sd">a 2D cell with vectors :math:`\mathbf a_1 = a(1, 0)`,</span>
+<span class="sd">:math:`\mathbf a_2 = b(\cos\gamma, \sin\gamma)` and a basis of</span>
+<span class="sd">``(element, f_1, f_2, z)``; atom positions are</span>
+<span class="sd">:math:`\mathbf R_{mn} + f_1\mathbf a_1 + f_2\mathbf a_2` for all lattice points</span>
+<span class="sd">:math:`\mathbf R_{mn} = m\mathbf a_1 + n\mathbf a_2` covering the image (plus a</span>
+<span class="sd">margin that allows for shifts and rotation of the group), rotated about the image</span>
+<span class="sd">centre and shifted by an offset.  Basis atoms with equal height (within 0.01 nm)</span>
+<span class="sd">form one layer.  Types: ``graphene`` (two C atoms, hexagonal),</span>
+<span class="sd">``mx2`` (2H dichalcogenide from ``ase.build.mx2``, three layers), ``custom``</span>
+<span class="sd">(explicit basis) and ``file`` (any ASE-readable structure, sliced by height).</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">..data.schema</span><span class="w"> </span><span class="kn">import</span> <span class="n">LatticeSpec</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">strain</span> <span class="k">as</span> <span class="n">strain_module</span>
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Atoms of one layer</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+
+<div class="viewcode-block" id="AtomLayer">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.AtomLayer">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">AtomLayer</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The physical content of one slice: positions and weights as torch tensors.</span>
+
+<span class="sd">    ``positions`` are the *effective* positions in the unpadded pixel frame</span>
+<span class="sd">    (after shifts, group transformation, strain).  ``weights`` already contain</span>
+<span class="sd">    occupancy (and, for single-element layers, the relative atomic number,</span>
+<span class="sd">    Eq. 4.3).  For mixed layers ``atomic_number`` holds :math:`Z_i` and</span>
+<span class="sd">    ``weights`` the occupancy only.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">z_nm</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">element</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">positions</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span>
+    <span class="n">weights</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span>
+    <span class="n">elements</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span>
+    <span class="n">atomic_number</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">debye_waller_u_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="c1">#: factor multiplying the layer&#39;s potential (the group&#39;s Stobbs factor)</span>
+    <span class="n">contrast</span><span class="p">:</span> <span class="nb">object</span> <span class="o">=</span> <span class="mf">1.0</span>
+    <span class="c1">#: False -&gt; the slice is skipped (e.g. an isolated group)</span>
+    <span class="n">active</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">mixed</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">elements</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span></div>
+
+
+
+<span class="n">ATOMIC_NUMBERS</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">atomic_number_of</span><span class="p">(</span><span class="n">symbol</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">ATOMIC_NUMBERS</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">ase.data</span><span class="w"> </span><span class="kn">import</span> <span class="n">atomic_numbers</span>
+        <span class="n">ATOMIC_NUMBERS</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">atomic_numbers</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">symbol</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ATOMIC_NUMBERS</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">KeyError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown element &#39;</span><span class="si">{</span><span class="n">symbol</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ATOMIC_NUMBERS</span><span class="p">[</span><span class="n">symbol</span><span class="p">]</span>
+
+
+<div class="viewcode-block" id="sorted_elements">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.sorted_elements">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">sorted_elements</span><span class="p">(</span><span class="n">layer_element</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">elements</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Elements of a mixed layer sorted by atomic number (``[layer_element]`` if not mixed).&quot;&quot;&quot;</span>
+
+    <span class="n">symbols</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">elements</span> <span class="ow">or</span> <span class="p">[])</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">symbols</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">layer_element</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">layer_element</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">symbols</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;element </span><span class="si">{</span><span class="n">layer_element</span><span class="si">!r}</span><span class="s2"> must be in elements=</span><span class="si">{</span><span class="n">symbols</span><span class="si">}</span><span class="s2"> &quot;</span>
+                         <span class="sa">f</span><span class="s2">&quot;(it provides the start value of the atomic numbers)&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">symbols</span><span class="p">),</span> <span class="n">key</span><span class="o">=</span><span class="n">atomic_number_of</span><span class="p">)</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># weights</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="mixture_shares">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.mixture_shares">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">mixture_shares</span><span class="p">(</span><span class="n">atomic_number</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">nodes</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (4.4): shares of the elements with atomic numbers ``nodes`` (ascending).&quot;&quot;&quot;</span>
+
+    <span class="n">nodes_t</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">n</span><span class="p">)</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">nodes</span><span class="p">]</span>
+    <span class="n">z</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">clamp</span><span class="p">(</span><span class="n">atomic_number</span><span class="p">,</span> <span class="n">nodes_t</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">nodes_t</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+    <span class="n">shares</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">nodes_t</span><span class="p">):</span>
+        <span class="n">left</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">z</span><span class="p">)</span> <span class="k">if</span> <span class="n">k</span> <span class="o">==</span> <span class="mi">0</span> <span class="k">else</span> <span class="p">(</span><span class="n">z</span> <span class="o">-</span> <span class="n">nodes_t</span><span class="p">[</span><span class="n">k</span> <span class="o">-</span> <span class="mi">1</span><span class="p">])</span> <span class="o">/</span> <span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="n">nodes_t</span><span class="p">[</span><span class="n">k</span> <span class="o">-</span> <span class="mi">1</span><span class="p">])</span>
+        <span class="n">right</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">z</span><span class="p">)</span> <span class="k">if</span> <span class="n">k</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">nodes_t</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span> <span class="k">else</span> <span class="p">(</span><span class="n">nodes_t</span><span class="p">[</span><span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">z</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">nodes_t</span><span class="p">[</span><span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">n</span><span class="p">)</span>
+        <span class="n">shares</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">clamp</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">minimum</span><span class="p">(</span><span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">),</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">shares</span></div>
+
+
+
+<div class="viewcode-block" id="relative_weights">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.relative_weights">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">relative_weights</span><span class="p">(</span><span class="n">atomic_number</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">reference</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">occupancy</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (4.3).&quot;&quot;&quot;</span>
+
+    <span class="k">return</span> <span class="n">atomic_number</span> <span class="o">/</span> <span class="n">reference</span> <span class="o">*</span> <span class="n">occupancy</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># geometry</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="transform">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.transform">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">transform</span><span class="p">(</span><span class="n">points</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">shape</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">],</span> <span class="n">shift</span><span class="p">,</span> <span class="n">rotation</span><span class="p">,</span> <span class="n">scale</span><span class="p">,</span>
+              <span class="n">strain_control</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (4.5) followed by the strain displacement of Eq. (5.1).&quot;&quot;&quot;</span>
+
+    <span class="n">centre</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">((</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">,</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">points</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">points</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+    <span class="n">rel</span> <span class="o">=</span> <span class="n">points</span> <span class="o">-</span> <span class="n">centre</span>
+    <span class="n">cos</span><span class="p">,</span> <span class="n">sin</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">rotation</span><span class="p">),</span> <span class="n">torch</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">rotation</span><span class="p">)</span>
+    <span class="n">rotated</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">cos</span> <span class="o">*</span> <span class="n">rel</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">sin</span> <span class="o">*</span> <span class="n">rel</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">],</span>
+                           <span class="n">sin</span> <span class="o">*</span> <span class="n">rel</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">cos</span> <span class="o">*</span> <span class="n">rel</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">rotated</span> <span class="o">*</span> <span class="n">scale</span> <span class="o">+</span> <span class="n">centre</span> <span class="o">+</span> <span class="n">shift</span>
+    <span class="k">if</span> <span class="n">strain_control</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">strain_module</span><span class="o">.</span><span class="n">displace</span><span class="p">(</span><span class="n">strain_control</span><span class="p">,</span> <span class="n">out</span><span class="p">,</span> <span class="n">shape</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">out</span></div>
+
+
+
+<div class="viewcode-block" id="rasterise">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.rasterise">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">rasterise</span><span class="p">(</span><span class="n">positions</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">weights</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">shape</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">],</span> <span class="n">padding</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Bilinear deposition of weighted points on the padded grid, shape ``(H + 2p, W + 2p)``.&quot;&quot;&quot;</span>
+
+    <span class="n">Hp</span><span class="p">,</span> <span class="n">Wp</span> <span class="o">=</span> <span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">padding</span><span class="p">,</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">padding</span>
+    <span class="n">rho</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">Hp</span><span class="p">,</span> <span class="n">Wp</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">positions</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">padding</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="n">padding</span>
+    <span class="n">keep</span> <span class="o">=</span> <span class="p">(</span><span class="n">y</span> <span class="o">&gt;=</span> <span class="mf">0.0</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">y</span> <span class="o">&lt;</span> <span class="n">Hp</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">x</span> <span class="o">&gt;=</span> <span class="mf">0.0</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">x</span> <span class="o">&lt;</span> <span class="n">Wp</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">y</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">w</span> <span class="o">=</span> <span class="n">y</span><span class="p">[</span><span class="n">keep</span><span class="p">],</span> <span class="n">x</span><span class="p">[</span><span class="n">keep</span><span class="p">],</span> <span class="n">weights</span><span class="p">[</span><span class="n">keep</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">y</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">rho</span>
+    <span class="n">iy</span><span class="p">,</span> <span class="n">ix</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">long</span><span class="p">(),</span> <span class="n">torch</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="o">.</span><span class="n">long</span><span class="p">()</span>
+    <span class="n">fy</span><span class="p">,</span> <span class="n">fx</span> <span class="o">=</span> <span class="n">y</span> <span class="o">-</span> <span class="n">iy</span><span class="p">,</span> <span class="n">x</span> <span class="o">-</span> <span class="n">ix</span>
+    <span class="n">rho</span><span class="o">.</span><span class="n">index_put_</span><span class="p">((</span><span class="n">iy</span><span class="p">,</span> <span class="n">ix</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">fy</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">fx</span><span class="p">)</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span> <span class="n">accumulate</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">rho</span><span class="o">.</span><span class="n">index_put_</span><span class="p">((</span><span class="n">iy</span><span class="p">,</span> <span class="n">ix</span> <span class="o">+</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">fy</span><span class="p">)</span> <span class="o">*</span> <span class="n">fx</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span> <span class="n">accumulate</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">rho</span><span class="o">.</span><span class="n">index_put_</span><span class="p">((</span><span class="n">iy</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">ix</span><span class="p">),</span> <span class="n">fy</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">fx</span><span class="p">)</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span> <span class="n">accumulate</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">rho</span><span class="o">.</span><span class="n">index_put_</span><span class="p">((</span><span class="n">iy</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">ix</span> <span class="o">+</span> <span class="mi">1</span><span class="p">),</span> <span class="n">fy</span> <span class="o">*</span> <span class="n">fx</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span> <span class="n">accumulate</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">rho</span></div>
+
+
+
+<div class="viewcode-block" id="element_densities">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.element_densities">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">element_densities</span><span class="p">(</span><span class="n">layer</span><span class="p">:</span> <span class="n">AtomLayer</span><span class="p">,</span> <span class="n">shape</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">],</span> <span class="n">padding</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Density maps per element of one layer (Eq. 4.1/4.4); one map unless the layer is mixed.&quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">layer</span><span class="o">.</span><span class="n">mixed</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">{</span><span class="n">layer</span><span class="o">.</span><span class="n">element</span><span class="p">:</span> <span class="n">rasterise</span><span class="p">(</span><span class="n">layer</span><span class="o">.</span><span class="n">positions</span><span class="p">,</span> <span class="n">layer</span><span class="o">.</span><span class="n">weights</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">)}</span>
+    <span class="n">nodes</span> <span class="o">=</span> <span class="p">[</span><span class="n">atomic_number_of</span><span class="p">(</span><span class="n">e</span><span class="p">)</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">layer</span><span class="o">.</span><span class="n">elements</span><span class="p">]</span>
+    <span class="n">shares</span> <span class="o">=</span> <span class="n">mixture_shares</span><span class="p">(</span><span class="n">layer</span><span class="o">.</span><span class="n">atomic_number</span><span class="p">,</span> <span class="n">nodes</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span><span class="n">e</span><span class="p">:</span> <span class="n">rasterise</span><span class="p">(</span><span class="n">layer</span><span class="o">.</span><span class="n">positions</span><span class="p">,</span> <span class="n">share</span> <span class="o">*</span> <span class="n">layer</span><span class="o">.</span><span class="n">weights</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">e</span><span class="p">,</span> <span class="n">share</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">layer</span><span class="o">.</span><span class="n">elements</span><span class="p">,</span> <span class="n">shares</span><span class="p">)}</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># lattices</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="n">LATTICE_TYPES</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;graphene&quot;</span><span class="p">,</span> <span class="s2">&quot;mx2&quot;</span><span class="p">,</span> <span class="s2">&quot;custom&quot;</span><span class="p">,</span> <span class="s2">&quot;file&quot;</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="LatticeLayer">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.LatticeLayer">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">LatticeLayer</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;One slice of a built lattice.&quot;&quot;&quot;</span>
+
+    <span class="n">z_nm</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">positions</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>                    <span class="c1"># (n, 2) pixels, [row, column]</span>
+    <span class="n">elements</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">list</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="lattice_vectors">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.lattice_vectors">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">lattice_vectors</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span> <span class="n">gamma_deg</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Rows are :math:`\\mathbf a_1, \\mathbf a_2` in Angstrom.&quot;&quot;&quot;</span>
+
+    <span class="n">b</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">b</span><span class="p">)</span> <span class="k">if</span> <span class="n">b</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+    <span class="n">g</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">radians</span><span class="p">(</span><span class="n">gamma_deg</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="nb">float</span><span class="p">(</span><span class="n">a</span><span class="p">),</span> <span class="mf">0.0</span><span class="p">],</span> <span class="p">[</span><span class="n">b</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">g</span><span class="p">),</span> <span class="n">b</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">g</span><span class="p">)]])</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_mx2_basis</span><span class="p">(</span><span class="n">formula</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">ase.build</span>
+
+    <span class="n">atoms</span> <span class="o">=</span> <span class="n">ase</span><span class="o">.</span><span class="n">build</span><span class="o">.</span><span class="n">mx2</span><span class="p">(</span><span class="n">formula</span><span class="o">=</span><span class="n">formula</span><span class="p">,</span> <span class="n">vacuum</span><span class="o">=</span><span class="mf">1.0</span><span class="p">)</span>
+    <span class="n">positions</span> <span class="o">=</span> <span class="n">atoms</span><span class="o">.</span><span class="n">get_positions</span><span class="p">()</span>
+    <span class="n">z</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span> <span class="o">-</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span><span class="o">.</span><span class="n">min</span><span class="p">()</span>
+    <span class="n">scaled</span> <span class="o">=</span> <span class="n">atoms</span><span class="o">.</span><span class="n">get_scaled_positions</span><span class="p">()</span>
+    <span class="n">basis</span> <span class="o">=</span> <span class="p">[(</span><span class="n">atoms</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">symbol</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">scaled</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="mi">0</span><span class="p">]),</span> <span class="nb">float</span><span class="p">(</span><span class="n">scaled</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="mi">1</span><span class="p">]),</span> <span class="nb">float</span><span class="p">(</span><span class="n">z</span><span class="p">[</span><span class="n">i</span><span class="p">])</span> <span class="o">/</span> <span class="mf">10.0</span><span class="p">)</span>
+             <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">atoms</span><span class="p">))]</span>
+    <span class="k">return</span> <span class="n">basis</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">atoms</span><span class="o">.</span><span class="n">cell</span><span class="o">.</span><span class="n">lengths</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span>
+
+
+<div class="viewcode-block" id="resolve_basis">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.resolve_basis">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">resolve_basis</span><span class="p">(</span><span class="n">spec</span><span class="p">:</span> <span class="n">LatticeSpec</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Basis ``(element, f1, f2, z_nm)`` and lattice constant.  An explicit basis always wins.&quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">basis</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span><span class="nb">tuple</span><span class="p">(</span><span class="n">entry</span><span class="p">)</span> <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">spec</span><span class="o">.</span><span class="n">basis</span><span class="p">],</span> <span class="n">spec</span><span class="o">.</span><span class="n">a</span>
+    <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;graphene&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[(</span><span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span> <span class="p">(</span><span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="mf">3.0</span><span class="p">,</span> <span class="mf">2.0</span> <span class="o">/</span> <span class="mf">3.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)],</span> <span class="n">spec</span><span class="o">.</span><span class="n">a</span> <span class="ow">or</span> <span class="mf">2.46</span>
+    <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;mx2&quot;</span><span class="p">:</span>
+        <span class="n">basis</span><span class="p">,</span> <span class="n">a</span> <span class="o">=</span> <span class="n">_mx2_basis</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">formula</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">basis</span><span class="p">,</span> <span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">a</span> <span class="ow">or</span> <span class="n">a</span><span class="p">)</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;lattice type </span><span class="si">{</span><span class="n">spec</span><span class="o">.</span><span class="n">type</span><span class="si">!r}</span><span class="s2"> needs a basis&quot;</span><span class="p">)</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">layers_from_basis</span><span class="p">(</span><span class="n">basis</span><span class="p">,</span> <span class="n">tolerance_nm</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.01</span><span class="p">):</span>
+    <span class="n">order</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">basis</span><span class="p">)),</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="n">basis</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="mi">3</span><span class="p">])</span>
+    <span class="n">layers</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">order</span><span class="p">:</span>
+        <span class="n">symbol</span><span class="p">,</span> <span class="n">fa</span><span class="p">,</span> <span class="n">fb</span><span class="p">,</span> <span class="n">z</span> <span class="o">=</span> <span class="n">basis</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">layers</span> <span class="ow">and</span> <span class="nb">abs</span><span class="p">(</span><span class="n">layers</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">][</span><span class="s2">&quot;z_nm&quot;</span><span class="p">]</span> <span class="o">-</span> <span class="n">z</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">tolerance_nm</span><span class="p">:</span>
+            <span class="n">layers</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">][</span><span class="s2">&quot;atoms&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">symbol</span><span class="p">,</span> <span class="n">fa</span><span class="p">,</span> <span class="n">fb</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;z_nm&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">z</span><span class="p">),</span> <span class="s2">&quot;atoms&quot;</span><span class="p">:</span> <span class="p">[(</span><span class="n">symbol</span><span class="p">,</span> <span class="n">fa</span><span class="p">,</span> <span class="n">fb</span><span class="p">)]})</span>
+    <span class="k">return</span> <span class="n">layers</span>
+
+
+<div class="viewcode-block" id="canvas_size_px">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.canvas_size_px">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">canvas_size_px</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">max_shift_px</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">max_rotation_deg</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">factor</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.2</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Size the lattice must have to cover the image after the allowed shift and rotation.&quot;&quot;&quot;</span>
+
+    <span class="n">H</span><span class="p">,</span> <span class="n">W</span> <span class="o">=</span> <span class="n">shape</span>
+    <span class="n">rot</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">radians</span><span class="p">(</span><span class="nb">abs</span><span class="p">(</span><span class="n">max_rotation_deg</span><span class="p">))</span>
+    <span class="k">return</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">rot</span><span class="p">)</span> <span class="o">*</span> <span class="n">H</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">rot</span><span class="p">)</span> <span class="o">*</span> <span class="n">W</span> <span class="o">+</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">factor</span> <span class="o">*</span> <span class="n">max_shift_px</span><span class="p">)),</span>
+            <span class="nb">int</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">rot</span><span class="p">)</span> <span class="o">*</span> <span class="n">W</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">rot</span><span class="p">)</span> <span class="o">*</span> <span class="n">H</span> <span class="o">+</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">factor</span> <span class="o">*</span> <span class="n">max_shift_px</span><span class="p">)))</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_rotation_matrix</span><span class="p">(</span><span class="n">deg</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+    <span class="n">t</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">radians</span><span class="p">(</span><span class="n">deg</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">t</span><span class="p">),</span> <span class="o">-</span><span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">t</span><span class="p">)],</span> <span class="p">[</span><span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">t</span><span class="p">),</span> <span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">t</span><span class="p">)]])</span>
+
+
+<div class="viewcode-block" id="build_lattice">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.structure.build_lattice">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">build_lattice</span><span class="p">(</span><span class="n">spec</span><span class="p">:</span> <span class="n">LatticeSpec</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">pixel_size_nm</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">max_shift_px</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span>
+                  <span class="n">max_rotation_deg</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">LatticeLayer</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Initial atoms per layer in pixel coordinates (see module docstring).&quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;file&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">_build_from_file</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">pixel_size_nm</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">type</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">LATTICE_TYPES</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown lattice type </span><span class="si">{</span><span class="n">spec</span><span class="o">.</span><span class="n">type</span><span class="si">!r}</span><span class="s2">, choose from </span><span class="si">{</span><span class="n">LATTICE_TYPES</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="n">basis</span><span class="p">,</span> <span class="n">a</span> <span class="o">=</span> <span class="n">resolve_basis</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span>
+    <span class="n">pixel_A</span> <span class="o">=</span> <span class="n">pixel_size_nm</span> <span class="o">*</span> <span class="mf">10.0</span>
+    <span class="n">canvas_h</span><span class="p">,</span> <span class="n">canvas_w</span> <span class="o">=</span> <span class="n">canvas_size_px</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">max_shift_px</span><span class="p">,</span> <span class="n">max_rotation_deg</span><span class="p">)</span>
+    <span class="n">vectors_px</span> <span class="o">=</span> <span class="n">lattice_vectors</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">b</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">gamma_deg</span><span class="p">)</span> <span class="o">/</span> <span class="n">pixel_A</span>
+
+    <span class="n">reach</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="mf">1.5</span> <span class="o">*</span> <span class="nb">max</span><span class="p">(</span><span class="n">canvas_h</span><span class="p">,</span> <span class="n">canvas_w</span><span class="p">)</span> <span class="o">/</span> <span class="nb">max</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">vectors_px</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">min</span><span class="p">(),</span> <span class="mf">1e-6</span><span class="p">)))</span>
+    <span class="n">grid</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="o">-</span><span class="n">reach</span><span class="p">,</span> <span class="n">reach</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">ii</span><span class="p">,</span> <span class="n">jj</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">meshgrid</span><span class="p">(</span><span class="n">grid</span><span class="p">,</span> <span class="n">grid</span><span class="p">,</span> <span class="n">indexing</span><span class="o">=</span><span class="s2">&quot;ij&quot;</span><span class="p">)</span>
+    <span class="n">cells</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">ii</span><span class="o">.</span><span class="n">ravel</span><span class="p">(),</span> <span class="n">jj</span><span class="o">.</span><span class="n">ravel</span><span class="p">()],</span> <span class="n">axis</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+    <span class="n">rotation</span> <span class="o">=</span> <span class="n">_rotation_matrix</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">rotation_deg</span><span class="p">)</span>
+    <span class="n">centre</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">,</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">])</span>
+    <span class="n">offset</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">offset_px</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+    <span class="n">margin</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([(</span><span class="n">canvas_h</span> <span class="o">-</span> <span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">,</span> <span class="p">(</span><span class="n">canvas_w</span> <span class="o">-</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">])</span>
+
+    <span class="n">out</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">layers_from_basis</span><span class="p">(</span><span class="n">basis</span><span class="p">):</span>
+        <span class="n">positions</span><span class="p">,</span> <span class="n">elements</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">symbol</span><span class="p">,</span> <span class="n">fa</span><span class="p">,</span> <span class="n">fb</span> <span class="ow">in</span> <span class="n">layer</span><span class="p">[</span><span class="s2">&quot;atoms&quot;</span><span class="p">]:</span>
+            <span class="n">xy</span> <span class="o">=</span> <span class="n">cells</span> <span class="o">@</span> <span class="n">vectors_px</span> <span class="o">+</span> <span class="p">(</span><span class="n">fa</span> <span class="o">*</span> <span class="n">vectors_px</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">fb</span> <span class="o">*</span> <span class="n">vectors_px</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+            <span class="n">positions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">xy</span> <span class="o">@</span> <span class="n">rotation</span><span class="o">.</span><span class="n">T</span> <span class="o">+</span> <span class="n">centre</span> <span class="o">+</span> <span class="n">offset</span><span class="p">)</span>
+            <span class="n">elements</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="n">symbol</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">xy</span><span class="p">))</span>
+        <span class="n">positions</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span><span class="n">positions</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">inside</span> <span class="o">=</span> <span class="p">((</span><span class="n">positions</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="o">-</span><span class="n">margin</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">positions</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">margin</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">&amp;</span>
+                  <span class="p">(</span><span class="n">positions</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="o">-</span><span class="n">margin</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">positions</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="n">margin</span><span class="p">[</span><span class="mi">1</span><span class="p">]))</span>
+        <span class="n">out</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">LatticeLayer</span><span class="p">(</span><span class="n">z_nm</span><span class="o">=</span><span class="n">layer</span><span class="p">[</span><span class="s2">&quot;z_nm&quot;</span><span class="p">]</span> <span class="o">+</span> <span class="n">spec</span><span class="o">.</span><span class="n">z_offset_nm</span><span class="p">,</span> <span class="n">positions</span><span class="o">=</span><span class="n">positions</span><span class="p">[</span><span class="n">inside</span><span class="p">],</span>
+                                <span class="n">elements</span><span class="o">=</span><span class="p">[</span><span class="n">e</span> <span class="k">for</span> <span class="n">e</span><span class="p">,</span> <span class="n">keep</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">elements</span><span class="p">,</span> <span class="n">inside</span><span class="p">)</span> <span class="k">if</span> <span class="n">keep</span><span class="p">]))</span>
+    <span class="k">return</span> <span class="n">out</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_build_from_file</span><span class="p">(</span><span class="n">spec</span><span class="p">:</span> <span class="n">LatticeSpec</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">pixel_size_nm</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">LatticeLayer</span><span class="p">]:</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">ase.io</span>
+
+    <span class="n">atoms</span> <span class="o">=</span> <span class="n">ase</span><span class="o">.</span><span class="n">io</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">file</span><span class="p">)</span>
+    <span class="n">pixel_A</span> <span class="o">=</span> <span class="n">pixel_size_nm</span> <span class="o">*</span> <span class="mf">10.0</span>
+    <span class="n">positions</span> <span class="o">=</span> <span class="n">atoms</span><span class="o">.</span><span class="n">get_positions</span><span class="p">()</span>
+    <span class="n">symbols</span> <span class="o">=</span> <span class="n">atoms</span><span class="o">.</span><span class="n">get_chemical_symbols</span><span class="p">()</span>
+    <span class="n">z</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span> <span class="o">-</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span><span class="o">.</span><span class="n">min</span><span class="p">()</span>
+    <span class="n">xy</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="p">:</span><span class="mi">2</span><span class="p">]</span> <span class="o">/</span> <span class="n">pixel_A</span>
+    <span class="n">centre</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">,</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="mf">2.0</span><span class="p">])</span>
+    <span class="n">xy</span> <span class="o">=</span> <span class="p">(</span><span class="n">xy</span> <span class="o">-</span> <span class="n">xy</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">))</span> <span class="o">@</span> <span class="n">_rotation_matrix</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">rotation_deg</span><span class="p">)</span><span class="o">.</span><span class="n">T</span> <span class="o">+</span> <span class="n">centre</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">offset_px</span><span class="p">)</span>
+    <span class="n">layers</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">round</span><span class="p">(</span><span class="n">z</span><span class="p">,</span> <span class="mi">2</span><span class="p">))):</span>
+        <span class="n">mask</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">round</span><span class="p">(</span><span class="n">z</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span> <span class="o">-</span> <span class="n">value</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mf">1e-9</span>
+        <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">LatticeLayer</span><span class="p">(</span><span class="n">z_nm</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">/</span> <span class="mf">10.0</span><span class="p">,</span> <span class="n">positions</span><span class="o">=</span><span class="n">xy</span><span class="p">[</span><span class="n">mask</span><span class="p">],</span>
+                                   <span class="n">elements</span><span class="o">=</span><span class="p">[</span><span class="n">symbols</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">mask</span><span class="p">)[</span><span class="mi">0</span><span class="p">]]))</span>
+    <span class="k">return</span> <span class="n">layers</span>
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

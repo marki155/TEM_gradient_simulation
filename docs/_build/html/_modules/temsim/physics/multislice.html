@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.physics.multislice &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.physics.multislice</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part I, Section 6: the multislice method.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">Wave equation in the specimen</span>
+<span class="sd">-----------------------------</span>
+<span class="sd">A fast electron with wave function :math:`\Psi(\mathbf r, z)` travelling along</span>
+<span class="sd">:math:`z` obeys, after separating the fast phase :math:`\mathrm e^{2\pi \mathrm i z/\lambda}`</span>
+<span class="sd">and neglecting backscattering (the paraxial / high-energy approximation),</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \frac{\partial\psi}{\partial z} = \frac{\mathrm i\lambda}{4\pi}\nabla_\perp^2\psi</span>
+<span class="sd">        + \mathrm i\sigma\,V(\mathbf r, z)\,\psi,</span>
+<span class="sd">    \qquad (6.1)</span>
+
+<span class="sd">with the interaction parameter :math:`\sigma` of Eq. (2.3) and the potential</span>
+<span class="sd">:math:`V` in volts.  The first term is diffraction (free propagation), the second</span>
+<span class="sd">scattering by the specimen.</span>
+
+<span class="sd">Splitting the operators</span>
+<span class="sd">-----------------------</span>
+<span class="sd">Cutting the specimen into slices of thickness :math:`\Delta z_j` and treating the</span>
+<span class="sd">two terms of Eq. (6.1) alternately (a first-order operator splitting; Cowley and</span>
+<span class="sd">Moodie) gives for slice :math:`j`</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \psi_{j}^{+} = t_j\,\psi_j, \qquad</span>
+<span class="sd">    t_j(\mathbf r) = \exp\!\big(\mathrm i\sigma V^{\mathrm{proj}}_j(\mathbf r)\big)</span>
+<span class="sd">    \qquad (6.2)</span>
+
+<span class="sd">(the *phase grating*, :math:`V^{\mathrm{proj}}_j = \int V\,dz` over the slice)</span>
+<span class="sd">followed by free propagation over the distance :math:`\Delta z` to the next slice,</span>
+<span class="sd">which is a multiplication in Fourier space,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \tilde\psi_{j+1}(\mathbf k) = P(\mathbf k;\Delta z)\,\tilde\psi_j^{+}(\mathbf k),</span>
+<span class="sd">    \qquad</span>
+<span class="sd">    P(\mathbf k;\Delta z) = \exp\!\big(-\mathrm i\pi\lambda\,\Delta z\,|\mathbf k|^2\big).</span>
+<span class="sd">    \qquad (6.3)</span>
+
+<span class="sd">Eq. (6.3) is the paraxial (Fresnel) propagator.  Propagators compose,</span>
+<span class="sd">:math:`P(\Delta z_1)P(\Delta z_2) = P(\Delta z_1+\Delta z_2)`; therefore empty</span>
+<span class="sd">slices need not be visited and the remaining path to the end of the stack is a</span>
+<span class="sd">single propagation (:func:`exit_wave`).</span>
+
+<span class="sd">Slice order</span>
+<span class="sd">-----------</span>
+<span class="sd">Each layer carries its own height :math:`z_\ell`.  The beam passes the layers in</span>
+<span class="sd">ascending :math:`z` for ``beam_direction = &quot;+z&quot;`` and in descending :math:`z` for</span>
+<span class="sd">``&quot;-z&quot;``; the propagation distance between two layers is the difference of their</span>
+<span class="sd">own heights (never the distance on the other side).  The exit plane is at the</span>
+<span class="sd">height of the last layer in beam direction.</span>
+
+<span class="sd">Sampling and aliasing (band limit)</span>
+<span class="sd">----------------------------------</span>
+<span class="sd">On a grid of spacing :math:`\Delta x` the highest representable frequency is</span>
+<span class="sd">:math:`k_N = 1/(2\Delta x)`.  The transmission function :math:`\exp(\mathrm i\sigma V)`</span>
+<span class="sd">contains harmonics of all orders of the atomic potential; the product with the</span>
+<span class="sd">wave folds frequencies above :math:`k_N` back into the band (aliasing).  The</span>
+<span class="sd">standard remedy is to restrict the wave to :math:`|\mathbf k| \le \tfrac23 k_N`</span>
+<span class="sd">after every transmission (Kirkland, ch. 6): then the products of two band-limited</span>
+<span class="sd">waves fit into the grid again.  This is done by setting the propagator to zero</span>
+<span class="sd">outside the disk,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    P_{\mathrm{bl}}(\mathbf k) = P(\mathbf k)\;\Theta\big(f\,k_N - |\mathbf k|\big),</span>
+<span class="sd">    \qquad f = \tfrac23.</span>
+<span class="sd">    \qquad (6.4)</span>
+
+<span class="sd">``band_limit = 0`` switches the limit off (the behaviour of all earlier versions,</span>
+<span class="sd">and the setting used when legacy files are loaded).  Honest remark: for the</span>
+<span class="sd">sparse, weakly scattering specimens of this project the numerical gain could not</span>
+<span class="sd">be demonstrated against a much finer reference (differences stay at the</span>
+<span class="sd">:math:`10^{-3}` level with or without the limit); the limit is kept as the</span>
+<span class="sd">textbook default because it guarantees an alias-free wave for strongly scattering</span>
+<span class="sd">or coarsely sampled specimens, and costs nothing inside the retained band.</span>
+
+<span class="sd">Projected potential of a slice</span>
+<span class="sd">------------------------------</span>
+<span class="sd">The potential of a slice is the convolution of the atom density with the atomic</span>
+<span class="sd">kernel, Eq. (4.2).  Elements of mixed layers add; a constant offset is removed</span>
+<span class="sd">(the median, a global phase that does not influence intensities but keeps the</span>
+<span class="sd">numbers small), and the result is scaled by the group&#39;s contrast factor</span>
+<span class="sd">:math:`c_g`:</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    V^{\mathrm{proj}}_\ell = c_{g(\ell)}\Big[\sum_e \rho_{\ell,e} * v_e</span>
+<span class="sd">    - \operatorname{median}\Big(\sum_e \rho_{\ell,e} * v_e\Big)\Big].</span>
+<span class="sd">    \qquad (6.5)</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">electron</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.scattering</span><span class="w"> </span><span class="kn">import</span> <span class="n">KernelBank</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.structure</span><span class="w"> </span><span class="kn">import</span> <span class="n">AtomLayer</span><span class="p">,</span> <span class="n">element_densities</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># potential of one slice</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="slice_potential">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.multislice.slice_potential">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">slice_potential</span><span class="p">(</span><span class="n">layer</span><span class="p">:</span> <span class="n">AtomLayer</span><span class="p">,</span> <span class="n">bank</span><span class="p">:</span> <span class="n">KernelBank</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+                    <span class="n">subtract_median</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (6.5) on the padded grid, in V nm (float32).&quot;&quot;&quot;</span>
+
+    <span class="n">densities</span> <span class="o">=</span> <span class="n">element_densities</span><span class="p">(</span><span class="n">layer</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">)</span>
+    <span class="n">u_nm</span> <span class="o">=</span> <span class="n">layer</span><span class="o">.</span><span class="n">debye_waller_u_A</span> <span class="o">*</span> <span class="mf">0.1</span>
+    <span class="n">spectrum</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">for</span> <span class="n">symbol</span><span class="p">,</span> <span class="n">rho</span> <span class="ow">in</span> <span class="n">densities</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">part</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">rho</span><span class="p">)</span> <span class="o">*</span> <span class="n">bank</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="n">symbol</span><span class="p">,</span> <span class="n">u_nm</span><span class="p">)</span>
+        <span class="n">spectrum</span> <span class="o">=</span> <span class="n">part</span> <span class="k">if</span> <span class="n">spectrum</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">spectrum</span> <span class="o">+</span> <span class="n">part</span>
+    <span class="n">potential</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">irfft2</span><span class="p">(</span><span class="n">spectrum</span><span class="p">,</span> <span class="n">s</span><span class="o">=</span><span class="n">rho</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">subtract_median</span><span class="p">:</span>
+        <span class="n">potential</span> <span class="o">=</span> <span class="n">potential</span> <span class="o">-</span> <span class="n">potential</span><span class="o">.</span><span class="n">median</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">potential</span> <span class="o">*</span> <span class="n">layer</span><span class="o">.</span><span class="n">contrast</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># propagation</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="Multislice">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.multislice.Multislice">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Multislice</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Phase grating + Fresnel propagation on a fixed padded grid.</span>
+
+<span class="sd">    ``shape`` is the *padded* grid.  Propagators are cached per distance.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">pixel_size_nm</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">voltage_kV</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">band_limit</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">/</span> <span class="mf">3.0</span><span class="p">,</span>
+                 <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cpu&quot;</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">shape</span> <span class="o">=</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pixel_size_nm</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">pixel_size_nm</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">voltage_kV</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">voltage_kV</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">band_limit</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">band_limit</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">device</span> <span class="o">=</span> <span class="n">device</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">wavelength_nm</span> <span class="o">=</span> <span class="n">electron</span><span class="o">.</span><span class="n">wavelength_nm</span><span class="p">(</span><span class="n">voltage_kV</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sigma</span> <span class="o">=</span> <span class="n">electron</span><span class="o">.</span><span class="n">interaction_parameter</span><span class="p">(</span><span class="n">voltage_kV</span><span class="p">)</span>
+        <span class="n">fr</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftfreq</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">d</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">pixel_size_nm</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+        <span class="n">fc</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftfreq</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">d</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">pixel_size_nm</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+        <span class="n">kr</span><span class="p">,</span> <span class="n">kc</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">meshgrid</span><span class="p">(</span><span class="n">fr</span><span class="p">,</span> <span class="n">fc</span><span class="p">,</span> <span class="n">indexing</span><span class="o">=</span><span class="s2">&quot;ij&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_k2</span> <span class="o">=</span> <span class="n">kr</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">kc</span> <span class="o">**</span> <span class="mi">2</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">band_limit</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">k_limit</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">band_limit</span> <span class="o">/</span> <span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">pixel_size_nm</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_mask</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_k2</span> <span class="o">&lt;=</span> <span class="n">k_limit</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_mask</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_propagators</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+
+<div class="viewcode-block" id="Multislice.propagator">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.multislice.Multislice.propagator">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">propagator</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dz_nm</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Eq. (6.3)/(6.4).&quot;&quot;&quot;</span>
+
+        <span class="n">key</span> <span class="o">=</span> <span class="nb">round</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">dz_nm</span><span class="p">),</span> <span class="mi">9</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_propagators</span><span class="p">:</span>
+            <span class="n">p</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">wavelength_nm</span> <span class="o">*</span> <span class="n">key</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">_k2</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mask</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">p</span> <span class="o">=</span> <span class="n">p</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mask</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_propagators</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">p</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_propagators</span><span class="p">[</span><span class="n">key</span><span class="p">]</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">propagate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">wave</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">dz_nm</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifft2</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fft2</span><span class="p">(</span><span class="n">wave</span><span class="p">)</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagator</span><span class="p">(</span><span class="n">dz_nm</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Multislice.transmission">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.multislice.Multislice.transmission">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">transmission</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">potential</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Eq. (6.2).&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">sigma</span> <span class="o">*</span> <span class="n">potential</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Multislice.plan">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.multislice.Multislice.plan">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">plan</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">potentials</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]],</span> <span class="n">z_nm</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span>
+             <span class="n">reverse</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Order of the contributing layers, distances between them and to the exit plane.</span>
+
+<span class="sd">        Returns ``(order, distances, exit_distance)``: ``order`` lists the indices of the</span>
+<span class="sd">        layers with a potential in beam order, ``distances[k]`` is the free flight between</span>
+<span class="sd">        ``order[k]`` and ``order[k+1]``, ``exit_distance`` the flight from the last</span>
+<span class="sd">        contributing layer to the exit plane (the last layer in beam direction).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">potentials</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">z_nm</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">potentials</span><span class="p">)</span><span class="si">}</span><span class="s2"> potentials but </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">z_nm</span><span class="p">)</span><span class="si">}</span><span class="s2"> heights&quot;</span><span class="p">)</span>
+        <span class="n">full_order</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">z_nm</span><span class="p">)),</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="n">z_nm</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+        <span class="k">if</span> <span class="n">reverse</span><span class="p">:</span>
+            <span class="n">full_order</span> <span class="o">=</span> <span class="n">full_order</span><span class="p">[::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">order</span> <span class="o">=</span> <span class="p">[</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">full_order</span> <span class="k">if</span> <span class="n">potentials</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">]</span>
+        <span class="n">distances</span> <span class="o">=</span> <span class="p">[</span><span class="nb">abs</span><span class="p">(</span><span class="n">z_nm</span><span class="p">[</span><span class="n">b</span><span class="p">]</span> <span class="o">-</span> <span class="n">z_nm</span><span class="p">[</span><span class="n">a</span><span class="p">])</span> <span class="k">for</span> <span class="n">a</span><span class="p">,</span> <span class="n">b</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">order</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">order</span><span class="p">[</span><span class="mi">1</span><span class="p">:])]</span>
+        <span class="n">exit_distance</span> <span class="o">=</span> <span class="nb">abs</span><span class="p">(</span><span class="n">z_nm</span><span class="p">[</span><span class="n">full_order</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]]</span> <span class="o">-</span> <span class="n">z_nm</span><span class="p">[</span><span class="n">order</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]])</span> <span class="k">if</span> <span class="n">order</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="k">return</span> <span class="n">order</span><span class="p">,</span> <span class="n">distances</span><span class="p">,</span> <span class="n">exit_distance</span></div>
+
+
+<div class="viewcode-block" id="Multislice.exit_wave">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.multislice.Multislice.exit_wave">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">exit_wave</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">potentials</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]],</span> <span class="n">z_nm</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span>
+                  <span class="n">reverse</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="n">incident</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Wave behind the stack for a plane incident wave (or ``incident``).</span>
+
+<span class="sd">        ``potentials[i]`` is the slice at height ``z_nm[i]`` (``None``: the layer</span>
+<span class="sd">        does not contribute and is skipped, but the exit plane stays where it is).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">order</span><span class="p">,</span> <span class="n">distances</span><span class="p">,</span> <span class="n">exit_distance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">plan</span><span class="p">(</span><span class="n">potentials</span><span class="p">,</span> <span class="n">z_nm</span><span class="p">,</span> <span class="n">reverse</span><span class="p">)</span>
+        <span class="n">wave</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">complex64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">)</span> <span class="k">if</span> <span class="n">incident</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">incident</span>
+        <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">idx</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">order</span><span class="p">):</span>
+            <span class="n">wave</span> <span class="o">=</span> <span class="n">wave</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">transmission</span><span class="p">(</span><span class="n">potentials</span><span class="p">[</span><span class="n">idx</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">k</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">order</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="n">wave</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagate</span><span class="p">(</span><span class="n">wave</span><span class="p">,</span> <span class="n">distances</span><span class="p">[</span><span class="n">k</span><span class="p">])</span>
+        <span class="k">if</span> <span class="n">order</span> <span class="ow">and</span> <span class="n">exit_distance</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">wave</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagate</span><span class="p">(</span><span class="n">wave</span><span class="p">,</span> <span class="n">exit_distance</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">wave</span></div>
+</div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

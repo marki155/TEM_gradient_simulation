@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.service.protocol &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.service.protocol</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part IV, Section 1: the wire protocol between the core and a client.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">The reconstruction core and the user interface are two processes.  They share no</span>
+<span class="sd">memory and no objects; everything that crosses the boundary is one *message*,</span>
+<span class="sd">which consists of</span>
+
+<span class="sd">* a JSON *header* (a dictionary), and</span>
+<span class="sd">* any number of binary *arrays* whose dtype and shape are listed in the header</span>
+<span class="sd">  (``header[&quot;arrays&quot;]``), each sent as one raw buffer.</span>
+
+<span class="sd">On the wire a message is a list of frames, ``[header, buffer_1, ..., buffer_n]``,</span>
+<span class="sd">so that images are never converted to text.  The transport (ZeroMQ DEALER/ROUTER,</span>
+<span class="sd">see :mod:`temsim.service.server`) adds an identity frame in front.</span>
+
+<span class="sd">Three kinds of messages exist.</span>
+
+<span class="sd">``command``  (client -&gt; core)</span>
+<span class="sd">    ``{&quot;kind&quot;: &quot;command&quot;, &quot;id&quot;: k, &quot;name&quot;: ..., &quot;args&quot;: {...}}``.  Exactly one</span>
+<span class="sd">    ``reply`` with the same ``id`` follows.  Commands are executed by the single</span>
+<span class="sd">    owner of the model *between* two optimisation steps (Section 2); the order in</span>
+<span class="sd">    which a client sends them is the order in which they take effect.</span>
+<span class="sd">``reply``  (core -&gt; client)</span>
+<span class="sd">    ``{&quot;kind&quot;: &quot;reply&quot;, &quot;id&quot;: k, &quot;ok&quot;: true, &quot;result&quot;: {...}}`` or, on failure,</span>
+<span class="sd">    ``{&quot;ok&quot;: false, &quot;error&quot;: &quot;...&quot;, &quot;trace&quot;: &quot;...&quot;}``.  A failing command never</span>
+<span class="sd">    changes the model.</span>
+<span class="sd">``event``  (core -&gt; every client that has said ``hello``)</span>
+<span class="sd">    ``{&quot;kind&quot;: &quot;event&quot;, &quot;name&quot;: ..., &quot;data&quot;: {...}}``.  Events are ``status``</span>
+<span class="sd">    (idle / running / paused), ``light`` (step and loss, cheap, every step),</span>
+<span class="sd">    ``frame`` (images and atoms, throttled), ``log`` (text) and ``error``.</span>
+
+<span class="sd">Data classes of :mod:`temsim.data.schema` travel as the JSON of</span>
+<span class="sd">:mod:`temsim.data.codec`; the bulk arrays of the training settings (masks, group</span>
+<span class="sd">targets) travel as binary arrays named ``mask.&lt;group&gt;`` and ``target.&lt;group&gt;``.</span>
+
+<span class="sd">The module imports numpy and the data layer only.  A client therefore needs</span>
+<span class="sd">neither PyTorch nor the physics.</span>
+
+<span class="sd">.. note::</span>
+<span class="sd">   The server binds to ``127.0.0.1`` by default and accepts commands from anyone</span>
+<span class="sd">   who can reach the port; a remote core is reached through an SSH tunnel, never</span>
+<span class="sd">   by opening the port.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">..data</span><span class="w"> </span><span class="kn">import</span> <span class="n">codec</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..data.schema</span><span class="w"> </span><span class="kn">import</span> <span class="n">Experiment</span><span class="p">,</span> <span class="n">ModelState</span><span class="p">,</span> <span class="n">TrainSettings</span>
+
+<span class="n">PROTOCOL_VERSION</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="c1">#: dtypes that may be sent (little endian, C order)</span>
+<span class="n">ARRAY_DTYPES</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;float32&quot;</span><span class="p">,</span> <span class="s2">&quot;float64&quot;</span><span class="p">,</span> <span class="s2">&quot;int32&quot;</span><span class="p">,</span> <span class="s2">&quot;int64&quot;</span><span class="p">,</span> <span class="s2">&quot;uint8&quot;</span><span class="p">,</span> <span class="s2">&quot;bool&quot;</span><span class="p">)</span>
+
+<span class="c1">#: the commands of the core, with one line each (the table in the documentation)</span>
+<span class="n">COMMANDS</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;hello&quot;</span><span class="p">:</span> <span class="s2">&quot;register for events; returns the protocol version&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;info&quot;</span><span class="p">:</span> <span class="s2">&quot;description of the loaded model&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;open_run&quot;</span><span class="p">:</span> <span class="s2">&quot;load a run directory (any layout, old or new)&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;open_dataset&quot;</span><span class="p">:</span> <span class="s2">&quot;load a data folder or init.json (lattice start or empty seeding start)&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;get_experiment&quot;</span><span class="p">:</span> <span class="s2">&quot;specification with the current atoms&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;get_train&quot;</span><span class="p">:</span> <span class="s2">&quot;training settings (incl. masks as arrays)&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;get_state&quot;</span><span class="p">:</span> <span class="s2">&quot;trained numbers&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;get_values&quot;</span><span class="p">:</span> <span class="s2">&quot;the numbers a person edits by hand (optics, group transform), flat keys&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;set_values&quot;</span><span class="p">:</span> <span class="s2">&quot;write some of those numbers&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;set_train&quot;</span><span class="p">:</span> <span class="s2">&quot;replace the training settings&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;set_param&quot;</span><span class="p">:</span> <span class="s2">&quot;switch / learning rate of one trainable key&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;set_loss&quot;</span><span class="p">:</span> <span class="s2">&quot;weights of the data terms&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;set_regularisation&quot;</span><span class="p">:</span> <span class="s2">&quot;weights of the priors&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;set_active_group&quot;</span><span class="p">:</span> <span class="s2">&quot;group whose mask, target and layers count&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;start_training&quot;</span><span class="p">:</span> <span class="s2">&quot;begin optimisation&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;start_seeding&quot;</span><span class="p">:</span> <span class="s2">&quot;begin seeding&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;pause&quot;</span><span class="p">:</span> <span class="s2">&quot;stop after the current step, keep the job&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;resume&quot;</span><span class="p">:</span> <span class="s2">&quot;continue a paused job&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;stop&quot;</span><span class="p">:</span> <span class="s2">&quot;end the job&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;frame&quot;</span><span class="p">:</span> <span class="s2">&quot;images, atoms and optional extras now&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;edit&quot;</span><span class="p">:</span> <span class="s2">&quot;model edit between steps (remove low occupancy, reset ..., see Session)&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;minima&quot;</span><span class="p">:</span> <span class="s2">&quot;candidate sites from the difference image&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;insert_minima&quot;</span><span class="p">:</span> <span class="s2">&quot;insert candidate sites that pass the seeding criteria&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;seeding_config&quot;</span><span class="p">:</span> <span class="s2">&quot;read or patch the seeding configuration&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;save&quot;</span><span class="p">:</span> <span class="s2">&quot;write a run directory&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;shutdown&quot;</span><span class="p">:</span> <span class="s2">&quot;end the core&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># framing</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="pack">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.protocol.pack">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">pack</span><span class="p">(</span><span class="n">header</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">arrays</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">bytes</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Message -&gt; frames ``[header, buffer, ...]``.&quot;&quot;&quot;</span>
+
+    <span class="n">arrays</span> <span class="o">=</span> <span class="n">arrays</span> <span class="ow">or</span> <span class="p">{}</span>
+    <span class="n">meta</span><span class="p">,</span> <span class="n">buffers</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">array</span> <span class="ow">in</span> <span class="n">arrays</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">array</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">array</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">array</span><span class="o">.</span><span class="n">dtype</span><span class="o">.</span><span class="n">name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ARRAY_DTYPES</span><span class="p">:</span>
+            <span class="n">array</span> <span class="o">=</span> <span class="n">array</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span> <span class="k">if</span> <span class="n">array</span><span class="o">.</span><span class="n">dtype</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;f&quot;</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+        <span class="n">meta</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">name</span><span class="p">,</span> <span class="s2">&quot;dtype&quot;</span><span class="p">:</span> <span class="n">array</span><span class="o">.</span><span class="n">dtype</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;shape&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">array</span><span class="o">.</span><span class="n">shape</span><span class="p">)})</span>
+        <span class="n">buffers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">ascontiguousarray</span><span class="p">(</span><span class="n">array</span><span class="p">)</span><span class="o">.</span><span class="n">tobytes</span><span class="p">())</span>
+    <span class="n">head</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">header</span><span class="p">)</span>
+    <span class="n">head</span><span class="p">[</span><span class="s2">&quot;arrays&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">meta</span>
+    <span class="k">return</span> <span class="p">[</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">head</span><span class="p">,</span> <span class="n">separators</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;,&quot;</span><span class="p">,</span> <span class="s2">&quot;:&quot;</span><span class="p">))</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)]</span> <span class="o">+</span> <span class="n">buffers</span></div>
+
+
+
+<div class="viewcode-block" id="unpack">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.protocol.unpack">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">unpack</span><span class="p">(</span><span class="n">frames</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">bytes</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Frames -&gt; ``(header, arrays)``; the header loses its ``arrays`` entry.&quot;&quot;&quot;</span>
+
+    <span class="n">header</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="nb">bytes</span><span class="p">(</span><span class="n">frames</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">))</span>
+    <span class="n">meta</span> <span class="o">=</span> <span class="n">header</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;arrays&quot;</span><span class="p">,</span> <span class="p">[])</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">meta</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">frames</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;header announces </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">meta</span><span class="p">)</span><span class="si">}</span><span class="s2"> arrays, message has </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">frames</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2"> buffers&quot;</span><span class="p">)</span>
+    <span class="n">arrays</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">entry</span><span class="p">,</span> <span class="n">buffer</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">meta</span><span class="p">,</span> <span class="n">frames</span><span class="p">[</span><span class="mi">1</span><span class="p">:]):</span>
+        <span class="k">if</span> <span class="n">entry</span><span class="p">[</span><span class="s2">&quot;dtype&quot;</span><span class="p">]</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ARRAY_DTYPES</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;dtype </span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">&#39;dtype&#39;</span><span class="p">]</span><span class="si">!r}</span><span class="s2"> is not allowed&quot;</span><span class="p">)</span>
+        <span class="n">shape</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">n</span><span class="p">)</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">[</span><span class="s2">&quot;shape&quot;</span><span class="p">])</span>
+        <span class="n">array</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">frombuffer</span><span class="p">(</span><span class="nb">bytes</span><span class="p">(</span><span class="n">buffer</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">dtype</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;dtype&quot;</span><span class="p">]))</span>
+        <span class="k">if</span> <span class="n">array</span><span class="o">.</span><span class="n">size</span> <span class="o">!=</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;array </span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">&#39;name&#39;</span><span class="p">]</span><span class="si">!r}</span><span class="s2">: </span><span class="si">{</span><span class="n">array</span><span class="o">.</span><span class="n">size</span><span class="si">}</span><span class="s2"> values for shape </span><span class="si">{</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">arrays</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">]]</span> <span class="o">=</span> <span class="n">array</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">shape</span><span class="p">)</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">header</span><span class="p">,</span> <span class="n">arrays</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">command</span><span class="p">(</span><span class="n">identifier</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">args</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;kind&quot;</span><span class="p">:</span> <span class="s2">&quot;command&quot;</span><span class="p">,</span> <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">identifier</span><span class="p">),</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">name</span><span class="p">,</span> <span class="s2">&quot;args&quot;</span><span class="p">:</span> <span class="n">args</span> <span class="ow">or</span> <span class="p">{}}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">reply</span><span class="p">(</span><span class="n">identifier</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">result</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;kind&quot;</span><span class="p">:</span> <span class="s2">&quot;reply&quot;</span><span class="p">,</span> <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">identifier</span><span class="p">),</span> <span class="s2">&quot;ok&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;result&quot;</span><span class="p">:</span> <span class="n">result</span> <span class="ow">or</span> <span class="p">{}}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">failure</span><span class="p">(</span><span class="n">identifier</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">trace</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;kind&quot;</span><span class="p">:</span> <span class="s2">&quot;reply&quot;</span><span class="p">,</span> <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">identifier</span><span class="p">),</span> <span class="s2">&quot;ok&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span> <span class="s2">&quot;error&quot;</span><span class="p">:</span> <span class="n">error</span><span class="p">,</span> <span class="s2">&quot;trace&quot;</span><span class="p">:</span> <span class="n">trace</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">event</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">data</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;kind&quot;</span><span class="p">:</span> <span class="s2">&quot;event&quot;</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">name</span><span class="p">,</span> <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="n">data</span> <span class="ow">or</span> <span class="p">{}}</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># data classes on the wire</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">experiment_to_wire</span><span class="p">(</span><span class="n">experiment</span><span class="p">:</span> <span class="n">Experiment</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="n">codec</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">experiment</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">experiment_from_wire</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Experiment</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">codec</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">Experiment</span><span class="p">,</span> <span class="n">data</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">state_to_wire</span><span class="p">(</span><span class="n">state</span><span class="p">:</span> <span class="n">ModelState</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="n">codec</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">state</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">state_from_wire</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">ModelState</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">codec</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">ModelState</span><span class="p">,</span> <span class="n">data</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="train_to_wire">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.protocol.train_to_wire">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">train_to_wire</span><span class="p">(</span><span class="n">settings</span><span class="p">:</span> <span class="n">TrainSettings</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;JSON part and the bulk arrays ``mask.&lt;group&gt;`` / ``target.&lt;group&gt;``.&quot;&quot;&quot;</span>
+
+    <span class="n">arrays</span> <span class="o">=</span> <span class="p">{</span><span class="sa">f</span><span class="s2">&quot;mask.</span><span class="si">{</span><span class="n">k</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">settings</span><span class="o">.</span><span class="n">masks</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="n">arrays</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="sa">f</span><span class="s2">&quot;target.</span><span class="si">{</span><span class="n">k</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">settings</span><span class="o">.</span><span class="n">targets</span><span class="o">.</span><span class="n">items</span><span class="p">()})</span>
+    <span class="k">return</span> <span class="n">codec</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">settings</span><span class="p">),</span> <span class="n">arrays</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">train_from_wire</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">arrays</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TrainSettings</span><span class="p">:</span>
+    <span class="n">settings</span> <span class="o">=</span> <span class="n">codec</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">TrainSettings</span><span class="p">,</span> <span class="n">data</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">array</span> <span class="ow">in</span> <span class="p">(</span><span class="n">arrays</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">kind</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">group</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s2">&quot;.&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;mask&quot;</span><span class="p">:</span>
+            <span class="n">settings</span><span class="o">.</span><span class="n">masks</span><span class="p">[</span><span class="n">group</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">array</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="k">elif</span> <span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;target&quot;</span><span class="p">:</span>
+            <span class="n">settings</span><span class="o">.</span><span class="n">targets</span><span class="p">[</span><span class="n">group</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">array</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">settings</span>
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part4_service.html">Part IV - Service</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part5_gui.html">Part V - Graphical client</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

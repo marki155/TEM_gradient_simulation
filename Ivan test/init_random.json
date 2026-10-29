@@ -1,0 +1,7 @@
+{
+  "pixel_size_nm": 0.006748046875,
+  "voltage_kV": 80.0,
+  "imaging": {
+    "mode": "stem_haadf"
+  }
+}

@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Part V - Graphical client &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="_static/alabaster.css?v=27fed22d" />
+    <script src="_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Part IV - Service" href="part4_service.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="part-v-graphical-client">
+<h1>Part V - Graphical client<a class="headerlink" href="#part-v-graphical-client" title="Link to this heading">¶</a></h1>
+<p>The interface is a client of the core.  It imports neither the physics nor the
+learning part and does not use PyTorch: everything it shows arrives as frames
+(Section 1), and everything it does is a command of the protocol (Part IV).
+Sections 1-3 need no display (frame model, tiles, marks); Section 4 draws them;
+Section 5 connects Qt to the core; Sections 6-9 are the panels; Section 10 is the
+controller that translates between panels and commands; Sections 11 and 12 compose
+the window and start it.</p>
+<p id="module-temsim_gui.frame_model">Part V, Section 1: what the interface knows about the model.</p>
+<section id="theory">
+<h2>Theory<a class="headerlink" href="#theory" title="Link to this heading">¶</a></h2>
+<p>The interface owns no model.  Everything it shows is a <em>frame</em>: the dictionary and
+the arrays of one <code class="docutils literal notranslate"><span class="pre">frame</span></code> event (Part IV, Section 1).  This module turns a frame
+into a read-only object, <a class="reference internal" href="#temsim_gui.frame_model.FrameModel" title="temsim_gui.frame_model.FrameModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">FrameModel</span></code></a>, and derives from it what the plots
+need - which atoms are shown, a common histogram of their intensities, the atoms
+that lie inside the mask.  None of this needs Qt, so it is tested without a display.</p>
+<p><strong>Visible atoms.</strong>  An atom of layer <span class="math notranslate nohighlight">\(l\)</span> is shown if its occupancy
+<span class="math notranslate nohighlight">\(o = \sigma(\vartheta)\)</span> is at least the display threshold <span class="math notranslate nohighlight">\(o_{\min}\)</span> and its
+intensity is finite.  The threshold is a property of the <em>view</em>; the model is never
+changed by it.</p>
+<p><strong>Histogram.</strong>  The intensities <span class="math notranslate nohighlight">\(I_i\)</span> of all visible atoms of all layers are
+binned into <span class="math notranslate nohighlight">\(B = 101\)</span> bins that span the finite range of all layers together,
+so that the curves of different layers can be compared.</p>
+<p><strong>Loss history.</strong>  The core sends one <code class="docutils literal notranslate"><span class="pre">light</span></code> event per optimiser step.  The
+history keeps at most <code class="xref py py-data docutils literal notranslate"><span class="pre">HISTORY_LIMIT</span></code> values; when the limit is reached every
+second point is dropped and the sampling stride doubles, so that a run of millions
+of steps stays cheap to draw.</p>
+</section>
+<section id="implementation">
+<h2>Implementation<a class="headerlink" href="#implementation" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.LayerView">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.frame_model.</span></span><span class="sig-name descname"><span class="pre">LayerView</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'str'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'str'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">element</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'str'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pos</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">occupancy</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intensity</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gradient</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'Optional[np.ndarray]'</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">potential</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'Optional[np.ndarray]'</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#LayerView"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.LayerView" title="Link to this definition">¶</a></dt>
+<dd><dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.LayerView.visible">
+<span class="sig-name descname"><span class="pre">visible</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">min_occupancy</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">ndarray</span></span></span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#LayerView.visible"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.LayerView.visible" title="Link to this definition">¶</a></dt>
+<dd><p>Boolean mask of the atoms that are drawn.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.FrameModel">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.frame_model.</span></span><span class="sig-name descname"><span class="pre">FrameModel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">loss:</span> <span class="pre">'float'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data:</span> <span class="pre">'Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prior:</span> <span class="pre">'Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">step:</span> <span class="pre">'int'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mode:</span> <span class="pre">'str'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">active_group:</span> <span class="pre">'Optional[str]'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision:</span> <span class="pre">'int'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sim:</span> <span class="pre">'np.ndarray'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target:</span> <span class="pre">'np.ndarray'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">diff:</span> <span class="pre">'np.ndarray'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layers:</span> <span class="pre">'List[LayerView]'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mask:</span> <span class="pre">'Optional[np.ndarray]'</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ctf_phase:</span> <span class="pre">'Optional[np.ndarray]'</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ctf_ring:</span> <span class="pre">'Optional[np.ndarray]'</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">probe:</span> <span class="pre">'Optional[np.ndarray]'</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain:</span> <span class="pre">'Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">np.ndarray]'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seeding:</span> <span class="pre">'Optional[Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">Any]]'</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group_names:</span> <span class="pre">'List[str]'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#FrameModel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.FrameModel" title="Link to this definition">¶</a></dt>
+<dd><dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.FrameModel.active_layers">
+<span class="sig-name descname"><span class="pre">active_layers</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#FrameModel.active_layers"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.FrameModel.active_layers" title="Link to this definition">¶</a></dt>
+<dd><p>Layer indices of the active group (all layers if none is active).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.FrameModel.atoms">
+<span class="sig-name descname"><span class="pre">atoms</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">min_occupancy</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">active_only</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inside_mask</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#FrameModel.atoms"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.FrameModel.atoms" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">(positions</span> <span class="pre">(n,</span> <span class="pre">2),</span> <span class="pre">intensities</span> <span class="pre">(n,))</span></code> of the shown atoms.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.FrameModel.gradients">
+<span class="sig-name descname"><span class="pre">gradients</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">min_occupancy</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#FrameModel.gradients"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.FrameModel.gradients" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">(positions,</span> <span class="pre">gradients)</span></code> of the shown atoms of the active group, or <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.FrameModel.histogram">
+<span class="sig-name descname"><span class="pre">histogram</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">min_occupancy</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bins</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">101</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#FrameModel.histogram"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.FrameModel.histogram" title="Link to this definition">¶</a></dt>
+<dd><p>Intensity histograms of all layers over common bin edges.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.frame_model.LossHistory">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.frame_model.</span></span><span class="sig-name descname"><span class="pre">LossHistory</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">limit</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">20000</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/frame_model.html#LossHistory"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.frame_model.LossHistory" title="Link to this definition">¶</a></dt>
+<dd><p>Loss against step, bounded in length (see the module docstring).</p>
+</dd></dl>
+
+<p id="module-temsim_gui.tiles">Part V, Section 2: the tiles of the plot area.</p>
+<section id="id1">
+<h2>Theory<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<p>The plot area is a grid of <em>tiles</em>; every tile shows one quantity.  The set and
+order of the tiles follows from the model alone:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>loss  sim  diff  target  ctf | pot0 ... pot(L-1) | hist  ux  uy  eps_xx  eps_yy  eps_xy
+</pre></div>
+</div>
+<p>(<code class="docutils literal notranslate"><span class="pre">ctf</span></code> is the probe in STEM; <code class="docutils literal notranslate"><span class="pre">L</span></code> is the number of layers).  While seeding the
+displacement field is not trained, so the five strain tiles are left out.</p>
+<p>Three <em>views</em> exist: all tiles in a grid of five columns; one tile large with the
+loss curve beside it; and the <em>comparison</em> <code class="docutils literal notranslate"><span class="pre">sim</span> <span class="pre">|</span> <span class="pre">target</span> <span class="pre">|</span> <span class="pre">diff</span></code> with a common
+zoom and the loss underneath.  <a class="reference internal" href="#temsim_gui.tiles.plan" title="temsim_gui.tiles.plan"><code class="xref py py-func docutils literal notranslate"><span class="pre">plan()</span></code></a> turns a view into rows, columns and
+the positions of the tiles, so that the canvas only has to draw.</p>
+</section>
+<section id="id2">
+<h2>Implementation<a class="headerlink" href="#id2" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.tiles.tile_keys">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.tiles.</span></span><span class="sig-name descname"><span class="pre">tile_keys</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">n_layers</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seeding</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/tiles.html#tile_keys"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.tiles.tile_keys" title="Link to this definition">¶</a></dt>
+<dd><p>All tiles in grid order.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.tiles.Plan">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.tiles.</span></span><span class="sig-name descname"><span class="pre">Plan</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">view</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">keys</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rows</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">columns</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cells</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">height_ratios</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">width_ratios</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">share</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/tiles.html#Plan"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.tiles.Plan" title="Link to this definition">¶</a></dt>
+<dd><p>Which tiles are drawn and where.</p>
+<p><code class="docutils literal notranslate"><span class="pre">cells</span></code> maps a tile to <code class="docutils literal notranslate"><span class="pre">(row,</span> <span class="pre">column,</span> <span class="pre">row_span,</span> <span class="pre">column_span)</span></code> in a grid of
+<code class="docutils literal notranslate"><span class="pre">rows</span> <span class="pre">x</span> <span class="pre">columns</span></code>; <code class="docutils literal notranslate"><span class="pre">share</span></code> lists tiles whose axes are linked.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.tiles.plan">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.tiles.</span></span><span class="sig-name descname"><span class="pre">plan</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">view</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_layers</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seeding</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim_gui.tiles.Plan" title="temsim_gui.tiles.Plan"><span class="pre">Plan</span></a></span></span><a class="reference internal" href="_modules/temsim_gui/tiles.html#plan"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.tiles.plan" title="Link to this definition">¶</a></dt>
+<dd><p>The layout for <code class="docutils literal notranslate"><span class="pre">view</span></code> (<code class="docutils literal notranslate"><span class="pre">None</span></code>: all tiles; <code class="xref py py-data docutils literal notranslate"><span class="pre">COMPARE</span></code>; or one tile’s key).</p>
+</dd></dl>
+
+<p id="module-temsim_gui.overlays">Part V, Section 3: marks drawn over the images.</p>
+<section id="id3">
+<h2>Theory<a class="headerlink" href="#id3" title="Link to this heading">¶</a></h2>
+<p>Three kinds of marks lie over the images: the atoms, the gradient arrows and the
+candidate sites.  What is drawn depends on the <em>zoom</em>, so the numbers are computed
+here, without Qt, and the canvas only draws them.</p>
+<p><strong>Marker size.</strong>  A marker of fixed size becomes dust when one zooms in and a
+colour smear when one zooms out.  The area is therefore</p>
+<div class="math notranslate nohighlight">
+\[s = \mathrm{clip}\!\left(\frac{1200}{\Delta},\; 0.5,\; 60\right)\ \mathrm{pt^2},
+\qquad \Delta = \max(\text{width},\,\text{height})\ \text{of the visible window [px]}.   \tag{3.1}\]</div>
+<p><strong>Gradient arrows.</strong>  For an atom with position <span class="math notranslate nohighlight">\(\mathbf r_i\)</span> and gradient
+<span class="math notranslate nohighlight">\(\mathbf g_i = \partial L/\partial \mathbf r_i\)</span>, the arrow points along
+<span class="math notranslate nohighlight">\(-\mathbf g_i\)</span> (the direction of descent; optionally <span class="math notranslate nohighlight">\(+\mathbf g_i\)</span>) and has the length</p>
+<div class="math notranslate nohighlight">
+\[\ell_i = \ell_{\max}\,\frac{|\mathbf g_i|}{g_{\rm ref}},   \tag{3.2}\]</div>
+<p>where <span class="math notranslate nohighlight">\(g_{\rm ref}\)</span> is the largest <span class="math notranslate nohighlight">\(|\mathbf g|\)</span> of all atoms (lengths stay
+comparable while zooming) or, on request, of the atoms in the visible window.  Only
+arrows inside the window are drawn, and at most <code class="xref py py-data docutils literal notranslate"><span class="pre">MAX_ARROWS</span></code> of them (those
+with the largest <span class="math notranslate nohighlight">\(|\mathbf g|\)</span>).</p>
+</section>
+<section id="id4">
+<h2>Implementation<a class="headerlink" href="#id4" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.overlays.scatter_size">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">scatter_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">span</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">float</span></span></span><a class="reference internal" href="_modules/temsim_gui/overlays.html#scatter_size"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.scatter_size" title="Link to this definition">¶</a></dt>
+<dd><p>Eq. (3.1).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.overlays.window">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">window</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xlim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ylim</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/overlays.html#window"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.window" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">(x0,</span> <span class="pre">x1,</span> <span class="pre">y0,</span> <span class="pre">y1)</span></code> of a possibly inverted view.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.overlays.inside">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">inside</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">points</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xlim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ylim</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">ndarray</span></span></span><a class="reference internal" href="_modules/temsim_gui/overlays.html#inside"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.inside" title="Link to this definition">¶</a></dt>
+<dd><p>Boolean mask of the <code class="docutils literal notranslate"><span class="pre">(row,</span> <span class="pre">column)</span></code> points inside the view.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.overlays.Arrows">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">Arrows</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">columns</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rows</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d_column</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d_row</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'np.ndarray'</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reference</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'float'</span></span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/overlays.html#Arrows"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.Arrows" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.overlays.arrows">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">arrows</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">positions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gradients</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xlim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ylim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">length</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">descent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reference</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">relative_to_view</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim_gui.overlays.Arrows" title="temsim_gui.overlays.Arrows"><span class="pre">Arrows</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/overlays.html#arrows"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.arrows" title="Link to this definition">¶</a></dt>
+<dd><p>Eq. (3.2); <code class="docutils literal notranslate"><span class="pre">None</span></code> if nothing is to be drawn.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.overlays.display_limits">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">display_limits</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">array</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/overlays.html#display_limits"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.display_limits" title="Link to this definition">¶</a></dt>
+<dd><p>Colour limits that are always valid (finite, <code class="docutils literal notranslate"><span class="pre">low</span> <span class="pre">&lt;</span> <span class="pre">high</span></code>).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.overlays.window_limits">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.overlays.</span></span><span class="sig-name descname"><span class="pre">window_limits</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">first</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">second</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xlim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ylim</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/overlays.html#window_limits"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.overlays.window_limits" title="Link to this definition">¶</a></dt>
+<dd><p>Common colour limits of two images inside a view (the comparison tile).</p>
+</dd></dl>
+
+<p id="module-temsim_gui.canvas">Part V, Section 4: the plot canvas.</p>
+<section id="id5">
+<h2>Theory<a class="headerlink" href="#id5" title="Link to this heading">¶</a></h2>
+<p><a class="reference internal" href="#temsim_gui.canvas.PlotCanvas" title="temsim_gui.canvas.PlotCanvas"><code class="xref py py-class docutils literal notranslate"><span class="pre">PlotCanvas</span></code></a> draws a <a class="reference internal" href="#temsim_gui.frame_model.FrameModel" title="temsim_gui.frame_model.FrameModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">FrameModel</span></code></a> into the tiles
+of Section 2.  It follows three rules.</p>
+<ul class="simple">
+<li><p><strong>Artists live as long as the layout.</strong>  A new frame only replaces the data of
+existing artists, so the zoom (toolbar, mouse wheel) survives updates.  A layout
+is built again only when the view, the seeding flag or the model changes.</p></li>
+<li><p><strong>The loss curve is cheap.</strong>  A <code class="docutils literal notranslate"><span class="pre">light</span></code> event redraws only the axes of the
+loss (blitting); drawing 15 panels of megapixel images would cost over a second.</p></li>
+<li><p><strong>Marks follow the zoom.</strong>  Marker sizes and arrows (Section 3) are recomputed
+30 ms after the view stopped changing.</p></li>
+</ul>
+</section>
+<section id="id6">
+<h2>Implementation<a class="headerlink" href="#id6" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.canvas.PlotCanvas">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.canvas.</span></span><span class="sig-name descname"><span class="pre">PlotCanvas</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/canvas.html#PlotCanvas"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.canvas.PlotCanvas" title="Link to this definition">¶</a></dt>
+<dd><dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.canvas.PlotCanvas.configure">
+<span class="sig-name descname"><span class="pre">configure</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stem</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">bool</span></span></span><a class="reference internal" href="_modules/temsim_gui/canvas.html#PlotCanvas.configure"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.canvas.PlotCanvas.configure" title="Link to this definition">¶</a></dt>
+<dd><p>Adapt to a model; returns True if the layout changed.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.canvas.PlotCanvas.update_loss">
+<span class="sig-name descname"><span class="pre">update_loss</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">bool</span></span></span><a class="reference internal" href="_modules/temsim_gui/canvas.html#PlotCanvas.update_loss"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.canvas.PlotCanvas.update_loss" title="Link to this definition">¶</a></dt>
+<dd><p>Redraw only the loss axes; <code class="docutils literal notranslate"><span class="pre">False</span></code> if the whole figure had to be redrawn.</p>
+</dd></dl>
+
+</dd></dl>
+
+<p id="module-temsim_gui.connection">Part V, Section 5: the connection to the core.</p>
+<section id="id7">
+<h2>Theory<a class="headerlink" href="#id7" title="Link to this heading">¶</a></h2>
+<p>The interface talks to the core through <code class="xref py py-class docutils literal notranslate"><span class="pre">temsim.service.client.Client</span></code>, which
+delivers events in its transport thread and blocks while a command is answered.
+Qt wants neither: widgets may only be touched from the GUI thread, and the GUI thread
+must not wait for a simulation.  <a class="reference internal" href="#temsim_gui.connection.Connection" title="temsim_gui.connection.Connection"><code class="xref py py-class docutils literal notranslate"><span class="pre">Connection</span></code></a> bridges the two.</p>
+<p><em>Events</em> arrive in the transport thread, are converted (a <code class="docutils literal notranslate"><span class="pre">frame</span></code> event becomes a
+<a class="reference internal" href="#temsim_gui.frame_model.FrameModel" title="temsim_gui.frame_model.FrameModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">FrameModel</span></code></a>) and re-emitted as Qt signals; Qt queues
+a signal that is emitted from another thread, so the slots run in the GUI thread.</p>
+<p><em>Commands</em> are submitted to a single worker thread, in order, and their result is
+handed back by a signal.  Because there is one worker, the order in which the user
+pressed buttons is the order in which the core sees the commands - the guarantee
+of Part IV, Section 1.  <a class="reference internal" href="#temsim_gui.connection.Connection.submit" title="temsim_gui.connection.Connection.submit"><code class="xref py py-meth docutils literal notranslate"><span class="pre">Connection.submit()</span></code></a> takes the callable that performs
+the call, a <code class="docutils literal notranslate"><span class="pre">done</span></code> callback for the result and an <code class="docutils literal notranslate"><span class="pre">failed</span></code> callback for a
+<a class="reference internal" href="part4_service.html#temsim.service.client.RemoteError" title="temsim.service.client.RemoteError"><code class="xref py py-class docutils literal notranslate"><span class="pre">RemoteError</span></code></a>.</p>
+<p>Starting a core.  <a class="reference internal" href="#temsim_gui.connection.spawn_core" title="temsim_gui.connection.spawn_core"><code class="xref py py-func docutils literal notranslate"><span class="pre">spawn_core()</span></code></a> runs <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">temsim.service</span> <span class="pre">serve</span></code> as a child
+process on a free local port and waits until it answers; the interface then
+owns the process and ends it on exit.  Data is opened by a command afterwards, never by
+the command line, so that the model has one owner only (Part IV, Section 2).</p>
+</section>
+<section id="id8">
+<h2>Implementation<a class="headerlink" href="#id8" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.connection.Connection">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.connection.</span></span><span class="sig-name descname"><span class="pre">Connection</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">endpoint</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">extras</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">600.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/connection.html#Connection"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.connection.Connection" title="Link to this definition">¶</a></dt>
+<dd><p>A client of one core, as a Qt object.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.connection.Connection.set_extras">
+<span class="sig-name descname"><span class="pre">set_extras</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">extras</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/connection.html#Connection.set_extras"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.connection.Connection.set_extras" title="Link to this definition">¶</a></dt>
+<dd><p>Tell the core which additional arrays the frame events should carry.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.connection.Connection.submit">
+<span class="sig-name descname"><span class="pre">submit</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">call</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">done</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">None</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">failed</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">BaseException</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">None</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/connection.html#Connection.submit"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.connection.Connection.submit" title="Link to this definition">¶</a></dt>
+<dd><p>Run <code class="docutils literal notranslate"><span class="pre">call()</span></code> on the command thread; <code class="docutils literal notranslate"><span class="pre">done(result)</span></code> / <code class="docutils literal notranslate"><span class="pre">failed(exc)</span></code> run in the GUI thread.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.connection.Connection.close">
+<span class="sig-name descname"><span class="pre">close</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">60.0</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/connection.html#Connection.close"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.connection.Connection.close" title="Link to this definition">¶</a></dt>
+<dd><p>Let the queued commands finish (at most <code class="docutils literal notranslate"><span class="pre">timeout</span></code> seconds), then disconnect.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.connection.SpawnedCore">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.connection.</span></span><span class="sig-name descname"><span class="pre">SpawnedCore</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">process</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Popen</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">endpoint</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/connection.html#SpawnedCore"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.connection.SpawnedCore" title="Link to this definition">¶</a></dt>
+<dd><p>A core started by the interface (a child process).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.connection.spawn_core">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.connection.</span></span><span class="sig-name descname"><span class="pre">spawn_core</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">'auto'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">120.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">extra_args</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim_gui.connection.SpawnedCore" title="temsim_gui.connection.SpawnedCore"><span class="pre">SpawnedCore</span></a></span></span><a class="reference internal" href="_modules/temsim_gui/connection.html#spawn_core"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.connection.spawn_core" title="Link to this definition">¶</a></dt>
+<dd><p>Start <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">temsim.service</span> <span class="pre">serve</span></code> on a free port and wait for it.</p>
+</dd></dl>
+
+<p id="module-temsim_gui.widgets">Part V, Section 6: small building blocks of the panels.</p>
+<section id="id9">
+<h2>Theory<a class="headerlink" href="#id9" title="Link to this heading">¶</a></h2>
+<p>None of the panels needs more than a handful of widget kinds: a spin box with a range, a
+section that can be folded away, and a box with a form inside.  They are made here once,
+so that the panels read as a list of <em>what</em> is shown, not <em>how</em>.</p>
+</section>
+<section id="id10">
+<h2>Implementation<a class="headerlink" href="#id10" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.widgets.CollapsibleSection">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.widgets.</span></span><span class="sig-name descname"><span class="pre">CollapsibleSection</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">title</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expanded</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/widgets.html#CollapsibleSection"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.widgets.CollapsibleSection" title="Link to this definition">¶</a></dt>
+<dd><p>A titled frame whose content can be folded away.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim_gui.widgets.set_quietly">
+<span class="sig-prename descclassname"><span class="pre">temsim_gui.widgets.</span></span><span class="sig-name descname"><span class="pre">set_quietly</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">widget</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/widgets.html#set_quietly"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.widgets.set_quietly" title="Link to this definition">¶</a></dt>
+<dd><p>Show <code class="docutils literal notranslate"><span class="pre">value</span></code> without emitting the widget’s change signals.</p>
+</dd></dl>
+
+<p id="module-temsim_gui.values_editor">Part V, Section 7: the numbers that are edited by hand.</p>
+<section id="id11">
+<h2>Theory<a class="headerlink" href="#id11" title="Link to this heading">¶</a></h2>
+<p>A reconstruction has a few dozen numbers that a person may want to set directly: the
+amplitude contrast, the energy spread, <span class="math notranslate nohighlight">\(C_c\)</span>, the aberration coefficients, the
+two normalisation constants of the image, and for every group its shift, rotation,
+scale and contrast.  The core publishes exactly these under flat keys
+(<a class="reference internal" href="part4_service.html#temsim.service.session.Session.values" title="temsim.service.session.Session.values"><code class="xref py py-meth docutils literal notranslate"><span class="pre">temsim.service.session.Session.values()</span></code></a>), always as magnitude and angle for the
+aberrations, whatever it uses internally.</p>
+<p><a class="reference internal" href="#temsim_gui.values_editor.ValuesEditor" title="temsim_gui.values_editor.ValuesEditor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ValuesEditor</span></code></a> builds one spin box per component from the dictionary it is
+given, so that new groups or aberrations appear without a change here, and writes a
+changed key back with <code class="docutils literal notranslate"><span class="pre">set_values</span></code>.  The values keep changing while the optimiser
+runs, so <a class="reference internal" href="#temsim_gui.values_editor.ValuesEditor.refresh" title="temsim_gui.values_editor.ValuesEditor.refresh"><code class="xref py py-meth docutils literal notranslate"><span class="pre">ValuesEditor.refresh()</span></code></a> shows new numbers; a spin box that has the focus
+is left alone, so that typing is never overwritten.</p>
+</section>
+<section id="id12">
+<h2>Implementation<a class="headerlink" href="#id12" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.values_editor.ValuesEditor">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.values_editor.</span></span><span class="sig-name descname"><span class="pre">ValuesEditor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">connection</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.connection.Connection" title="temsim_gui.connection.Connection"><span class="pre">Connection</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/values_editor.html#ValuesEditor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.values_editor.ValuesEditor" title="Link to this definition">¶</a></dt>
+<dd><p>Spin boxes for <code class="xref py py-meth docutils literal notranslate"><span class="pre">Session.values()</span></code>; <code class="docutils literal notranslate"><span class="pre">save</span></code>, <code class="docutils literal notranslate"><span class="pre">save_as</span></code> and <code class="docutils literal notranslate"><span class="pre">load</span></code> are asked of the window.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.values_editor.ValuesEditor.build">
+<span class="sig-name descname"><span class="pre">build</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">values</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/values_editor.html#ValuesEditor.build"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.values_editor.ValuesEditor.build" title="Link to this definition">¶</a></dt>
+<dd><p>Replace all widgets by those of <code class="docutils literal notranslate"><span class="pre">values</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.values_editor.ValuesEditor.reload">
+<span class="sig-name descname"><span class="pre">reload</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/values_editor.html#ValuesEditor.reload"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.values_editor.ValuesEditor.reload" title="Link to this definition">¶</a></dt>
+<dd><p>Ask the core for the numbers and show them.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.values_editor.ValuesEditor.refresh">
+<span class="sig-name descname"><span class="pre">refresh</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">values</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/values_editor.html#ValuesEditor.refresh"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.values_editor.ValuesEditor.refresh" title="Link to this definition">¶</a></dt>
+<dd><p>Show <code class="docutils literal notranslate"><span class="pre">values</span></code>; a box that has the focus keeps what is being typed.</p>
+</dd></dl>
+
+</dd></dl>
+
+<p id="module-temsim_gui.train_editor">Part V, Section 8: what is trained, and how it is weighted.</p>
+<section id="id13">
+<h2>Theory<a class="headerlink" href="#id13" title="Link to this heading">¶</a></h2>
+<p>The optimiser of Part II is steered by <a class="reference internal" href="part3_data.html#temsim.data.schema.TrainSettings" title="temsim.data.schema.TrainSettings"><code class="xref py py-class docutils literal notranslate"><span class="pre">TrainSettings</span></code></a>: for
+every trainable quantity a switch and a learning rate, the weights of the loss terms
+(Part II, Section 1) and of the priors (Section 3), the flags that select single
+aberrations and envelope terms, and the <em>active group</em> - the group whose mask and
+target count and which, if the group asks for it, is simulated alone.</p>
+<p><a class="reference internal" href="#temsim_gui.train_editor.TrainEditor" title="temsim_gui.train_editor.TrainEditor"><code class="xref py py-class docutils literal notranslate"><span class="pre">TrainEditor</span></code></a> shows these settings and changes them.  It keeps a <em>copy</em> of the
+settings, built from the experiment and the settings that it is given, and sends every
+change as the smallest command that expresses it:</p>
+<ul class="simple">
+<li><p>a switch or learning rate  -&gt;  <code class="docutils literal notranslate"><span class="pre">set_param</span></code>,</p></li>
+<li><p>a loss or prior weight     -&gt;  <code class="docutils literal notranslate"><span class="pre">set_loss</span></code> / <code class="docutils literal notranslate"><span class="pre">set_regularisation</span></code>,</p></li>
+<li><p>the active group           -&gt;  <code class="docutils literal notranslate"><span class="pre">set_active_group</span></code>,</p></li>
+<li><p>the flag dictionaries and the two presets, which change many things at once
+-&gt;  <code class="docutils literal notranslate"><span class="pre">set_train</span></code> without the bulk arrays (the core keeps its masks and targets).</p></li>
+</ul>
+<p>Two presets are common enough to have buttons.  <a class="reference internal" href="#temsim_gui.train_editor.TrainEditor.train_only_group" title="temsim_gui.train_editor.TrainEditor.train_only_group"><code class="xref py py-meth docutils literal notranslate"><span class="pre">TrainEditor.train_only_group()</span></code></a>
+freezes everything except the rigid transformation (shift, rotation, scale) of one
+group, makes that group active and keeps the optics free unless the group is simulated
+in isolation - without the rest of the structure the optics cannot be determined.
+<a class="reference internal" href="#temsim_gui.train_editor.TrainEditor.free_positions_training" title="temsim_gui.train_editor.TrainEditor.free_positions_training"><code class="xref py py-meth docutils literal notranslate"><span class="pre">TrainEditor.free_positions_training()</span></code></a> freezes everything except the positions
+of the individual atoms of all layers.</p>
+</section>
+<section id="id14">
+<h2>Implementation<a class="headerlink" href="#id14" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.train_editor.</span></span><span class="sig-name descname"><span class="pre">TrainEditor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">connection</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.connection.Connection" title="temsim_gui.connection.Connection"><span class="pre">Connection</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor" title="Link to this definition">¶</a></dt>
+<dd><dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.load">
+<span class="sig-name descname"><span class="pre">load</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">experiment</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="part3_data.html#temsim.data.schema.Experiment" title="temsim.data.schema.Experiment"><span class="pre">Experiment</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">settings</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="part3_data.html#temsim.data.schema.TrainSettings" title="temsim.data.schema.TrainSettings"><span class="pre">TrainSettings</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.load"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.load" title="Link to this definition">¶</a></dt>
+<dd><p>Show <code class="docutils literal notranslate"><span class="pre">settings</span></code> (a copy is kept) for <code class="docutils literal notranslate"><span class="pre">experiment</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.push">
+<span class="sig-name descname"><span class="pre">push</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.push"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.push" title="Link to this definition">¶</a></dt>
+<dd><p>Send the whole local copy (without masks and targets).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.refresh">
+<span class="sig-name descname"><span class="pre">refresh</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.refresh"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.refresh" title="Link to this definition">¶</a></dt>
+<dd><p>Show the local copy in the widgets.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.adopt">
+<span class="sig-name descname"><span class="pre">adopt</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">settings</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="part3_data.html#temsim.data.schema.TrainSettings" title="temsim.data.schema.TrainSettings"><span class="pre">TrainSettings</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.adopt"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.adopt" title="Link to this definition">¶</a></dt>
+<dd><p>Take over settings that the core reports (e.g. after loading a run).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.train_only_group">
+<span class="sig-name descname"><span class="pre">train_only_group</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">group</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.train_only_group"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.train_only_group" title="Link to this definition">¶</a></dt>
+<dd><p>Freeze everything but the rigid transformation of <code class="docutils literal notranslate"><span class="pre">group</span></code> (module docstring).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.free_positions_training">
+<span class="sig-name descname"><span class="pre">free_positions_training</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.free_positions_training"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.free_positions_training" title="Link to this definition">¶</a></dt>
+<dd><p>Freeze everything but the individual atom positions of all layers.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.train_editor.TrainEditor.enable_after_seeding">
+<span class="sig-name descname"><span class="pre">enable_after_seeding</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/train_editor.html#TrainEditor.enable_after_seeding"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.train_editor.TrainEditor.enable_after_seeding" title="Link to this definition">¶</a></dt>
+<dd><p>Seeded atoms start out free: release their positions and intensities.</p>
+</dd></dl>
+
+</dd></dl>
+
+<p id="module-temsim_gui.panels">Part V, Section 9: the control panels.</p>
+<section id="id15">
+<h2>Theory<a class="headerlink" href="#id15" title="Link to this heading">¶</a></h2>
+<p>The right-hand column of the window consists of four panels.  A panel is <em>only</em> a set of
+widgets: it knows its defaults, how to show a state and how to hand its settings
+out, but nothing about the core; the <a class="reference internal" href="#temsim_gui.controller.Controller" title="temsim_gui.controller.Controller"><code class="xref py py-class docutils literal notranslate"><span class="pre">Controller</span></code></a> connects
+panels, canvas and connection.  This is what makes the panels testable without a core
+and keeps the interface replaceable: a new button needs a widget here and one line there.</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#temsim_gui.panels.ControlPanel" title="temsim_gui.panels.ControlPanel"><code class="xref py py-class docutils literal notranslate"><span class="pre">ControlPanel</span></code></a> - state, training buttons, view options, resets, gradient
+arrows, removal of weak atoms.</p></li>
+<li><p><a class="reference internal" href="#temsim_gui.panels.MinimaPanel" title="temsim_gui.panels.MinimaPanel"><code class="xref py py-class docutils literal notranslate"><span class="pre">MinimaPanel</span></code></a> - candidate sites from the minima of the difference image
+(Part II, Section 5) and the checks that a candidate has to pass.</p></li>
+<li><p><a class="reference internal" href="#temsim_gui.panels.SeedingPanel" title="temsim_gui.panels.SeedingPanel"><code class="xref py py-class docutils literal notranslate"><span class="pre">SeedingPanel</span></code></a> - the options of the random seeding; the numbers are those of
+<a class="reference internal" href="part2_learning.html#temsim.learning.seeding.seeder.SeedConfig" title="temsim.learning.seeding.seeder.SeedConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">SeedConfig</span></code></a> plus the three job options.</p></li>
+<li><p><a class="reference internal" href="#temsim_gui.panels.StrainPanel" title="temsim_gui.panels.StrainPanel"><code class="xref py py-class docutils literal notranslate"><span class="pre">StrainPanel</span></code></a> - the number of control points of the displacement field of every
+group.</p></li>
+</ul>
+</section>
+<section id="id16">
+<h2>Implementation<a class="headerlink" href="#id16" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.panels.ControlPanel">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.panels.</span></span><span class="sig-name descname"><span class="pre">ControlPanel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/panels.html#ControlPanel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.ControlPanel" title="Link to this definition">¶</a></dt>
+<dd><p>Status, buttons and view options.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.panels.ControlPanel.set_state">
+<span class="sig-name descname"><span class="pre">set_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">job</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">open_</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/panels.html#ControlPanel.set_state"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.ControlPanel.set_state" title="Link to this definition">¶</a></dt>
+<dd><p>Label and enabled buttons for <code class="docutils literal notranslate"><span class="pre">state</span></code> in <code class="docutils literal notranslate"><span class="pre">idle</span> <span class="pre">|</span> <span class="pre">running</span> <span class="pre">|</span> <span class="pre">paused</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.panels.ControlPanel.fill_tiles">
+<span class="sig-name descname"><span class="pre">fill_tiles</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">entries</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Sequence</span><span class="p"><span class="pre">[</span></span><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/panels.html#ControlPanel.fill_tiles"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.ControlPanel.fill_tiles" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">(label,</span> <span class="pre">key)</span></code> of the tile combo; the chosen tile stays if it still exists.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.panels.MinimaPanel">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.panels.</span></span><span class="sig-name descname"><span class="pre">MinimaPanel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/panels.html#MinimaPanel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.MinimaPanel" title="Link to this definition">¶</a></dt>
+<dd><p>Candidate atom sites from the minima of the difference image.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.panels.MinimaPanel.verify">
+<span class="sig-name descname"><span class="pre">verify</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">bool</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim_gui/panels.html#MinimaPanel.verify"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.MinimaPanel.verify" title="Link to this definition">¶</a></dt>
+<dd><p>Keys of <code class="docutils literal notranslate"><span class="pre">Session.minima(verify=...)</span></code>.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.panels.SeedingPanel">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.panels.</span></span><span class="sig-name descname"><span class="pre">SeedingPanel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/panels.html#SeedingPanel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.SeedingPanel" title="Link to this definition">¶</a></dt>
+<dd><p>Options of the random seeding; changes go to the core at once, also while it runs.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim_gui.panels.SeedingPanel.FIELDS">
+<span class="sig-name descname"><span class="pre">FIELDS</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">(('touch_A',</span> <span class="pre">'Entfernen</span> <span class="pre">bis</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Atome,</span> <span class="pre">die</span> <span class="pre">naeher</span> <span class="pre">als</span> <span class="pre">das</span> <span class="pre">am</span> <span class="pre">neuen</span> <span class="pre">Atom</span> <span class="pre">liegen,</span> <span class="pre">werden</span> <span class="pre">entfernt.'),</span> <span class="pre">('merge_A',</span> <span class="pre">'Verschieben</span> <span class="pre">bis</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">&quot;Zwischen</span> <span class="pre">'Entfernen</span> <span class="pre">bis'</span> <span class="pre">und</span> <span class="pre">diesem</span> <span class="pre">Radius</span> <span class="pre">wird</span> <span class="pre">nicht</span> <span class="pre">neu</span> <span class="pre">eingefuegt:\ndas</span> <span class="pre">Nachbaratom</span> <span class="pre">wandert</span> <span class="pre">in</span> <span class="pre">die</span> <span class="pre">Mitte</span> <span class="pre">zum</span> <span class="pre">neuen</span> <span class="pre">Punkt.&quot;),</span> <span class="pre">('move_prob',</span> <span class="pre">'P(Atom</span> <span class="pre">verschieben)',</span> <span class="pre">0.0,</span> <span class="pre">1.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Anteil</span> <span class="pre">der</span> <span class="pre">Versuche,</span> <span class="pre">ein</span> <span class="pre">vorhandenes</span> <span class="pre">Atom</span> <span class="pre">zu</span> <span class="pre">verschieben</span> <span class="pre">statt</span> <span class="pre">eins</span> <span class="pre">einzufuegen.'),</span> <span class="pre">('remove_prob',</span> <span class="pre">'P(Atom</span> <span class="pre">entfernen)',</span> <span class="pre">0.0,</span> <span class="pre">1.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Anteil</span> <span class="pre">der</span> <span class="pre">Versuche,</span> <span class="pre">ein</span> <span class="pre">vorhandenes</span> <span class="pre">Atom</span> <span class="pre">wegzunehmen.'),</span> <span class="pre">('move_sigma_A',</span> <span class="pre">'Verschiebung</span> <span class="pre">sigma</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Streuung</span> <span class="pre">der</span> <span class="pre">Gauss-Verschiebung</span> <span class="pre">eines</span> <span class="pre">Atoms.'),</span> <span class="pre">('gradient_temperature',</span> <span class="pre">'Gradient</span> <span class="pre">Temperatur',</span> <span class="pre">0.01,</span> <span class="pre">5.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Klein:</span> <span class="pre">fast</span> <span class="pre">immer</span> <span class="pre">die</span> <span class="pre">beste</span> <span class="pre">Stelle</span> <span class="pre">der</span> <span class="pre">Landschaft;</span> <span class="pre">gross:</span> <span class="pre">breiter</span> <span class="pre">gestreut.'),</span> <span class="pre">('relax_prob',</span> <span class="pre">'P(Einfuegen</span> <span class="pre">+</span> <span class="pre">Ausweichen)',</span> <span class="pre">0.0,</span> <span class="pre">1.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Anteil</span> <span class="pre">der</span> <span class="pre">Versuche:</span> <span class="pre">neues</span> <span class="pre">Atom</span> <span class="pre">an</span> <span class="pre">einer</span> <span class="pre">von</span> <span class="pre">einem</span> <span class="pre">Nachbarn</span> <span class="pre">blockierten</span> <span class="pre">Stelle,</span> <span class="pre">der</span> <span class="pre">Nachbar\nsucht</span> <span class="pre">sich</span> <span class="pre">den</span> <span class="pre">besten</span> <span class="pre">neuen</span> <span class="pre">Platz.</span> <span class="pre">Nur</span> <span class="pre">STEM.'),</span> <span class="pre">('relax_A',</span> <span class="pre">'Ausweich-Reichweite</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Nachbaratome</span> <span class="pre">in</span> <span class="pre">diesem</span> <span class="pre">Abstand</span> <span class="pre">duerfen</span> <span class="pre">ausweichen.'),</span> <span class="pre">('bond_A',</span> <span class="pre">'Bindungslaenge</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Wahrscheinlichster</span> <span class="pre">Abstand</span> <span class="pre">zum</span> <span class="pre">Nachbaratom.'),</span> <span class="pre">('bond_sigma_A',</span> <span class="pre">'Bindung</span> <span class="pre">sigma</span> <span class="pre">[A]',</span> <span class="pre">0.01,</span> <span class="pre">5.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Breite</span> <span class="pre">der</span> <span class="pre">Gauss-Verteilung</span> <span class="pre">um</span> <span class="pre">die</span> <span class="pre">Bindungslaenge.'),</span> <span class="pre">('neighbour_min_A',</span> <span class="pre">'Nachbar</span> <span class="pre">min.</span> <span class="pre">Abstand</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Harter</span> <span class="pre">Cutoff</span> <span class="pre">nach</span> <span class="pre">unten.'),</span> <span class="pre">('neighbour_max_A',</span> <span class="pre">'Nachbar</span> <span class="pre">max.</span> <span class="pre">Abstand</span> <span class="pre">[A]',</span> <span class="pre">0.0,</span> <span class="pre">10.0,</span> <span class="pre">0.05,</span> <span class="pre">2,</span> <span class="pre">'Harter</span> <span class="pre">Cutoff</span> <span class="pre">nach</span> <span class="pre">oben.'),</span> <span class="pre">('max_atoms',</span> <span class="pre">'max.</span> <span class="pre">Atome</span> <span class="pre">(0</span> <span class="pre">=</span> <span class="pre">frei)',</span> <span class="pre">0,</span> <span class="pre">1000000,</span> <span class="pre">100,</span> <span class="pre">0,</span> <span class="pre">'Seeding</span> <span class="pre">endet,</span> <span class="pre">sobald</span> <span class="pre">so</span> <span class="pre">viele</span> <span class="pre">Atome</span> <span class="pre">gesetzt</span> <span class="pre">sind.'),</span> <span class="pre">('trials',</span> <span class="pre">'max.</span> <span class="pre">Versuche',</span> <span class="pre">1,</span> <span class="pre">100000000,</span> <span class="pre">1000,</span> <span class="pre">0,</span> <span class="pre">''),</span> <span class="pre">('tune_every',</span> <span class="pre">'Training</span> <span class="pre">alle</span> <span class="pre">N</span> <span class="pre">Versuche</span> <span class="pre">(0</span> <span class="pre">=</span> <span class="pre">aus)',</span> <span class="pre">0,</span> <span class="pre">1000000,</span> <span class="pre">100,</span> <span class="pre">0,</span> <span class="pre">'Zwischendurch</span> <span class="pre">ein</span> <span class="pre">paar</span> <span class="pre">Gradientenschritte</span> <span class="pre">auf</span> <span class="pre">Sonde/Mikroskop-Parametern.'),</span> <span class="pre">('tune_steps',</span> <span class="pre">'Schritte</span> <span class="pre">je</span> <span class="pre">Training',</span> <span class="pre">1,</span> <span class="pre">1000,</span> <span class="pre">1,</span> <span class="pre">0,</span> <span class="pre">''))</span></em><a class="headerlink" href="#temsim_gui.panels.SeedingPanel.FIELDS" title="Link to this definition">¶</a></dt>
+<dd><p>(key, label, minimum, maximum, step, decimals, tooltip); keys of SeedConfig or of the job</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.panels.SeedingPanel.show_values">
+<span class="sig-name descname"><span class="pre">show_values</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/panels.html#SeedingPanel.show_values"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.SeedingPanel.show_values" title="Link to this definition">¶</a></dt>
+<dd><p>Show a SeedConfig dictionary (and job options) without sending anything.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.panels.SeedingPanel.set_stem">
+<span class="sig-name descname"><span class="pre">set_stem</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stem</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/panels.html#SeedingPanel.set_stem"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.SeedingPanel.set_stem" title="Link to this definition">¶</a></dt>
+<dd><p>Gradient seeding needs the STEM landscape (Part II, Section 5).</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.panels.StrainPanel">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.panels.</span></span><span class="sig-name descname"><span class="pre">StrainPanel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QWidget</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/panels.html#StrainPanel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.StrainPanel" title="Link to this definition">¶</a></dt>
+<dd><p>Control points of the displacement field, per group.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.panels.StrainPanel.build">
+<span class="sig-name descname"><span class="pre">build</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">control_points</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Sequence</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/panels.html#StrainPanel.build"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.panels.StrainPanel.build" title="Link to this definition">¶</a></dt>
+<dd><p>One row per group; the rows are rebuilt when a different run is opened.</p>
+</dd></dl>
+
+</dd></dl>
+
+<p id="module-temsim_gui.controller">Part V, Section 10: the controller.</p>
+<section id="id17">
+<h2>Theory<a class="headerlink" href="#id17" title="Link to this heading">¶</a></h2>
+<p>The interface is a <em>client</em>: it holds no model and computes nothing.  What a person does
+- pressing a button, moving a spin box - becomes a command to the core; what the core
+reports - a <code class="docutils literal notranslate"><span class="pre">status</span></code>, a <code class="docutils literal notranslate"><span class="pre">light</span></code> or a <code class="docutils literal notranslate"><span class="pre">frame</span></code> event - becomes a change of the
+panels and the canvas.  <a class="reference internal" href="#temsim_gui.controller.Controller" title="temsim_gui.controller.Controller"><code class="xref py py-class docutils literal notranslate"><span class="pre">Controller</span></code></a> is the one place where this translation
+happens, so that the panels (Section 9) stay free of the protocol and the connection
+(Section 5) stays free of the panels.</p>
+<p><strong>Who changes what.</strong>  The core is the only owner of the state.  The controller never
+assumes that a command had an effect: after every edit it asks for a new frame
+(<code class="docutils literal notranslate"><span class="pre">render</span></code>) and shows that.  The only state kept here is <em>view</em> state - the zoom,
+the display threshold of the occupancy, the loss history - and the memory of what was
+last done, which decides two conveniences of the old interface:</p>
+<ul class="simple">
+<li><p>after a seeding, the first start of training releases the positions and intensities
+of the seeded atoms (unless the person has chosen the trainable quantities);</p></li>
+<li><p>the seeding view leaves out the strain tiles, because the displacement field is
+not trained while seeding.</p></li>
+</ul>
+<p><strong>Candidate sites.</strong>  While the optimiser runs, the core would have to build a seeder
+to test the sites, which costs time that belongs to the optimisation.  Candidates are
+therefore requested <em>without</em> the loss test while a job runs (yellow marks) and with
+it when the core is idle or paused (green marks), as in the old interface.</p>
+</section>
+<section id="id18">
+<h2>Implementation<a class="headerlink" href="#id18" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.controller.Controller">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.controller.</span></span><span class="sig-name descname"><span class="pre">Controller</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">connection</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.connection.Connection" title="temsim_gui.connection.Connection"><span class="pre">Connection</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">canvas</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.canvas.PlotCanvas" title="temsim_gui.canvas.PlotCanvas"><span class="pre">PlotCanvas</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">control</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.panels.ControlPanel" title="temsim_gui.panels.ControlPanel"><span class="pre">ControlPanel</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">minima</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.panels.MinimaPanel" title="temsim_gui.panels.MinimaPanel"><span class="pre">MinimaPanel</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">seeding</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.panels.SeedingPanel" title="temsim_gui.panels.SeedingPanel"><span class="pre">SeedingPanel</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.panels.StrainPanel" title="temsim_gui.panels.StrainPanel"><span class="pre">StrainPanel</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">values</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.values_editor.ValuesEditor" title="temsim_gui.values_editor.ValuesEditor"><span class="pre">ValuesEditor</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">train</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.train_editor.TrainEditor" title="temsim_gui.train_editor.TrainEditor"><span class="pre">TrainEditor</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">QObject</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/controller.html#Controller"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.controller.Controller" title="Link to this definition">¶</a></dt>
+<dd><dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.controller.Controller.refresh_model">
+<span class="sig-name descname"><span class="pre">refresh_model</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/controller.html#Controller.refresh_model"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.controller.Controller.refresh_model" title="Link to this definition">¶</a></dt>
+<dd><p>Read everything the panels show from the core.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.controller.Controller.finish">
+<span class="sig-name descname"><span class="pre">finish</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">save</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/controller.html#Controller.finish"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.controller.Controller.finish" title="Link to this definition">¶</a></dt>
+<dd><p>Stop the job and, if asked, save; the queued commands are completed by <code class="docutils literal notranslate"><span class="pre">Connection.close</span></code>.</p>
+</dd></dl>
+
+</dd></dl>
+
+<p id="module-temsim_gui.main_window">Part V, Section 11: the main window.</p>
+<section id="id19">
+<h2>Theory<a class="headerlink" href="#id19" title="Link to this heading">¶</a></h2>
+<p>The window is a composition and nothing else: the plot area on the left, a scrollable
+column of panels on the right, the editors below.  The proportions are those of the
+old interface (splitter 4:1, window 1600 x 950).  All behaviour lives in
+<a class="reference internal" href="#temsim_gui.controller.Controller" title="temsim_gui.controller.Controller"><code class="xref py py-class docutils literal notranslate"><span class="pre">Controller</span></code></a>.</p>
+</section>
+<section id="id20">
+<h2>Implementation<a class="headerlink" href="#id20" title="Link to this heading">¶</a></h2>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim_gui.main_window.MainWindow">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim_gui.main_window.</span></span><span class="sig-name descname"><span class="pre">MainWindow</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">connection</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.connection.Connection" title="temsim_gui.connection.Connection"><span class="pre">Connection</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">core</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim_gui.connection.SpawnedCore" title="temsim_gui.connection.SpawnedCore"><span class="pre">SpawnedCore</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim_gui/main_window.html#MainWindow"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.main_window.MainWindow" title="Link to this definition">¶</a></dt>
+<dd><dl class="py method">
+<dt class="sig sig-object py" id="temsim_gui.main_window.MainWindow.closeEvent">
+<span class="sig-name descname"><span class="pre">closeEvent</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">event</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">PySide6.QtGui.QCloseEvent</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">/</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="_modules/temsim_gui/main_window.html#MainWindow.closeEvent"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim_gui.main_window.MainWindow.closeEvent" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<p id="module-temsim_gui.launch">Part V, Section 12: starting the interface.</p>
+<p>The interface connects to a running core (<code class="docutils literal notranslate"><span class="pre">--endpoint</span></code>) or starts one of its own.
+Data is opened by a command after the connection, never by the core’s command line
+(Part IV, Section 2).</p>
+<section id="id21">
+<h2>Implementation<a class="headerlink" href="#id21" title="Link to this heading">¶</a></h2>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="part3_data.html">Part III - Data management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="part4_service.html">Part IV - Service</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Part V - Graphical client</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#theory">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#implementation">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.frame_model.LayerView"><code class="docutils literal notranslate"><span class="pre">LayerView</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.frame_model.FrameModel"><code class="docutils literal notranslate"><span class="pre">FrameModel</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.frame_model.LossHistory"><code class="docutils literal notranslate"><span class="pre">LossHistory</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id1">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id2">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.tiles.tile_keys"><code class="docutils literal notranslate"><span class="pre">tile_keys()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.tiles.Plan"><code class="docutils literal notranslate"><span class="pre">Plan</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.tiles.plan"><code class="docutils literal notranslate"><span class="pre">plan()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id3">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id4">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.scatter_size"><code class="docutils literal notranslate"><span class="pre">scatter_size()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.window"><code class="docutils literal notranslate"><span class="pre">window()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.inside"><code class="docutils literal notranslate"><span class="pre">inside()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.Arrows"><code class="docutils literal notranslate"><span class="pre">Arrows</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.arrows"><code class="docutils literal notranslate"><span class="pre">arrows()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.display_limits"><code class="docutils literal notranslate"><span class="pre">display_limits()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.overlays.window_limits"><code class="docutils literal notranslate"><span class="pre">window_limits()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id5">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id6">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.canvas.PlotCanvas"><code class="docutils literal notranslate"><span class="pre">PlotCanvas</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id7">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id8">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.connection.Connection"><code class="docutils literal notranslate"><span class="pre">Connection</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.connection.SpawnedCore"><code class="docutils literal notranslate"><span class="pre">SpawnedCore</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.connection.spawn_core"><code class="docutils literal notranslate"><span class="pre">spawn_core()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id9">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id10">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.widgets.CollapsibleSection"><code class="docutils literal notranslate"><span class="pre">CollapsibleSection</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.widgets.set_quietly"><code class="docutils literal notranslate"><span class="pre">set_quietly()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id11">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id12">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.values_editor.ValuesEditor"><code class="docutils literal notranslate"><span class="pre">ValuesEditor</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id13">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id14">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.train_editor.TrainEditor"><code class="docutils literal notranslate"><span class="pre">TrainEditor</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id15">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id16">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.panels.ControlPanel"><code class="docutils literal notranslate"><span class="pre">ControlPanel</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.panels.MinimaPanel"><code class="docutils literal notranslate"><span class="pre">MinimaPanel</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.panels.SeedingPanel"><code class="docutils literal notranslate"><span class="pre">SeedingPanel</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.panels.StrainPanel"><code class="docutils literal notranslate"><span class="pre">StrainPanel</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id17">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id18">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.controller.Controller"><code class="docutils literal notranslate"><span class="pre">Controller</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id19">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id20">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim_gui.main_window.MainWindow"><code class="docutils literal notranslate"><span class="pre">MainWindow</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id21">Implementation</a></li>
+</ul>
+</li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="part4_service.html" title="previous chapter">Part IV - Service</a></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+      |
+      <a href="_sources/part5_gui.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

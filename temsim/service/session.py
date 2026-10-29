@@ -147,7 +147,7 @@ class Session:
 
     def set_workspace(self, directory: Optional[str]) -> None:
         if directory:
-            directory = os.path.abspath(directory)
+            directory = os.path.abspath(os.path.expanduser(directory))
             os.makedirs(directory, exist_ok=True)
         self.workspace = directory or None
 

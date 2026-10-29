@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.data.legacy &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.data.legacy</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;Part III, Section 3: reading the formats of earlier versions.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">A file format is a contract that outlives the code that wrote it.  Four formats</span>
+<span class="sd">exist in the wild, and all of them must stay readable:</span>
+
+<span class="sd">========================  ======================================================</span>
+<span class="sd">File                      Generations</span>
+<span class="sd">========================  ======================================================</span>
+<span class="sd">``config.json``           (a) fixed four layers ``Gr/S1/W/S2`` with ``z_positions_nm``</span>
+<span class="sd">                          and ``control_points_*``; (b) ``layers``/``groups``;</span>
+<span class="sd">                          each either written with ``asdict`` or wrapped as</span>
+<span class="sd">                          ``{&quot;__type__&quot;: &quot;dataclass&quot;, ...}``.</span>
+<span class="sd">``train_method.json``     (a) flat flags ``graphen_shift`` ...; (b) groups/layers</span>
+<span class="sd">                          dictionaries; plain or wrapped.</span>
+<span class="sd">parameter dumps           ``scale_Gr``, ``shift_WS2``, ``graphene_potential_factor``</span>
+<span class="sd">(``best.json`` ...)       or the group dictionaries; polar or cartesian aberrations.</span>
+<span class="sd">``init.json``             written by the ImageJ plug-in (input, version 1 and 2).</span>
+<span class="sd">========================  ======================================================</span>
+
+<span class="sd">Strategy (Eq. 3.3): a migration is a pure function from the raw JSON value to the</span>
+<span class="sd">current schema, ``new = M_k(M_{k-1}(...(old)))``.  Nothing in the rest of the code</span>
+<span class="sd">knows an old name.  Every function here has a test that loads real files.</span>
+
+<span class="sd">Aberration coefficients are passed through unchanged: converting between the polar</span>
+<span class="sd">and the cartesian form is optics, not data management (see</span>
+<span class="sd">:mod:`temsim.physics.optics`).  Likewise, resampling a strain control grid to a</span>
+<span class="sd">different resolution happens where the grid is applied.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.schema</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">Experiment</span><span class="p">,</span> <span class="n">Group</span><span class="p">,</span> <span class="n">GroupTrain</span><span class="p">,</span> <span class="n">Imaging</span><span class="p">,</span> <span class="n">Layer</span><span class="p">,</span> <span class="n">LayerTrain</span><span class="p">,</span> <span class="n">ModelState</span><span class="p">,</span>
+    <span class="n">OpticsState</span><span class="p">,</span> <span class="n">Stem</span><span class="p">,</span> <span class="n">Structure</span><span class="p">,</span> <span class="n">TrainParam</span><span class="p">,</span> <span class="n">TrainSettings</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">log</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;temsim.data&quot;</span><span class="p">)</span>
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Generic unwrapping of  {&quot;__type__&quot;: ...}  envelopes</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+
+<div class="viewcode-block" id="unwrap">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.legacy.unwrap">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">unwrap</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Strip the ``__type__`` envelopes written by the old serialisers.</span>
+
+<span class="sd">    ``dataclass`` -&gt; its ``data`` object, ``ndarray`` and ``tensor`` -&gt; nested list,</span>
+<span class="sd">    ``tuple`` -&gt; list.  Plain values pass through.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="n">kind</span> <span class="o">=</span> <span class="n">value</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;__type__&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">kind</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;dataclass&quot;</span><span class="p">,</span> <span class="s2">&quot;ndarray&quot;</span><span class="p">,</span> <span class="s2">&quot;tensor&quot;</span><span class="p">,</span> <span class="s2">&quot;tuple&quot;</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">unwrap</span><span class="p">(</span><span class="n">value</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">])</span>
+        <span class="k">return</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">unwrap</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">value</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">unwrap</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">value</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">value</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># config.json</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="n">LEGACY_LAYER_NAMES</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;S1&quot;</span><span class="p">,</span> <span class="s2">&quot;W&quot;</span><span class="p">,</span> <span class="s2">&quot;S2&quot;</span><span class="p">)</span>
+<span class="n">LEGACY_LAYER_ELEMENTS</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="s2">&quot;S&quot;</span><span class="p">,</span> <span class="s2">&quot;W&quot;</span><span class="p">,</span> <span class="s2">&quot;S&quot;</span><span class="p">)</span>
+<span class="n">LEGACY_LAYER_GROUP</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;Gr&quot;</span><span class="p">:</span> <span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;S1&quot;</span><span class="p">:</span> <span class="s2">&quot;WS2&quot;</span><span class="p">,</span> <span class="s2">&quot;W&quot;</span><span class="p">:</span> <span class="s2">&quot;WS2&quot;</span><span class="p">,</span> <span class="s2">&quot;S2&quot;</span><span class="p">:</span> <span class="s2">&quot;WS2&quot;</span><span class="p">}</span>
+<span class="n">LEGACY_GROUP_NAMES</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;WS2&quot;</span><span class="p">)</span>
+<span class="n">LEGACY_GROUP_INIT</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;Gr&quot;</span><span class="p">:</span> <span class="nb">dict</span><span class="p">(</span><span class="n">init_scale</span><span class="o">=</span><span class="p">[</span><span class="mf">1.12</span><span class="p">,</span> <span class="mf">1.14</span><span class="p">],</span> <span class="n">init_rotation</span><span class="o">=</span><span class="mf">0.025</span><span class="p">,</span> <span class="n">init_shift</span><span class="o">=</span><span class="p">[</span><span class="o">-</span><span class="mf">9.5</span><span class="p">,</span> <span class="o">-</span><span class="mf">11.0</span><span class="p">]),</span>
+    <span class="s2">&quot;WS2&quot;</span><span class="p">:</span> <span class="nb">dict</span><span class="p">(</span><span class="n">init_scale</span><span class="o">=</span><span class="p">[</span><span class="mf">1.05</span><span class="p">,</span> <span class="mf">1.09</span><span class="p">],</span> <span class="n">init_rotation</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">init_shift</span><span class="o">=</span><span class="p">[</span><span class="mf">15.9</span><span class="p">,</span> <span class="o">-</span><span class="mf">5.0</span><span class="p">]),</span>
+<span class="p">}</span>
+<span class="n">LEGACY_INIT_OCCUPANCY</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;Gr&quot;</span><span class="p">:</span> <span class="mf">100.0</span><span class="p">,</span> <span class="s2">&quot;S1&quot;</span><span class="p">:</span> <span class="mf">2.0</span><span class="p">,</span> <span class="s2">&quot;W&quot;</span><span class="p">:</span> <span class="mf">2.0</span><span class="p">,</span> <span class="s2">&quot;S2&quot;</span><span class="p">:</span> <span class="mf">2.0</span><span class="p">}</span>
+
+<span class="n">_GROUP_RENAMES</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;init_potential_factor&quot;</span><span class="p">:</span> <span class="s2">&quot;init_contrast_factor&quot;</span><span class="p">}</span>
+
+
+<div class="viewcode-block" id="legacy_layers_and_groups">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.legacy.legacy_layers_and_groups">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">legacy_layers_and_groups</span><span class="p">(</span><span class="n">z_positions_nm</span><span class="p">,</span> <span class="n">control_points_graphen</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span>
+                             <span class="n">control_points_ws2</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">max_shifts</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                             <span class="n">max_rotations</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_layers</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The original fixed constellation ``Gr = [Gr]``, ``WS2 = [S1, W, S2]``.&quot;&quot;&quot;</span>
+
+    <span class="n">z</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">z_positions_nm</span><span class="p">)</span> <span class="k">if</span> <span class="n">z_positions_nm</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="p">[]</span>
+    <span class="n">n_layers</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">z</span><span class="p">)</span> <span class="k">if</span> <span class="n">n_layers</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">n_layers</span>
+    <span class="n">z</span> <span class="o">+=</span> <span class="p">[</span><span class="mf">0.0</span><span class="p">]</span> <span class="o">*</span> <span class="p">(</span><span class="n">n_layers</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">z</span><span class="p">))</span>
+
+    <span class="k">if</span> <span class="n">n_layers</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">LEGACY_LAYER_NAMES</span><span class="p">):</span>
+        <span class="n">group</span> <span class="o">=</span> <span class="n">Group</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;all&quot;</span><span class="p">,</span> <span class="n">control_points</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">control_points_ws2</span><span class="p">),</span>
+                      <span class="n">max_shift</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">max_shifts</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">max_shifts</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]),</span>
+                      <span class="n">max_rotation</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">max_rotations</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">max_rotations</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]))</span>
+        <span class="k">return</span> <span class="p">([</span><span class="n">Layer</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;L</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">element</span><span class="o">=</span><span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="n">z_nm</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">z</span><span class="p">[</span><span class="n">i</span><span class="p">]),</span> <span class="n">group</span><span class="o">=</span><span class="s2">&quot;all&quot;</span><span class="p">)</span>
+                 <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_layers</span><span class="p">)],</span> <span class="p">[</span><span class="n">group</span><span class="p">])</span>
+
+    <span class="n">groups</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">gi</span><span class="p">,</span> <span class="n">gname</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">LEGACY_GROUP_NAMES</span><span class="p">):</span>
+        <span class="n">groups</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Group</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="n">gname</span><span class="p">,</span>
+            <span class="n">control_points</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">control_points_graphen</span> <span class="k">if</span> <span class="n">gname</span> <span class="o">==</span> <span class="s2">&quot;Gr&quot;</span> <span class="k">else</span> <span class="n">control_points_ws2</span><span class="p">),</span>
+            <span class="n">max_shift</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">max_shifts</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">max_shifts</span><span class="p">[</span><span class="n">gi</span><span class="p">]),</span>
+            <span class="n">max_rotation</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">max_rotations</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">max_rotations</span><span class="p">[</span><span class="n">gi</span><span class="p">]),</span>
+            <span class="n">isolate_when_active</span><span class="o">=</span><span class="p">(</span><span class="n">gname</span> <span class="o">==</span> <span class="s2">&quot;Gr&quot;</span><span class="p">),</span>
+            <span class="o">**</span><span class="n">LEGACY_GROUP_INIT</span><span class="p">[</span><span class="n">gname</span><span class="p">]))</span>
+    <span class="n">layers</span> <span class="o">=</span> <span class="p">[</span><span class="n">Layer</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">element</span><span class="o">=</span><span class="n">LEGACY_LAYER_ELEMENTS</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">z_nm</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">z</span><span class="p">[</span><span class="n">i</span><span class="p">]),</span>
+                    <span class="n">group</span><span class="o">=</span><span class="n">LEGACY_LAYER_GROUP</span><span class="p">[</span><span class="n">name</span><span class="p">],</span>
+                    <span class="n">init_occupancy</span><span class="o">=</span><span class="n">LEGACY_INIT_OCCUPANCY</span><span class="p">[</span><span class="n">name</span><span class="p">],</span>
+                    <span class="n">occ_entropy</span><span class="o">=</span><span class="p">(</span><span class="n">name</span> <span class="o">!=</span> <span class="s2">&quot;Gr&quot;</span><span class="p">))</span>
+              <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">LEGACY_LAYER_NAMES</span><span class="p">)]</span>
+    <span class="k">return</span> <span class="n">layers</span><span class="p">,</span> <span class="n">groups</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_dataclass_from</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">raw</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">renames</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+    <span class="n">raw</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="n">new</span> <span class="ow">in</span> <span class="p">(</span><span class="n">renames</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">raw</span><span class="p">:</span>
+            <span class="n">raw</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">new</span><span class="p">,</span> <span class="n">raw</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">old</span><span class="p">))</span>
+    <span class="n">known</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="bp">cls</span><span class="o">.</span><span class="n">__dataclass_fields__</span><span class="p">)</span>
+    <span class="n">dropped</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span> <span class="o">-</span> <span class="n">known</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">dropped</span><span class="p">:</span>
+        <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2">: ignoring unknown fields </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="bp">cls</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span> <span class="n">dropped</span><span class="p">)</span>
+    <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="o">**</span><span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">v</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">raw</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">known</span><span class="p">})</span>
+
+
+<div class="viewcode-block" id="experiment_from_legacy">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.legacy.experiment_from_legacy">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">experiment_from_legacy</span><span class="p">(</span><span class="n">raw</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Experiment</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;``config.json`` (any generation) -&gt; :class:`Experiment`.&quot;&quot;&quot;</span>
+
+    <span class="n">c</span> <span class="o">=</span> <span class="n">unwrap</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+    <span class="n">positions</span> <span class="o">=</span> <span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;init_positions&quot;</span><span class="p">]]</span>
+    <span class="n">atomic</span> <span class="o">=</span> <span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">z</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">for</span> <span class="n">z</span> <span class="ow">in</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;init_intensities&quot;</span><span class="p">]]</span>
+    <span class="n">weights</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_weight_factors&quot;</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;layers&quot;</span><span class="p">):</span>
+        <span class="n">layers</span> <span class="o">=</span> <span class="p">[</span><span class="n">_dataclass_from</span><span class="p">(</span><span class="n">Layer</span><span class="p">,</span> <span class="n">l</span><span class="p">)</span> <span class="k">for</span> <span class="n">l</span> <span class="ow">in</span> <span class="n">c</span><span class="p">[</span><span class="s2">&quot;layers&quot;</span><span class="p">]]</span>
+        <span class="n">groups</span> <span class="o">=</span> <span class="p">[</span><span class="n">_dataclass_from</span><span class="p">(</span><span class="n">Group</span><span class="p">,</span> <span class="n">g</span><span class="p">,</span> <span class="n">_GROUP_RENAMES</span><span class="p">)</span> <span class="k">for</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;groups&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">[]]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">layers</span><span class="p">,</span> <span class="n">groups</span> <span class="o">=</span> <span class="n">legacy_layers_and_groups</span><span class="p">(</span>
+            <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;z_positions_nm&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">[],</span>
+            <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;control_points_graphen&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span>
+            <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;control_points_ws2&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span>
+            <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;max_shifts&quot;</span><span class="p">),</span> <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;max_rotations&quot;</span><span class="p">),</span> <span class="n">n_layers</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">positions</span><span class="p">))</span>
+
+    <span class="n">stem</span> <span class="o">=</span> <span class="n">Stem</span><span class="p">(</span>
+        <span class="n">convergence_mrad</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;stem_convergence_mrad&quot;</span><span class="p">,</span> <span class="mf">25.0</span><span class="p">)),</span>
+        <span class="n">detector_mrad</span><span class="o">=</span><span class="nb">tuple</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;stem_detector_mrad&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">(</span><span class="mf">60.0</span><span class="p">,</span> <span class="mf">200.0</span><span class="p">)),</span>
+        <span class="n">source_size_A</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;stem_source_size_A&quot;</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">)),</span>
+        <span class="n">aberrations</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">c</span><span class="p">[</span><span class="s2">&quot;init_probe_aberrations&quot;</span><span class="p">])</span> <span class="k">if</span> <span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_probe_aberrations&quot;</span><span class="p">)</span> <span class="k">else</span> <span class="kc">None</span><span class="p">)</span>
+
+    <span class="n">imaging</span> <span class="o">=</span> <span class="n">Imaging</span><span class="p">(</span>
+        <span class="n">shape</span><span class="o">=</span><span class="nb">tuple</span><span class="p">(</span><span class="n">c</span><span class="p">[</span><span class="s2">&quot;shape&quot;</span><span class="p">]),</span> <span class="n">pixel_size_nm</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="p">[</span><span class="s2">&quot;pixel_size_nm&quot;</span><span class="p">]),</span>
+        <span class="n">mode</span><span class="o">=</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;imaging_mode&quot;</span><span class="p">,</span> <span class="s2">&quot;tem&quot;</span><span class="p">),</span> <span class="n">voltage_kV</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="p">[</span><span class="s2">&quot;voltage_kV&quot;</span><span class="p">]),</span>
+        <span class="n">padding</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;padding&quot;</span><span class="p">,</span> <span class="mi">100</span><span class="p">)),</span> <span class="n">beam_direction</span><span class="o">=</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;beam_direction&quot;</span><span class="p">,</span> <span class="s2">&quot;+z&quot;</span><span class="p">),</span>
+        <span class="n">aberrations</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_aberrations&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{}),</span>
+        <span class="n">envelope</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_ctf_env_params&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{}),</span>
+        <span class="n">amp_contrast</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;init_amp_contrast&quot;</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">)),</span>
+        <span class="n">alpha_max_mrad</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;ctf_alpha_max_mrad&quot;</span><span class="p">,</span> <span class="mf">50.0</span><span class="p">)),</span>
+        <span class="n">ctf_parametrization</span><span class="o">=</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;ctf_parametrization&quot;</span><span class="p">,</span> <span class="s2">&quot;cartesian&quot;</span><span class="p">),</span> <span class="n">stem</span><span class="o">=</span><span class="n">stem</span><span class="p">,</span>
+        <span class="n">potential_parametrization</span><span class="o">=</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;potential_parametrization&quot;</span><span class="p">,</span> <span class="s2">&quot;kirkland&quot;</span><span class="p">),</span>
+        <span class="n">band_limit</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;band_limit&quot;</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)),</span> <span class="n">tem_signal</span><span class="o">=</span><span class="n">c</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tem_signal&quot;</span><span class="p">,</span> <span class="s2">&quot;amplitude&quot;</span><span class="p">))</span>
+
+    <span class="k">return</span> <span class="n">Experiment</span><span class="p">(</span><span class="n">imaging</span><span class="o">=</span><span class="n">imaging</span><span class="p">,</span> <span class="n">layers</span><span class="o">=</span><span class="n">layers</span><span class="p">,</span> <span class="n">groups</span><span class="o">=</span><span class="n">groups</span><span class="p">,</span>
+                      <span class="n">structure</span><span class="o">=</span><span class="n">Structure</span><span class="p">(</span><span class="n">positions</span><span class="p">,</span> <span class="n">atomic</span><span class="p">,</span> <span class="n">weights</span><span class="p">))</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># train_method.json</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="c1">#: switch names of the old TrainMethod -&gt; TrainSettings key</span>
+<span class="n">TRAIN_KEY_ALIASES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;train_amplitude_contrast&quot;</span><span class="p">:</span> <span class="s2">&quot;amp_contrast&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;train_ctf_aberrations&quot;</span><span class="p">:</span> <span class="s2">&quot;aberrations&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;train_env_parameters&quot;</span><span class="p">:</span> <span class="s2">&quot;envelope&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;train_normalisation_parameters&quot;</span><span class="p">:</span> <span class="s2">&quot;normalisation&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="c1">#: old flat loss name -&gt; field of :class:`LossWeights`</span>
+<span class="n">LOSS_KEY_ALIASES</span> <span class="o">=</span> <span class="p">{</span><span class="sa">f</span><span class="s2">&quot;loss_</span><span class="si">{</span><span class="n">n</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">:</span> <span class="n">n</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span>
+                    <span class="p">(</span><span class="s2">&quot;var&quot;</span><span class="p">,</span> <span class="s2">&quot;local_var_100&quot;</span><span class="p">,</span> <span class="s2">&quot;mse&quot;</span><span class="p">,</span> <span class="s2">&quot;ncc&quot;</span><span class="p">,</span> <span class="s2">&quot;local_ncc_100&quot;</span><span class="p">,</span> <span class="s2">&quot;ssim&quot;</span><span class="p">,</span> <span class="s2">&quot;l1&quot;</span><span class="p">)}</span>
+<span class="n">_LOSS_NAMES</span> <span class="o">=</span> <span class="n">LOSS_KEY_ALIASES</span>
+<span class="n">_REG_NAMES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;occ_entropy_a&quot;</span><span class="p">:</span> <span class="s2">&quot;occ_entropy_a&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;position_shifts_regularization_a&quot;</span><span class="p">:</span> <span class="s2">&quot;position_shifts_a&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;repulsion_a&quot;</span><span class="p">:</span> <span class="s2">&quot;repulsion_a&quot;</span><span class="p">,</span> <span class="s2">&quot;repulsion_distance_A&quot;</span><span class="p">:</span> <span class="s2">&quot;repulsion_distance_A&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;strain_energy_a&quot;</span><span class="p">:</span> <span class="s2">&quot;strain_energy_a&quot;</span><span class="p">,</span> <span class="s2">&quot;strain_energy_lambda&quot;</span><span class="p">:</span> <span class="s2">&quot;strain_energy_lambda&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;strain_energy_mu&quot;</span><span class="p">:</span> <span class="s2">&quot;strain_energy_mu&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="n">_FLAT_GROUP_FIELDS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;graphen_shift&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;shift&quot;</span><span class="p">),</span> <span class="s2">&quot;graphen_rotation&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;rotation&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;graphen_scale&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;scale&quot;</span><span class="p">),</span> <span class="s2">&quot;Gr_strain_field&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;strain_field&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;WS2_shift&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;WS2&quot;</span><span class="p">,</span> <span class="s2">&quot;shift&quot;</span><span class="p">),</span> <span class="s2">&quot;WS2_rotation&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;WS2&quot;</span><span class="p">,</span> <span class="s2">&quot;rotation&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;WS2_scale&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;WS2&quot;</span><span class="p">,</span> <span class="s2">&quot;scale&quot;</span><span class="p">),</span> <span class="s2">&quot;WS2_strain_field&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;WS2&quot;</span><span class="p">,</span> <span class="s2">&quot;strain_field&quot;</span><span class="p">),</span>
+<span class="p">}</span>
+<span class="n">_FLAT_LAYER_FIELDS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="sa">f</span><span class="s2">&quot;train_</span><span class="si">{</span><span class="s1">&#39;graphen&#39;</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s1">&#39;Gr&#39;</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="n">n</span><span class="si">}</span><span class="s2">_</span><span class="si">{</span><span class="n">what</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">:</span> <span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">what</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">LEGACY_LAYER_NAMES</span> <span class="k">for</span> <span class="n">what</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;intensities&quot;</span><span class="p">,</span> <span class="s2">&quot;occupancies&quot;</span><span class="p">)</span>
+<span class="p">}</span>
+<span class="n">_FLAT_GROUP_TO_LAYER</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;graphen_free_positions&quot;</span><span class="p">:</span> <span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="s2">&quot;WS2_free_positions&quot;</span><span class="p">:</span> <span class="s2">&quot;WS2&quot;</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_train_param</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TrainParam</span><span class="p">:</span>
+    <span class="n">raw</span> <span class="o">=</span> <span class="n">raw</span> <span class="ow">or</span> <span class="p">{}</span>
+    <span class="k">return</span> <span class="n">TrainParam</span><span class="p">(</span><span class="n">enabled</span><span class="o">=</span><span class="nb">bool</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;enabled&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)),</span> <span class="n">lr</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;lr&quot;</span><span class="p">,</span> <span class="mf">1e-4</span><span class="p">)))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_flat_to_nested</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Very old flat ``graphen_shift`` style flags -&gt; ``groups``/``layers`` dictionaries.&quot;&quot;&quot;</span>
+
+    <span class="n">data</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="n">groups</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;groups&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span>
+    <span class="n">layers</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;layers&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="p">(</span><span class="n">g</span><span class="p">,</span> <span class="n">attr</span><span class="p">)</span> <span class="ow">in</span> <span class="n">_FLAT_GROUP_FIELDS</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+            <span class="n">groups</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">g</span><span class="p">,</span> <span class="p">{})[</span><span class="n">attr</span><span class="p">]</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">old</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">attr</span><span class="p">)</span> <span class="ow">in</span> <span class="n">_FLAT_LAYER_FIELDS</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+            <span class="n">layers</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="p">{})[</span><span class="n">attr</span><span class="p">]</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">old</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">_FLAT_GROUP_TO_LAYER</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+            <span class="n">value</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">old</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">l</span> <span class="ow">in</span> <span class="n">LEGACY_LAYER_NAMES</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">LEGACY_LAYER_GROUP</span><span class="p">[</span><span class="n">l</span><span class="p">]</span> <span class="o">==</span> <span class="n">g</span><span class="p">:</span>
+                    <span class="n">layers</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="p">{})[</span><span class="s2">&quot;free_positions&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+    <span class="n">area</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;only_train_small_area&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">area</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="mi">0</span> <span class="o">&lt;=</span> <span class="nb">int</span><span class="p">(</span><span class="n">area</span><span class="p">)</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">LEGACY_GROUP_NAMES</span><span class="p">):</span>
+        <span class="n">data</span><span class="p">[</span><span class="s2">&quot;active_group&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">LEGACY_GROUP_NAMES</span><span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">area</span><span class="p">)]</span>
+    <span class="n">data</span><span class="p">[</span><span class="s2">&quot;groups&quot;</span><span class="p">],</span> <span class="n">data</span><span class="p">[</span><span class="s2">&quot;layers&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">groups</span><span class="p">,</span> <span class="n">layers</span>
+    <span class="k">return</span> <span class="n">data</span>
+
+
+<div class="viewcode-block" id="train_settings_from_legacy">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.legacy.train_settings_from_legacy">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">train_settings_from_legacy</span><span class="p">(</span><span class="n">raw</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TrainSettings</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;``train_method.json`` (any generation) -&gt; :class:`TrainSettings`.&quot;&quot;&quot;</span>
+
+    <span class="n">d</span> <span class="o">=</span> <span class="n">_flat_to_nested</span><span class="p">(</span><span class="n">unwrap</span><span class="p">(</span><span class="n">raw</span><span class="p">))</span>
+    <span class="n">ts</span> <span class="o">=</span> <span class="n">TrainSettings</span><span class="p">()</span>
+
+    <span class="k">for</span> <span class="n">gname</span><span class="p">,</span> <span class="n">gp</span> <span class="ow">in</span> <span class="n">d</span><span class="p">[</span><span class="s2">&quot;groups&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">g</span> <span class="o">=</span> <span class="n">GroupTrain</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">attr</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="p">(</span><span class="n">gp</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">g</span><span class="p">,</span> <span class="n">attr</span><span class="p">):</span>
+                <span class="nb">setattr</span><span class="p">(</span><span class="n">g</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">_train_param</span><span class="p">(</span><span class="n">value</span><span class="p">))</span>
+        <span class="n">ts</span><span class="o">.</span><span class="n">groups</span><span class="p">[</span><span class="n">gname</span><span class="p">]</span> <span class="o">=</span> <span class="n">g</span>
+    <span class="k">for</span> <span class="n">lname</span><span class="p">,</span> <span class="n">lp</span> <span class="ow">in</span> <span class="n">d</span><span class="p">[</span><span class="s2">&quot;layers&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">l</span> <span class="o">=</span> <span class="n">LayerTrain</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">attr</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="p">(</span><span class="n">lp</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">attr</span><span class="p">):</span>
+                <span class="nb">setattr</span><span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">_train_param</span><span class="p">(</span><span class="n">value</span><span class="p">))</span>
+        <span class="n">ts</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">lname</span><span class="p">]</span> <span class="o">=</span> <span class="n">l</span>
+
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="n">new</span> <span class="ow">in</span> <span class="n">TRAIN_KEY_ALIASES</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">d</span><span class="p">:</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">ts</span><span class="p">,</span> <span class="n">new</span><span class="p">,</span> <span class="n">_train_param</span><span class="p">(</span><span class="n">d</span><span class="p">[</span><span class="n">old</span><span class="p">]))</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="n">new</span> <span class="ow">in</span> <span class="n">_LOSS_NAMES</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">d</span><span class="p">:</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">ts</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span> <span class="n">new</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">d</span><span class="p">[</span><span class="n">old</span><span class="p">]))</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="n">new</span> <span class="ow">in</span> <span class="n">_REG_NAMES</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">d</span><span class="p">:</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">ts</span><span class="o">.</span><span class="n">regularisation</span><span class="p">,</span> <span class="n">new</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">d</span><span class="p">[</span><span class="n">old</span><span class="p">]))</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">d</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;train_aberrations&quot;</span><span class="p">),</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="n">ts</span><span class="o">.</span><span class="n">aberration_flags</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">bool</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">d</span><span class="p">[</span><span class="s2">&quot;train_aberrations&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">d</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;train_env_params&quot;</span><span class="p">),</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="n">ts</span><span class="o">.</span><span class="n">envelope_flags</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">bool</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">d</span><span class="p">[</span><span class="s2">&quot;train_env_params&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="n">ts</span><span class="o">.</span><span class="n">active_group</span> <span class="o">=</span> <span class="n">d</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;active_group&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="kc">None</span>
+    <span class="k">return</span> <span class="n">ts</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># parameter dumps (best.json ...)</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="n">_FLAT_POTENTIAL_FIELDS</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;scale_Gr&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;scales&quot;</span><span class="p">,</span> <span class="s2">&quot;Gr&quot;</span><span class="p">),</span> <span class="s2">&quot;rotation_Gr&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;rotations&quot;</span><span class="p">,</span> <span class="s2">&quot;Gr&quot;</span><span class="p">),</span> <span class="s2">&quot;shift_Gr&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;shifts&quot;</span><span class="p">,</span> <span class="s2">&quot;Gr&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;scale_WS2&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;scales&quot;</span><span class="p">,</span> <span class="s2">&quot;WS2&quot;</span><span class="p">),</span> <span class="s2">&quot;rotation_WS2&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;rotations&quot;</span><span class="p">,</span> <span class="s2">&quot;WS2&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;shift_WS2&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;shifts&quot;</span><span class="p">,</span> <span class="s2">&quot;WS2&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;graphene_potential_factor&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;contrast_factors&quot;</span><span class="p">,</span> <span class="s2">&quot;Gr&quot;</span><span class="p">),</span>
+    <span class="s2">&quot;ws2_potential_factor&quot;</span><span class="p">:</span> <span class="p">(</span><span class="s2">&quot;contrast_factors&quot;</span><span class="p">,</span> <span class="s2">&quot;WS2&quot;</span><span class="p">),</span>
+<span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_per_layer</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">experiment</span><span class="p">:</span> <span class="n">Experiment</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">width</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;List with one array per layer; remap old four-layer files by layer name.&quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[]</span>
+    <span class="n">names</span> <span class="o">=</span> <span class="n">experiment</span><span class="o">.</span><span class="n">layer_names</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">names</span><span class="p">):</span>
+        <span class="n">remapped</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">names</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">LEGACY_LAYER_NAMES</span> <span class="ow">and</span> <span class="n">LEGACY_LAYER_NAMES</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">n</span><span class="p">)</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
+                <span class="n">remapped</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">value</span><span class="p">[</span><span class="n">LEGACY_LAYER_NAMES</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">n</span><span class="p">)])</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">log</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;parameter file: &#39;</span><span class="si">%s</span><span class="s2">&#39; (</span><span class="si">%d</span><span class="s2"> layers) does not fit layers </span><span class="si">%s</span><span class="s2"> - ignored&quot;</span><span class="p">,</span>
+                            <span class="n">name</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">value</span><span class="p">),</span> <span class="n">names</span><span class="p">)</span>
+                <span class="k">return</span> <span class="p">[]</span>
+        <span class="n">value</span> <span class="o">=</span> <span class="n">remapped</span>
+    <span class="k">return</span> <span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">width</span><span class="p">)</span> <span class="k">if</span> <span class="n">width</span> <span class="k">else</span> <span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,))</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">value</span><span class="p">]</span>
+
+
+<div class="viewcode-block" id="state_from_legacy">
+<a class="viewcode-back" href="../../../part3_data.html#temsim.data.legacy.state_from_legacy">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">state_from_legacy</span><span class="p">(</span><span class="n">raw</span><span class="p">:</span> <span class="nb">dict</span><span class="p">,</span> <span class="n">experiment</span><span class="p">:</span> <span class="n">Experiment</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ModelState</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Parameter dump (``best.json`` &amp; co.) -&gt; :class:`ModelState`.&quot;&quot;&quot;</span>
+
+    <span class="n">d</span> <span class="o">=</span> <span class="n">unwrap</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+    <span class="n">pot</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">d</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;potential_parameters&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span>
+    <span class="n">names</span> <span class="o">=</span> <span class="n">experiment</span><span class="o">.</span><span class="n">group_names</span>
+    <span class="n">state</span> <span class="o">=</span> <span class="n">ModelState</span><span class="p">()</span>
+
+    <span class="n">buckets</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">dict</span><span class="p">(</span><span class="n">pot</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">k</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span>
+                                          <span class="p">(</span><span class="s2">&quot;scales&quot;</span><span class="p">,</span> <span class="s2">&quot;rotations&quot;</span><span class="p">,</span> <span class="s2">&quot;shifts&quot;</span><span class="p">,</span> <span class="s2">&quot;contrast_factors&quot;</span><span class="p">)}</span>
+    <span class="k">if</span> <span class="s2">&quot;potential_factors&quot;</span> <span class="ow">in</span> <span class="n">pot</span><span class="p">:</span>                       <span class="c1"># intermediate version</span>
+        <span class="n">buckets</span><span class="p">[</span><span class="s2">&quot;contrast_factors&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">pot</span><span class="p">[</span><span class="s2">&quot;potential_factors&quot;</span><span class="p">])</span>
+    <span class="k">for</span> <span class="n">old</span><span class="p">,</span> <span class="p">(</span><span class="n">bucket</span><span class="p">,</span> <span class="n">gname</span><span class="p">)</span> <span class="ow">in</span> <span class="n">_FLAT_POTENTIAL_FIELDS</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">old</span> <span class="ow">in</span> <span class="n">pot</span> <span class="ow">and</span> <span class="n">gname</span> <span class="ow">in</span> <span class="n">names</span><span class="p">:</span>
+            <span class="n">buckets</span><span class="p">[</span><span class="n">bucket</span><span class="p">][</span><span class="n">gname</span><span class="p">]</span> <span class="o">=</span> <span class="n">pot</span><span class="p">[</span><span class="n">old</span><span class="p">]</span>
+    <span class="n">state</span><span class="o">.</span><span class="n">scales</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">[</span><span class="s2">&quot;scales&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="n">state</span><span class="o">.</span><span class="n">shifts</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">[</span><span class="s2">&quot;shifts&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="n">state</span><span class="o">.</span><span class="n">rotations</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">[</span><span class="s2">&quot;rotations&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="n">state</span><span class="o">.</span><span class="n">contrast_factors</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">buckets</span><span class="p">[</span><span class="s2">&quot;contrast_factors&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+
+    <span class="n">strain</span> <span class="o">=</span> <span class="n">pot</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;strain_fields&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">strain</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>                         <span class="c1"># positional: Gr, WS2</span>
+        <span class="n">strain</span> <span class="o">=</span> <span class="p">{</span><span class="n">LEGACY_GROUP_NAMES</span><span class="p">[</span><span class="n">i</span><span class="p">]:</span> <span class="n">s</span> <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">s</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">strain</span><span class="p">)</span>
+                  <span class="k">if</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">LEGACY_GROUP_NAMES</span><span class="p">)</span> <span class="ow">and</span> <span class="n">LEGACY_GROUP_NAMES</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="ow">in</span> <span class="n">names</span><span class="p">}</span>
+    <span class="k">for</span> <span class="n">gname</span><span class="p">,</span> <span class="n">entry</span> <span class="ow">in</span> <span class="p">(</span><span class="n">strain</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">entry</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s2">&quot;control&quot;</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">:</span>
+            <span class="n">state</span><span class="o">.</span><span class="n">strain_control</span><span class="p">[</span><span class="n">gname</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="s2">&quot;control&quot;</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+            <span class="n">state</span><span class="o">.</span><span class="n">strain_convention</span> <span class="o">=</span> <span class="s2">&quot;legacy&quot;</span>
+
+    <span class="n">state</span><span class="o">.</span><span class="n">position_shifts</span> <span class="o">=</span> <span class="n">_per_layer</span><span class="p">(</span><span class="n">pot</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;position_shifts&quot;</span><span class="p">),</span> <span class="n">experiment</span><span class="p">,</span> <span class="s2">&quot;position_shifts&quot;</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="n">state</span><span class="o">.</span><span class="n">intensities</span> <span class="o">=</span> <span class="n">_per_layer</span><span class="p">(</span><span class="n">pot</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;intensities&quot;</span><span class="p">),</span> <span class="n">experiment</span><span class="p">,</span> <span class="s2">&quot;intensities&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="n">state</span><span class="o">.</span><span class="n">occupancies</span> <span class="o">=</span> <span class="n">_per_layer</span><span class="p">(</span><span class="n">pot</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;occupancies&quot;</span><span class="p">),</span> <span class="n">experiment</span><span class="p">,</span> <span class="s2">&quot;occupancies&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+
+    <span class="n">ctf</span> <span class="o">=</span> <span class="n">d</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;ctf_parameters&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ctf</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="n">state</span><span class="o">.</span><span class="n">optics</span> <span class="o">=</span> <span class="n">OpticsState</span><span class="p">(</span>
+            <span class="n">amp_contrast</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">ctf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;amp_contrast&quot;</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">)),</span>
+            <span class="n">delta_E</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">ctf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;deltaE&quot;</span><span class="p">,</span> <span class="mf">0.45</span><span class="p">)),</span> <span class="n">Cc_um</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">ctf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;Cc_um&quot;</span><span class="p">,</span> <span class="mf">1000.0</span><span class="p">)),</span>
+            <span class="n">aberrations</span><span class="o">=</span><span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="p">(</span><span class="n">ctf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;aberrations&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">()})</span>
+    <span class="k">if</span> <span class="n">d</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;normalisation_parameters&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">state</span><span class="o">.</span><span class="n">normalisation</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">d</span><span class="p">[</span><span class="s2">&quot;normalisation_parameters&quot;</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">state</span></div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,93 @@
+{
+ "groups": {
+  "Gr": {
+   "shift": {
+    "enabled": true,
+    "lr": 0.05
+   },
+   "rotation": {
+    "enabled": true,
+    "lr": 0.001
+   },
+   "scale": {
+    "enabled": true,
+    "lr": 0.001
+   },
+   "strain_field": {
+    "enabled": false,
+    "lr": 0.1
+   },
+   "contrast": {
+    "enabled": false,
+    "lr": 0.001
+   }
+  }
+ },
+ "layers": {
+  "Gr": {
+   "free_positions": {
+    "enabled": false,
+    "lr": 0.001
+   },
+   "intensities": {
+    "enabled": false,
+    "lr": 0.0001
+   },
+   "occupancies": {
+    "enabled": false,
+    "lr": 0.1
+   }
+  }
+ },
+ "amp_contrast": {
+  "enabled": false,
+  "lr": 1e-05
+ },
+ "aberrations": {
+  "enabled": true,
+  "lr": 1e-05
+ },
+ "envelope": {
+  "enabled": false,
+  "lr": 1e-05
+ },
+ "normalisation": {
+  "enabled": true,
+  "lr": 1e-05
+ },
+ "aberration_flags": {
+  "C10": true,
+  "C12": true,
+  "C23": true,
+  "C21": true,
+  "C30": true,
+  "C34": true,
+  "C45": true
+ },
+ "envelope_flags": {
+  "source_size": false,
+  "Cc": true,
+  "deltaE": true,
+  "instab_defocus_nm": false
+ },
+ "loss": {
+  "var": 0.5,
+  "local_var_100": 0.0,
+  "mse": 0.0,
+  "ncc": 0.5,
+  "local_ncc_100": 0.0,
+  "ssim": 0.0,
+  "l1": 0.1
+ },
+ "regularisation": {
+  "occ_entropy_a": 1.0,
+  "position_shifts_a": 1.0,
+  "repulsion_a": 0.0,
+  "repulsion_distance_A": 1.0,
+  "strain_energy_a": 0.0,
+  "strain_energy_lambda": 1.0,
+  "strain_energy_mu": 1.0
+ },
+ "active_group": "Gr",
+ "schema_version": 3
+}

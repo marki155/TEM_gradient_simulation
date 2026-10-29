@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.learning.seeding.seeder &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.learning.seeding.seeder</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part II, Section 6: random atom-by-atom seeding.</span>
+
+<span class="sd">Motivation</span>
+<span class="sd">==========</span>
+<span class="sd">The occupancy relaxation of Section 1 can switch atoms off but cannot invent new</span>
+<span class="sd">ones, and a lattice from a template may not fit a disordered sample at all.</span>
+<span class="sd">Seeding builds the atom set by *discrete* search.  This is a Markov chain on</span>
+<span class="sd">atom configurations :math:`\mathcal A` with a greedy (zero-temperature</span>
+<span class="sd">Metropolis) acceptance: a trial :math:`\mathcal A\to\mathcal A&#39;` is accepted if</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \mathcal L(\mathcal A&#39;) \le \mathcal L(\mathcal A),</span>
+<span class="sd">    \qquad (6.10)</span>
+
+<span class="sd">and otherwise undone.  The loss never increases, the number of atoms is not</span>
+<span class="sd">fixed, and the chain is reversible only through the move types below.</span>
+
+<span class="sd">Trials</span>
+<span class="sd">------</span>
+<span class="sd">``add``</span>
+<span class="sd">    a point from Section 6.3 is resolved against the present atoms by the</span>
+<span class="sd">    collision rule of Section 6.2 (atoms that touch it vanish, close atoms are</span>
+<span class="sd">    merged into it); the proposal is &quot;remove these, add that&quot;.</span>
+<span class="sd">``move``</span>
+<span class="sd">    an atom is removed and added again, either after a Gaussian jump of width</span>
+<span class="sd">    :math:`\sigma_{\rm move}` or at a fresh proposal.</span>
+<span class="sd">``remove``</span>
+<span class="sd">    a random atom is deleted.</span>
+<span class="sd">``relax``</span>
+<span class="sd">    (STEM) a promising site that is blocked by a neighbour :math:`\mathbf q` is</span>
+<span class="sd">    found from the landscape; :math:`\mathbf q` is taken out, the new atom put in, and</span>
+<span class="sd">    :math:`\mathbf q` re-inserted at the best site within :math:`r_{\rm relax}` of its old</span>
+<span class="sd">    place *in the landscape of that intermediate state* (Section 6.4,</span>
+<span class="sd">    :meth:`LocalLoss.hypothetical`).  Accepted only if the combined change</span>
+<span class="sd">    satisfies Eq. (6.10).</span>
+
+<span class="sd">With ``move_prob = remove_prob = relax_prob = 0`` only atoms are added.  The</span>
+<span class="sd">relative weight of a new atom is chosen from ``weight_options`` as the one with the</span>
+<span class="sd">lowest loss.</span>
+
+<span class="sd">The loss is either the negative correlation of Eq. (6.2) from running sums</span>
+<span class="sd">(``&quot;ncc&quot;``, local, Section 6.4) or the complete objective of Section 3</span>
+<span class="sd">(``&quot;objective&quot;``, full image).  An empty configuration has loss :math:`\infty`: after</span>
+<span class="sd">standardisation it would be a constant image, which looks deceptively good.</span>
+
+<span class="sd">Tuning</span>
+<span class="sd">------</span>
+<span class="sd">Atom positions are discrete, the microscope parameters (defocus, ...) continuous.</span>
+<span class="sd">Every ``tune_every`` trials :meth:`Seeder.tune` takes a few Adam steps of</span>
+<span class="sd">Section 5 on the enabled global parameters; the result is kept only if</span>
+<span class="sd">Eq. (6.10) holds for the correlation loss afterwards, otherwise all tensors are</span>
+<span class="sd">restored (``tune_rejected``).</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">...data.schema</span><span class="w"> </span><span class="kn">import</span> <span class="n">Experiment</span><span class="p">,</span> <span class="n">Group</span><span class="p">,</span> <span class="n">Imaging</span><span class="p">,</span> <span class="n">Layer</span><span class="p">,</span> <span class="n">Stem</span><span class="p">,</span> <span class="n">Structure</span><span class="p">,</span> <span class="n">TYPICAL_DEBYE_WALLER_U</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">...physics.window</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalImage</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..model</span><span class="w"> </span><span class="kn">import</span> <span class="n">Model</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..trainer</span><span class="w"> </span><span class="kn">import</span> <span class="n">Trainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.collision</span><span class="w"> </span><span class="kn">import</span> <span class="n">resolve_point</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.local_loss</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalLoss</span><span class="p">,</span> <span class="n">Trial</span><span class="p">,</span> <span class="n">negative_correlation</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.proposals</span><span class="w"> </span><span class="kn">import</span> <span class="n">Landscape</span><span class="p">,</span> <span class="n">NeighbourSampler</span><span class="p">,</span> <span class="n">Region</span><span class="p">,</span> <span class="n">distance_map</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.store</span><span class="w"> </span><span class="kn">import</span> <span class="n">AtomStore</span><span class="p">,</span> <span class="n">SeedingError</span>
+
+
+<div class="viewcode-block" id="SeedConfig">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.SeedConfig">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SeedConfig</span><span class="p">:</span>
+    <span class="n">touch_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.5</span>
+    <span class="n">merge_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span>
+    <span class="c1">#: &quot;ncc&quot; (local running sums) or &quot;objective&quot; (complete loss, full image)</span>
+    <span class="n">loss</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;ncc&quot;</span>
+    <span class="n">margin_px</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="n">move_prob</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="n">remove_prob</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="n">relax_prob</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="n">move_sigma_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.7</span>
+    <span class="n">relax_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2.0</span>
+    <span class="n">neighbour_seeding</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="n">bond_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.42</span>
+    <span class="n">bond_sigma_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.2</span>
+    <span class="n">neighbour_min_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.5</span>
+    <span class="n">neighbour_max_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2.0</span>
+    <span class="n">gradient_seeding</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="n">gradient_temperature</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.1</span>
+    <span class="n">weight_options</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mf">1.0</span><span class="p">,)</span>
+    <span class="n">max_atoms</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">local</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+    <span class="n">local_radius_px</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">refresh_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">300</span>
+    <span class="n">seed</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;objective&quot;</span><span class="p">,</span> <span class="s2">&quot;ncc&quot;</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;loss must be &#39;ncc&#39; or &#39;objective&#39;&quot;</span><span class="p">)</span>
+        <span class="n">options</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">w</span><span class="p">)</span> <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">weight_options</span><span class="p">]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">options</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="ow">not</span> <span class="mf">0.0</span> <span class="o">&lt;</span> <span class="n">w</span> <span class="o">&lt;=</span> <span class="mf">1.5</span> <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">options</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;weight_options must lie in (0, 1.5]&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weight_options</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">options</span><span class="p">),</span> <span class="n">reverse</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span></div>
+
+
+
+<div class="viewcode-block" id="SeedStats">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.SeedStats">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">SeedStats</span><span class="p">:</span>
+    <span class="n">trials</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">accepted</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">merged</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">removed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">fallbacks</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">tune_rejected</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">refreshes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">relaxed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">max_drift</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="n">full</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="n">history</span><span class="p">:</span> <span class="nb">list</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">list</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="Seeder">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Seeder</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Builds the atom set of one layer of ``model`` by random trials (module docstring).&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">Model</span><span class="p">,</span> <span class="n">layer</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">SeedConfig</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+                 <span class="n">region</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">sync</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="n">config</span> <span class="k">if</span> <span class="n">config</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">SeedConfig</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">rng</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">default_rng</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">store</span> <span class="o">=</span> <span class="n">AtomStore</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="p">,</span> <span class="n">layer</span><span class="p">,</span> <span class="n">sync</span><span class="o">=</span><span class="n">sync</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pixel_A</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">imaging</span><span class="o">.</span><span class="n">pixel_size_nm</span> <span class="o">*</span> <span class="mf">10.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">shape</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">imaging</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">region</span> <span class="o">=</span> <span class="n">Region</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">,</span> <span class="n">region</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">check</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">margin_px</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">neighbours</span> <span class="o">=</span> <span class="n">NeighbourSampler</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stats</span> <span class="o">=</span> <span class="n">SeedStats</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">filter_report</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Trainer</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">LocalLoss</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local_note</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_version</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_raw</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_landscape</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_distance</span> <span class="o">=</span> <span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">resync</span><span class="p">(</span><span class="n">sync_store</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+    <span class="c1"># ------------------------------------------------------------------ radii in pixels</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_px</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value_A</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">value_A</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">pixel_A</span>
+
+    <span class="n">touch_px</span> <span class="o">=</span> <span class="nb">property</span><span class="p">(</span><span class="k">lambda</span> <span class="bp">self</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">touch_A</span><span class="p">))</span>
+    <span class="n">merge_px</span> <span class="o">=</span> <span class="nb">property</span><span class="p">(</span><span class="k">lambda</span> <span class="bp">self</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">merge_A</span><span class="p">))</span>
+    <span class="n">move_sigma_px</span> <span class="o">=</span> <span class="nb">property</span><span class="p">(</span><span class="k">lambda</span> <span class="bp">self</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">move_sigma_A</span><span class="p">))</span>
+    <span class="n">relax_px</span> <span class="o">=</span> <span class="nb">property</span><span class="p">(</span><span class="k">lambda</span> <span class="bp">self</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">relax_A</span><span class="p">))</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">margin</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">margin_px</span><span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">n_atoms</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">uses_local</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">gradient_supported</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">uses_local</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">stem</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">mixed</span>
+
+    <span class="c1"># ------------------------------------------------------------------ state</span>
+<div class="viewcode-block" id="Seeder.resync">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.resync">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">resync</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sync_store</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Re-read everything after a change from outside (training, loading, parameters).&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="n">sync_store</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">sync</span><span class="p">()</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">_read_mirror</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_version</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local_note</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">local</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">loss</span> <span class="o">==</span> <span class="s2">&quot;ncc&quot;</span><span class="p">:</span>
+            <span class="n">local</span> <span class="o">=</span> <span class="n">LocalImage</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">simulator</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">(),</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">optics_state</span><span class="p">(),</span>
+                               <span class="n">refresh_every</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">refresh_every</span><span class="p">,</span> <span class="n">radius_px</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">local_radius_px</span><span class="p">)</span>
+            <span class="n">target</span><span class="p">,</span> <span class="n">mask</span><span class="p">,</span> <span class="n">reference</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">objective</span><span class="o">.</span><span class="n">regions</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">local</span> <span class="o">=</span> <span class="n">LocalLoss</span><span class="p">(</span><span class="n">local</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">reference</span><span class="p">,</span> <span class="n">mask</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">normalisation</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">loss</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">uses_local</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">evaluate</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span></div>
+
+
+<div class="viewcode-block" id="Seeder.evaluate">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.evaluate">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">evaluate</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Loss of the current configuration from a complete simulation.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span>
+        <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">loss</span> <span class="o">==</span> <span class="s2">&quot;ncc&quot;</span><span class="p">:</span>
+                <span class="n">target</span><span class="p">,</span> <span class="n">mask</span><span class="p">,</span> <span class="n">reference</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">objective</span><span class="o">.</span><span class="n">regions</span><span class="p">()</span>
+                <span class="n">value</span> <span class="o">=</span> <span class="n">negative_correlation</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">image</span><span class="p">(),</span> <span class="n">target</span><span class="p">,</span> <span class="n">reference</span><span class="p">,</span> <span class="n">mask</span><span class="p">,</span>
+                                             <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">normalisation</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">value</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">loss</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="k">return</span> <span class="n">value</span> <span class="k">if</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="k">else</span> <span class="n">math</span><span class="o">.</span><span class="n">inf</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ proposals</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">resolve</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">exclude</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">resolve_point</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">positions</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">touch_px</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">merge_px</span><span class="p">,</span> <span class="n">exclude</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_option_list</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">float</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">weight_options</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">supports_weights</span> <span class="k">else</span> <span class="p">[</span><span class="mf">1.0</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_amplitude</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">option</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+        <span class="n">spec</span><span class="p">,</span> <span class="n">params</span><span class="p">,</span> <span class="n">sim</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">spec</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">simulator</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">option</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">new_weight</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">groups</span><span class="p">[</span><span class="n">spec</span><span class="o">.</span><span class="n">group</span><span class="p">]</span><span class="o">.</span><span class="n">contrast</span><span class="p">)</span>
+                <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">sim</span><span class="o">.</span><span class="n">cross_sections</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">element</span><span class="p">,</span> <span class="n">spec</span><span class="o">.</span><span class="n">debye_waller_u</span><span class="p">)))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_min_gain</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Best loss change per pixel over all weight options, and the option that gives it.&quot;&quot;&quot;</span>
+
+        <span class="n">gain</span> <span class="o">=</span> <span class="n">weight</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">option</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_option_list</span><span class="p">():</span>
+            <span class="n">one</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">insertion_gain</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_amplitude</span><span class="p">(</span><span class="n">option</span><span class="p">))</span>
+            <span class="k">if</span> <span class="n">one</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">gain</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">gain</span><span class="p">,</span> <span class="n">weight</span> <span class="o">=</span> <span class="n">one</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">full</span><span class="p">(</span><span class="n">one</span><span class="o">.</span><span class="n">shape</span><span class="p">,</span> <span class="n">option</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">better</span> <span class="o">=</span> <span class="n">one</span> <span class="o">&lt;</span> <span class="n">gain</span>
+                <span class="n">gain</span><span class="p">,</span> <span class="n">weight</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">better</span><span class="p">,</span> <span class="n">one</span><span class="p">,</span> <span class="n">gain</span><span class="p">),</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">better</span><span class="p">,</span> <span class="n">option</span><span class="p">,</span> <span class="n">weight</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">gain</span><span class="p">,</span> <span class="n">weight</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_raw_maps</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_version</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">weight_options</span><span class="p">))</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_raw</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_raw</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="n">key</span><span class="p">:</span>
+            <span class="n">gain</span><span class="p">,</span> <span class="n">weight</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_min_gain</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_raw</span> <span class="o">=</span> <span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">gain</span><span class="p">,</span> <span class="n">weight</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_raw</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">_raw</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_atom_distance</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_distance</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_version</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_distance</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_version</span><span class="p">,</span> <span class="n">distance_map</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">positions</span><span class="p">))</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_distance</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_landscape_map</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Landscape</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">gradient_seeding</span> <span class="ow">or</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient_supported</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_landscape</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_landscape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_version</span><span class="p">:</span>
+            <span class="n">gain</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_raw_maps</span><span class="p">()</span>
+            <span class="n">landscape</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">if</span> <span class="n">gain</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">free</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_atom_distance</span><span class="p">()</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">merge_px</span>
+                <span class="n">landscape</span> <span class="o">=</span> <span class="n">Landscape</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">valid</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">free</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">gain</span> <span class="o">&lt;</span> <span class="mf">0.0</span><span class="p">),</span> <span class="n">gain</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_landscape</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_version</span><span class="p">,</span> <span class="n">landscape</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_landscape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+
+<div class="viewcode-block" id="Seeder.propose">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.propose">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">propose</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">exclude</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;A resolved proposal ``((x, y), removed, merged)``.&quot;&quot;&quot;</span>
+
+        <span class="n">c</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span>
+        <span class="n">landscape</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_landscape_map</span><span class="p">()</span>
+        <span class="n">point</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">c</span><span class="o">.</span><span class="n">neighbour_seeding</span><span class="p">:</span>
+            <span class="n">point</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">neighbours</span><span class="o">.</span><span class="n">point</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">positions</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">bond_A</span><span class="p">),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">bond_sigma_A</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">neighbour_min_A</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">_px</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">neighbour_max_A</span><span class="p">),</span>
+                <span class="n">exclude</span><span class="p">,</span> <span class="n">landscape</span><span class="p">,</span> <span class="n">c</span><span class="o">.</span><span class="n">gradient_temperature</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">landscape</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">pixel</span> <span class="o">=</span> <span class="n">landscape</span><span class="o">.</span><span class="n">pixel</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="n">c</span><span class="o">.</span><span class="n">gradient_temperature</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">pixel</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">point</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">jitter</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="n">pixel</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">pixel</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">point</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">point</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">resolve</span><span class="p">(</span><span class="o">*</span><span class="n">point</span><span class="p">,</span> <span class="n">exclude</span><span class="p">)</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ evaluation of a change</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_local_trial</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Trial</span><span class="p">]:</span>
+        <span class="n">store</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span>
+        <span class="n">n_after</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">n</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">remove</span><span class="p">)</span> <span class="o">+</span> <span class="nb">len</span><span class="p">(</span><span class="n">add</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">propose</span><span class="p">(</span><span class="n">store</span><span class="o">.</span><span class="n">index</span><span class="p">,</span> <span class="n">store</span><span class="o">.</span><span class="n">changes</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">options</span><span class="p">),</span> <span class="n">n_after</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_best_trial</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Best trial over the weight options: ``(trial, options)`` or ``(None, None)``.&quot;&quot;&quot;</span>
+
+        <span class="n">best</span><span class="p">,</span> <span class="n">chosen</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">option</span> <span class="ow">in</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_option_list</span><span class="p">()</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">add</span><span class="p">)</span> <span class="k">else</span> <span class="p">[</span><span class="mf">1.0</span><span class="p">]):</span>
+            <span class="n">options</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">full</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">add</span><span class="p">),</span> <span class="n">option</span><span class="p">)</span>
+            <span class="n">trial</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_trial</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">trial</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span><span class="n">best</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">trial</span><span class="o">.</span><span class="n">loss</span> <span class="o">&lt;</span> <span class="n">best</span><span class="o">.</span><span class="n">loss</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">best</span><span class="o">.</span><span class="n">loss</span><span class="p">)):</span>
+                <span class="n">best</span><span class="p">,</span> <span class="n">chosen</span> <span class="o">=</span> <span class="n">trial</span><span class="p">,</span> <span class="n">options</span>
+        <span class="k">return</span> <span class="n">best</span><span class="p">,</span> <span class="n">chosen</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_accept_or_reject</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">removed</span><span class="p">,</span> <span class="n">merged</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="n">stats</span><span class="p">,</span> <span class="n">store</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span>
+        <span class="n">add</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">add</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">trial</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">uses_local</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">options</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">options</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">options</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+                <span class="n">trial</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_trial</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">trial</span><span class="p">,</span> <span class="n">options</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_best_trial</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">trial</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">stats</span><span class="o">.</span><span class="n">fallbacks</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="k">if</span> <span class="n">trial</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">loss</span><span class="p">)</span> <span class="ow">and</span> <span class="n">trial</span><span class="o">.</span><span class="n">loss</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">):</span>
+                <span class="k">return</span> <span class="kc">False</span>
+            <span class="n">store</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">commit</span><span class="p">(</span><span class="n">trial</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="n">trial</span><span class="o">.</span><span class="n">loss</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_version</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_count</span><span class="p">(</span><span class="n">removed</span><span class="p">,</span> <span class="n">merged</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">needs_refresh</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_refresh_local</span><span class="p">()</span>
+            <span class="k">return</span> <span class="kc">True</span>
+
+        <span class="n">token</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">options</span><span class="p">)</span>
+        <span class="n">new_loss</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">evaluate</span><span class="p">()</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">new_loss</span><span class="p">)</span> <span class="ow">and</span> <span class="n">new_loss</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">):</span>
+            <span class="n">store</span><span class="o">.</span><span class="n">undo</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="n">new_loss</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_version</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_count</span><span class="p">(</span><span class="n">removed</span><span class="p">,</span> <span class="n">merged</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">uses_local</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_refresh_local</span><span class="p">()</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_count</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">removed</span><span class="p">,</span> <span class="n">merged</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">accepted</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">removed</span> <span class="o">+=</span> <span class="n">removed</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">merged</span> <span class="o">+=</span> <span class="nb">int</span><span class="p">(</span><span class="n">merged</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_refresh_local</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Rebuild the local image from a full simulation (removes the drift of the window updates).&quot;&quot;&quot;</span>
+
+        <span class="n">before</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">(),</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">optics_state</span><span class="p">())</span>
+        <span class="n">after</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span><span class="o">.</span><span class="n">reset</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">refreshes</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">max_drift</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">max_drift</span><span class="p">,</span> <span class="nb">abs</span><span class="p">(</span><span class="n">after</span> <span class="o">-</span> <span class="n">before</span><span class="p">)</span> <span class="k">if</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">before</span><span class="p">)</span> <span class="k">else</span> <span class="mf">0.0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">=</span> <span class="n">after</span>
+
+    <span class="c1"># ------------------------------------------------------------------ trial types</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_relax_trial</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Insert with evasion (module docstring); ``None`` if impossible, else accepted or not.&quot;&quot;&quot;</span>
+
+        <span class="n">store</span><span class="p">,</span> <span class="n">local</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">local</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient_supported</span> <span class="ow">or</span> <span class="n">store</span><span class="o">.</span><span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">raw</span><span class="p">,</span> <span class="n">weight_map</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_raw_maps</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">raw</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">temperature</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">gradient_temperature</span>
+        <span class="n">distance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_atom_distance</span><span class="p">()</span>
+        <span class="n">simple</span> <span class="o">=</span> <span class="p">(</span><span class="n">distance</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">merge_px</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">raw</span> <span class="o">&lt;</span> <span class="mf">0.0</span><span class="p">)</span>
+        <span class="n">candidates</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">valid</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">distance</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">relax_px</span><span class="p">)</span> <span class="o">&amp;</span> <span class="o">~</span><span class="n">simple</span> <span class="o">&amp;</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+        <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">nonzero</span><span class="p">(</span><span class="n">candidates</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">rows</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">row</span><span class="p">,</span> <span class="n">col</span> <span class="o">=</span> <span class="n">Landscape</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span><span class="o">.</span><span class="n">draw_in</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">,</span> <span class="n">temperature</span><span class="p">)</span>
+        <span class="n">p0</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">jitter</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="n">col</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">))</span>
+        <span class="n">w0</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">weight_map</span><span class="p">[</span><span class="n">row</span><span class="p">,</span> <span class="n">col</span><span class="p">])</span>
+
+        <span class="n">positions</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">positions</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">hypot</span><span class="p">(</span><span class="n">positions</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">p0</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">p0</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+        <span class="n">q</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">argmin</span><span class="p">(</span><span class="n">d</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">d</span><span class="p">[</span><span class="n">q</span><span class="p">]</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">relax_px</span> <span class="ow">or</span> <span class="p">(</span><span class="n">d</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">merge_px</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+
+        <span class="n">trial</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_trial</span><span class="p">([</span><span class="n">q</span><span class="p">],</span> <span class="n">p0</span><span class="p">[</span><span class="kc">None</span><span class="p">],</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">w0</span><span class="p">]))</span>
+        <span class="k">if</span> <span class="n">trial</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="k">with</span> <span class="n">local</span><span class="o">.</span><span class="n">hypothetical</span><span class="p">(</span><span class="n">trial</span><span class="p">):</span>
+            <span class="n">gain</span><span class="p">,</span> <span class="n">weight_map2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_min_gain</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">gain</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">others</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">vstack</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="n">positions</span><span class="p">,</span> <span class="n">q</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span> <span class="n">p0</span><span class="p">[</span><span class="kc">None</span><span class="p">]])</span>
+        <span class="n">yy</span><span class="p">,</span> <span class="n">xx</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">mgrid</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="mi">0</span><span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span>
+        <span class="n">near</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">hypot</span><span class="p">(</span><span class="n">yy</span> <span class="o">-</span> <span class="n">positions</span><span class="p">[</span><span class="n">q</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="n">xx</span> <span class="o">-</span> <span class="n">positions</span><span class="p">[</span><span class="n">q</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">relax_px</span>
+        <span class="n">allowed</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">valid</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">near</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">distance_map</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">,</span> <span class="n">others</span><span class="p">)</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">merge_px</span><span class="p">)</span>
+                   <span class="o">&amp;</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">gain</span><span class="p">))</span>
+        <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">nonzero</span><span class="p">(</span><span class="n">allowed</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">rows</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">row</span><span class="p">,</span> <span class="n">col</span> <span class="o">=</span> <span class="n">Landscape</span><span class="p">(</span><span class="n">gain</span><span class="p">)</span><span class="o">.</span><span class="n">draw_in</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="n">rows</span><span class="p">,</span> <span class="n">cols</span><span class="p">,</span> <span class="n">temperature</span><span class="p">)</span>
+        <span class="n">q_new</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">jitter</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="n">col</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">))</span>
+        <span class="n">w1</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">weight_map2</span><span class="p">[</span><span class="n">row</span><span class="p">,</span> <span class="n">col</span><span class="p">])</span>
+        <span class="n">ok</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accept_or_reject</span><span class="p">([</span><span class="n">q</span><span class="p">],</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">p0</span><span class="p">,</span> <span class="n">q_new</span><span class="p">]),</span> <span class="mi">0</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">w0</span><span class="p">,</span> <span class="n">w1</span><span class="p">]))</span>
+        <span class="k">if</span> <span class="n">ok</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">relaxed</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="n">ok</span>
+
+<div class="viewcode-block" id="Seeder.trial">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.trial">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">trial</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;One trial (module docstring); returns whether it was accepted.&quot;&quot;&quot;</span>
+
+        <span class="n">c</span><span class="p">,</span> <span class="n">stats</span><span class="p">,</span> <span class="n">store</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span>
+        <span class="n">n</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">n</span>
+        <span class="n">draw</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="o">.</span><span class="n">random</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">draw</span> <span class="o">&lt;</span> <span class="n">c</span><span class="o">.</span><span class="n">remove_prob</span><span class="p">:</span>
+            <span class="n">kind</span> <span class="o">=</span> <span class="s2">&quot;remove&quot;</span>
+        <span class="k">elif</span> <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">draw</span> <span class="o">&lt;</span> <span class="n">c</span><span class="o">.</span><span class="n">remove_prob</span> <span class="o">+</span> <span class="n">c</span><span class="o">.</span><span class="n">move_prob</span><span class="p">:</span>
+            <span class="n">kind</span> <span class="o">=</span> <span class="s2">&quot;move&quot;</span>
+        <span class="k">elif</span> <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">1</span> <span class="ow">and</span> <span class="n">draw</span> <span class="o">&lt;</span> <span class="n">c</span><span class="o">.</span><span class="n">remove_prob</span> <span class="o">+</span> <span class="n">c</span><span class="o">.</span><span class="n">move_prob</span> <span class="o">+</span> <span class="n">c</span><span class="o">.</span><span class="n">relax_prob</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient_supported</span><span class="p">:</span>
+            <span class="n">kind</span> <span class="o">=</span> <span class="s2">&quot;relax&quot;</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">kind</span> <span class="o">=</span> <span class="s2">&quot;add&quot;</span>
+
+        <span class="k">if</span> <span class="n">kind</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;add&quot;</span><span class="p">,</span> <span class="s2">&quot;relax&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="n">c</span><span class="o">.</span><span class="n">max_atoms</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">n</span> <span class="o">&gt;=</span> <span class="n">c</span><span class="o">.</span><span class="n">max_atoms</span><span class="p">:</span>
+            <span class="n">stats</span><span class="o">.</span><span class="n">full</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">stats</span><span class="o">.</span><span class="n">trials</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="k">if</span> <span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;relax&quot;</span><span class="p">:</span>
+            <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_relax_trial</span><span class="p">())</span>
+
+        <span class="n">merged</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="k">if</span> <span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;remove&quot;</span><span class="p">:</span>
+            <span class="n">remove</span> <span class="o">=</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="o">.</span><span class="n">integers</span><span class="p">(</span><span class="n">n</span><span class="p">))]</span>
+            <span class="n">add</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="k">elif</span> <span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;move&quot;</span><span class="p">:</span>
+            <span class="n">index</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="o">.</span><span class="n">integers</span><span class="p">(</span><span class="n">n</span><span class="p">))</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="o">.</span><span class="n">random</span><span class="p">()</span> <span class="o">&lt;</span> <span class="mf">0.5</span><span class="p">:</span>
+                <span class="n">jump</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">positions</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">rng</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">move_sigma_px</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+                <span class="n">xy</span><span class="p">,</span> <span class="n">graveyard</span><span class="p">,</span> <span class="n">merged</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">resolve</span><span class="p">(</span><span class="o">*</span><span class="n">jump</span><span class="p">,</span> <span class="n">exclude</span><span class="o">=</span><span class="p">[</span><span class="n">index</span><span class="p">])</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">xy</span><span class="p">,</span> <span class="n">graveyard</span><span class="p">,</span> <span class="n">merged</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">propose</span><span class="p">(</span><span class="n">exclude</span><span class="o">=</span><span class="p">[</span><span class="n">index</span><span class="p">])</span>
+            <span class="n">remove</span> <span class="o">=</span> <span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">+</span> <span class="n">graveyard</span>
+            <span class="n">add</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">xy</span><span class="p">])</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">xy</span><span class="p">,</span> <span class="n">graveyard</span><span class="p">,</span> <span class="n">merged</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">propose</span><span class="p">()</span>
+            <span class="n">remove</span> <span class="o">=</span> <span class="n">graveyard</span>
+            <span class="n">add</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">xy</span><span class="p">])</span>
+        <span class="n">removed</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">remove</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span><span class="mi">1</span> <span class="k">if</span> <span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;move&quot;</span> <span class="k">else</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accept_or_reject</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">removed</span><span class="p">,</span> <span class="n">merged</span><span class="p">)</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ given points</span>
+<div class="viewcode-block" id="Seeder.filter_points">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.filter_points">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">filter_points</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">points</span><span class="p">,</span> <span class="n">commit</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">check_margin</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">check_collisions</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                      <span class="n">check_loss</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Check given points in priority order against the criteria of an ``add`` trial.</span>
+
+<span class="sd">        Per point: inside margin/region, ``max_atoms``, collision rule, and loss not worse.</span>
+<span class="sd">        ``commit=False`` tests every point independently against the current state and changes</span>
+<span class="sd">        nothing; ``commit=True`` inserts the accepted points one after the other.  Returns the</span>
+<span class="sd">        accepted positions (after the collision rule); ``filter_report`` counts the reasons.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">accepted</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">count</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span>
+        <span class="n">report</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">filter_report</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;outside&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;full&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;loss&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;accepted&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">}</span>
+        <span class="k">for</span> <span class="n">point</span> <span class="ow">in</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">points</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">):</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_atoms</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">count</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_atoms</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">full</span> <span class="o">=</span> <span class="kc">True</span>
+                <span class="n">report</span><span class="p">[</span><span class="s2">&quot;full&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">check_margin</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">inside</span><span class="p">(</span><span class="o">*</span><span class="n">point</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">):</span>
+                <span class="n">report</span><span class="p">[</span><span class="s2">&quot;outside&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">check_collisions</span><span class="p">:</span>
+                <span class="n">xy</span><span class="p">,</span> <span class="n">graveyard</span><span class="p">,</span> <span class="n">merged</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">resolve</span><span class="p">(</span><span class="o">*</span><span class="n">point</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">check_margin</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">region</span><span class="o">.</span><span class="n">inside</span><span class="p">(</span><span class="o">*</span><span class="n">xy</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">margin</span><span class="p">):</span>
+                    <span class="n">report</span><span class="p">[</span><span class="s2">&quot;outside&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+                    <span class="k">continue</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">xy</span><span class="p">,</span> <span class="n">graveyard</span><span class="p">,</span> <span class="n">merged</span> <span class="o">=</span> <span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">point</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="nb">float</span><span class="p">(</span><span class="n">point</span><span class="p">[</span><span class="mi">1</span><span class="p">])),</span> <span class="p">[],</span> <span class="kc">False</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">check_loss</span><span class="p">:</span>
+                <span class="n">ok</span> <span class="o">=</span> <span class="kc">True</span>
+                <span class="k">if</span> <span class="n">commit</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">graveyard</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">xy</span><span class="p">]))</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_version</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">elif</span> <span class="n">commit</span><span class="p">:</span>
+                <span class="n">ok</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accept_or_reject</span><span class="p">(</span><span class="n">graveyard</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">xy</span><span class="p">]),</span> <span class="nb">len</span><span class="p">(</span><span class="n">graveyard</span><span class="p">),</span> <span class="n">merged</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">ok</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_would_accept</span><span class="p">(</span><span class="n">graveyard</span><span class="p">,</span> <span class="n">xy</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">ok</span><span class="p">:</span>
+                <span class="n">accepted</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">xy</span><span class="p">)</span>
+                <span class="n">count</span> <span class="o">+=</span> <span class="mi">1</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">graveyard</span><span class="p">)</span>
+                <span class="n">report</span><span class="p">[</span><span class="s2">&quot;accepted&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">report</span><span class="p">[</span><span class="s2">&quot;loss&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">accepted</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_would_accept</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">remove</span><span class="p">,</span> <span class="n">xy</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="n">add</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">xy</span><span class="p">])</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">uses_local</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">option</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_option_list</span><span class="p">():</span>
+                <span class="n">trial</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_trial</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">option</span><span class="p">]))</span>
+                <span class="k">if</span> <span class="n">trial</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">trial</span><span class="o">.</span><span class="n">loss</span><span class="p">)</span> <span class="ow">and</span> <span class="n">trial</span><span class="o">.</span><span class="n">loss</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="kc">True</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">token</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">remove</span><span class="p">,</span> <span class="n">add</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">new_loss</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">evaluate</span><span class="p">()</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">undo</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">new_loss</span><span class="p">)</span> <span class="ow">and</span> <span class="n">new_loss</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span>
+
+    <span class="c1"># ------------------------------------------------------------------ tuning and loop</span>
+<div class="viewcode-block" id="Seeder.tune">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.tune">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">tune</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">steps</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;A few optimiser steps on the enabled parameters; undone if the correlation gets worse.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="n">steps</span> <span class="o">&lt;=</span> <span class="mi">0</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span> <span class="o">=</span> <span class="n">Trainer</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="o">.</span><span class="n">prepare</span><span class="p">():</span>
+            <span class="k">return</span>
+        <span class="n">settings</span><span class="p">,</span> <span class="n">params</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">params</span>
+        <span class="n">saved</span> <span class="o">=</span> <span class="p">[(</span><span class="n">t</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">clone</span><span class="p">())</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">settings</span><span class="o">.</span><span class="n">params</span><span class="p">()</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">enabled</span>
+                 <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">params</span><span class="o">.</span><span class="n">tensors</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">settings</span><span class="p">)]</span>
+        <span class="n">before</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">resync</span><span class="p">(</span><span class="n">sync_store</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">steps</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">resync</span><span class="p">(</span><span class="n">sync_store</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span> <span class="o">&lt;=</span> <span class="n">before</span><span class="p">:</span>
+            <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+                <span class="k">for</span> <span class="n">tensor</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">saved</span><span class="p">:</span>
+                    <span class="n">tensor</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="o">.</span><span class="n">optimiser</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">resync</span><span class="p">(</span><span class="n">sync_store</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">tune_rejected</span> <span class="o">+=</span> <span class="mi">1</span></div>
+
+
+<div class="viewcode-block" id="Seeder.run">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.run">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">trials</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">tune_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">tune_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">log_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">200</span><span class="p">,</span>
+            <span class="n">save_every</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">on_save</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Callable</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">callback</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Callable</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+            <span class="n">should_stop</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Callable</span><span class="p">[[],</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SeedStats</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;``trials`` trials.  ``callback(seeder)`` is called at every log, ``on_save(seeder)`` at every save.&quot;&quot;&quot;</span>
+
+        <span class="n">first</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">trials</span>
+        <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">trials</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">should_stop</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">should_stop</span><span class="p">():</span>
+                <span class="k">break</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">trial</span><span class="p">()</span>
+            <span class="n">done</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">trials</span> <span class="o">-</span> <span class="n">first</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">full</span><span class="p">:</span>
+                <span class="k">break</span>
+            <span class="k">if</span> <span class="n">tune_every</span> <span class="ow">and</span> <span class="n">tune_steps</span> <span class="ow">and</span> <span class="n">done</span> <span class="ow">and</span> <span class="n">done</span> <span class="o">%</span> <span class="n">tune_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">tune</span><span class="p">(</span><span class="n">tune_steps</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">log_every</span> <span class="ow">and</span> <span class="n">done</span> <span class="ow">and</span> <span class="n">done</span> <span class="o">%</span> <span class="n">log_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">history</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">trials</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">n</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">loss</span><span class="p">))</span>
+                <span class="k">if</span> <span class="n">callback</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">callback</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">save_every</span> <span class="ow">and</span> <span class="n">on_save</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">done</span> <span class="ow">and</span> <span class="n">done</span> <span class="o">%</span> <span class="n">save_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">on_save</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">stats</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">positions_px</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">positions</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+
+<div class="viewcode-block" id="Seeder.result">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.Seeder.result">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">result</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;``(Structure, ModelState)`` that reproduce the current atoms when loaded.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">to_structure</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">to_state</span><span class="p">()</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="empty_experiment">
+<a class="viewcode-back" href="../../../../part2_learning.html#temsim.learning.seeding.seeder.empty_experiment">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">empty_experiment</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">pixel_size_nm</span><span class="p">,</span> <span class="n">element</span><span class="o">=</span><span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="n">elements</span><span class="o">=</span><span class="p">(),</span> <span class="n">group_name</span><span class="o">=</span><span class="s2">&quot;Gr&quot;</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;stem_haadf&quot;</span><span class="p">,</span>
+                     <span class="n">voltage_kV</span><span class="o">=</span><span class="mf">80.0</span><span class="p">,</span> <span class="n">padding</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">convergence_mrad</span><span class="o">=</span><span class="mf">24.81</span><span class="p">,</span> <span class="n">detector_mrad</span><span class="o">=</span><span class="p">(</span><span class="mf">60.0</span><span class="p">,</span> <span class="mf">200.0</span><span class="p">),</span>
+                     <span class="n">source_size_A</span><span class="o">=</span><span class="mf">0.3</span><span class="p">,</span> <span class="n">aberrations</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">probe_aberrations</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">amp_contrast</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+                     <span class="n">alpha_max_mrad</span><span class="o">=</span><span class="mf">50.0</span><span class="p">,</span> <span class="n">init_occupancy</span><span class="o">=</span><span class="mf">6.0</span><span class="p">,</span> <span class="n">debye_waller_u</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">mask_file</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                     <span class="n">target_file</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">start_positions</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">start_weights</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                     <span class="n">envelope</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Experiment</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;An experiment with one empty layer, the starting point of a seeding run.&quot;&quot;&quot;</span>
+
+    <span class="n">start</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span> <span class="k">if</span> <span class="n">start_positions</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">start_positions</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span> \
+        <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">start_positions</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">...physics.structure</span><span class="w"> </span><span class="kn">import</span> <span class="n">atomic_number_of</span>
+    <span class="n">layer</span> <span class="o">=</span> <span class="n">Layer</span><span class="p">(</span><span class="n">group_name</span><span class="p">,</span> <span class="n">element</span><span class="p">,</span> <span class="n">z_nm</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">group</span><span class="o">=</span><span class="n">group_name</span><span class="p">,</span> <span class="n">init_occupancy</span><span class="o">=</span><span class="n">init_occupancy</span><span class="p">,</span>
+                  <span class="n">occ_entropy</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">elements</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">elements</span><span class="p">),</span>
+                  <span class="n">debye_waller_u</span><span class="o">=</span><span class="n">TYPICAL_DEBYE_WALLER_U</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span> <span class="k">if</span> <span class="n">debye_waller_u</span> <span class="ow">is</span> <span class="kc">None</span>
+                  <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">debye_waller_u</span><span class="p">))</span>
+    <span class="n">group</span> <span class="o">=</span> <span class="n">Group</span><span class="p">(</span><span class="n">group_name</span><span class="p">,</span> <span class="n">control_points</span><span class="o">=</span><span class="p">[</span><span class="mi">4</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span> <span class="n">mask_file</span><span class="o">=</span><span class="n">mask_file</span><span class="p">,</span> <span class="n">target_file</span><span class="o">=</span><span class="n">target_file</span><span class="p">)</span>
+    <span class="n">stem</span> <span class="o">=</span> <span class="n">Stem</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">convergence_mrad</span><span class="p">),</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">detector_mrad</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">source_size_A</span><span class="p">),</span>
+                <span class="nb">dict</span><span class="p">(</span><span class="n">probe_aberrations</span><span class="p">)</span> <span class="k">if</span> <span class="n">probe_aberrations</span> <span class="k">else</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="n">imaging</span> <span class="o">=</span> <span class="n">Imaging</span><span class="p">(</span><span class="nb">tuple</span><span class="p">(</span><span class="n">shape</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">pixel_size_nm</span><span class="p">),</span> <span class="n">mode</span><span class="o">=</span><span class="n">mode</span><span class="p">,</span> <span class="n">voltage_kV</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">voltage_kV</span><span class="p">),</span>
+                      <span class="n">padding</span><span class="o">=</span><span class="n">padding</span><span class="p">,</span> <span class="n">aberrations</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">aberrations</span> <span class="ow">or</span> <span class="p">{}),</span>
+                      <span class="n">envelope</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">envelope</span> <span class="ow">or</span> <span class="p">{}),</span> <span class="n">amp_contrast</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">amp_contrast</span><span class="p">),</span>
+                      <span class="n">alpha_max_mrad</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">alpha_max_mrad</span><span class="p">),</span> <span class="n">stem</span><span class="o">=</span><span class="n">stem</span><span class="p">)</span>
+    <span class="n">z</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">full</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">start</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">atomic_number_of</span><span class="p">(</span><span class="n">element</span><span class="p">)))</span>
+    <span class="n">factors</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">start_weights</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">start_weights</span><span class="p">)</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">start</span><span class="p">):</span>
+        <span class="n">factors</span> <span class="o">=</span> <span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">start_weights</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)]</span>
+    <span class="k">return</span> <span class="n">Experiment</span><span class="p">(</span><span class="n">imaging</span><span class="p">,</span> <span class="p">[</span><span class="n">layer</span><span class="p">],</span> <span class="p">[</span><span class="n">group</span><span class="p">],</span> <span class="n">Structure</span><span class="p">([</span><span class="n">start</span><span class="p">],</span> <span class="p">[</span><span class="n">z</span><span class="p">],</span> <span class="n">factors</span><span class="p">))</span></div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

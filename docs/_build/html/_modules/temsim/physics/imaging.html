@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.physics.imaging &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.physics.imaging</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part I, Section 8: image formation (TEM and STEM-HAADF).</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">Conventional TEM (coherent)</span>
+<span class="sd">---------------------------</span>
+<span class="sd">The exit wave :math:`\psi_{\mathrm{exit}}` of Section 6 is transferred by the lens,</span>
+<span class="sd">Eq. (7.1), on the *padded* grid (the padding absorbs wrap-around of the Fourier</span>
+<span class="sd">method) and cropped to the field of view afterwards,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \psi_{\mathrm{img}} = \mathcal F^{-1}\big[T\,A\,\mathcal F\,\psi_{\mathrm{exit}}\big],</span>
+<span class="sd">    \qquad</span>
+<span class="sd">    I_{\mathrm{TEM}} = \begin{cases}|\psi_{\mathrm{img}}| &amp; \text{signal = amplitude}\\</span>
+<span class="sd">    |\psi_{\mathrm{img}}|^2 &amp; \text{signal = intensity.}\end{cases}</span>
+<span class="sd">    \qquad (8.1)</span>
+
+<span class="sd">A detector records the *intensity* :math:`|\psi|^2`.  All earlier versions of this</span>
+<span class="sd">project compared the *amplitude* :math:`|\psi|` with the measured image; this is</span>
+<span class="sd">kept as the default for old files (``tem_signal = &quot;amplitude&quot;``) because the</span>
+<span class="sd">fitted contrast parameters (Stobbs factors, normalisation) were calibrated with</span>
+<span class="sd">it, and the physically correct intensity is available as an option.</span>
+
+<span class="sd">STEM-HAADF (incoherent)</span>
+<span class="sd">-----------------------</span>
+<span class="sd">A focused probe :math:`P(\mathbf r - \mathbf r_0)` is scanned over the specimen.  The high-angle annular</span>
+<span class="sd">dark-field detector collects electrons scattered between the angles</span>
+<span class="sd">:math:`\theta_{\mathrm{in}}` and :math:`\theta_{\mathrm{out}}`.  This signal is</span>
+<span class="sd">dominated by thermal diffuse (incoherent) scattering from the individual atoms,</span>
+<span class="sd">so the image is an *incoherent* convolution of the probe intensity with an</span>
+<span class="sd">object function :math:`O`,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    I_{\mathrm{HAADF}}(\mathbf r_0) = \big(|P|^2 * O\big)(\mathbf r_0),</span>
+<span class="sd">    \qquad</span>
+<span class="sd">    O(\mathbf r) = \sum_{e} \sigma_e\,\rho_e(\mathbf r).</span>
+<span class="sd">    \qquad (8.2)</span>
+
+<span class="sd">*Probe.*  The probe in Fourier space is the aperture times the aberration phase,</span>
+<span class="sd">:math:`\tilde P(\mathbf k) = A_{\alpha_c}(\mathbf k)\,\mathrm e^{-\mathrm i\chi(\mathbf k)}`</span>
+<span class="sd">with the convergence semi-angle :math:`\alpha_c`; its intensity is blurred by</span>
+<span class="sd">the finite size of the electron source (Gaussian of standard deviation</span>
+<span class="sd">:math:`s`, so :math:`\exp(-2\pi^2 s^2 k^2)` in Fourier space) and normalised to</span>
+<span class="sd">unit area,</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    |P|^2 = \Big|\mathcal F^{-1}\tilde P\Big|^2 * G_s,\qquad \sum |P|^2 = 1.</span>
+<span class="sd">    \qquad (8.3)</span>
+
+<span class="sd">The aberration phase :math:`\chi` is the same function as in TEM, Eq. (7.2), but</span>
+<span class="sd">with its own (corrected-probe) coefficients.</span>
+
+<span class="sd">*Object.*  :math:`\rho_e` is the atom density of element :math:`e` and</span>
+<span class="sd">:math:`\sigma_e` the cross-section for scattering into the detector ring.  It is</span>
+<span class="sd">*not* the projected potential: the integral of the projected potential decreases</span>
+<span class="sd">from B over C and N to O while the HAADF signal grows roughly as</span>
+<span class="sd">:math:`Z^{1.7}`.  Using the elastic scattering factor :math:`f_e(q)`</span>
+<span class="sd">(Section 3) and the Einstein model for thermal diffuse scattering with the</span>
+<span class="sd">one-dimensional r.m.s. displacement :math:`u`, the differential cross-section is</span>
+<span class="sd">:math:`|f_e|^2\,[1-\exp(-4\pi^2u^2q^2)]`, hence</span>
+
+<span class="sd">.. math::</span>
+
+<span class="sd">    \sigma_e = 2\pi\lambda^2\int_{q_{\mathrm{in}}}^{q_{\mathrm{out}}}</span>
+<span class="sd">    |f_e(q)|^2\,\big[1-\mathrm e^{-4\pi^2u^2q^2}\big]\,q\,\mathrm dq,</span>
+<span class="sd">    \qquad q = \frac{2\sin(\theta/2)}{\lambda}\approx\frac{\theta}{\lambda}.</span>
+<span class="sd">    \qquad (8.4)</span>
+
+<span class="sd">For :math:`u=0` the thermal term vanishes; then the elastic cross-section into the</span>
+<span class="sd">ring is used so that the model does not collapse.  (:math:`q` in 1/Å, :math:`f_e` in Å, :math:`\lambda` in Å,</span>
+<span class="sd">:math:`\sigma` in Å².)</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">electron</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.optics</span><span class="w"> </span><span class="kn">import</span> <span class="n">FourierGrid</span><span class="p">,</span> <span class="n">aperture</span><span class="p">,</span> <span class="n">phase_error</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.scattering</span><span class="w"> </span><span class="kn">import</span> <span class="n">scattering_amplitude_A</span>
+
+<span class="n">_trapezoid</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">np</span><span class="p">,</span> <span class="s2">&quot;trapezoid&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span> <span class="ow">or</span> <span class="n">np</span><span class="o">.</span><span class="n">trapz</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># TEM</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">crop</span><span class="p">(</span><span class="n">image</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">image</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">padding</span><span class="p">:</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">padding</span><span class="p">,</span> <span class="n">padding</span><span class="p">:</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="n">padding</span><span class="p">]</span>
+
+
+<div class="viewcode-block" id="tem_image">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.imaging.tem_image">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">tem_image</span><span class="p">(</span><span class="n">wave</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">transfer</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">objective_aperture</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+              <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">signal</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;amplitude&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (8.1); ``wave`` is on the padded grid, the result on ``shape``.&quot;&quot;&quot;</span>
+
+    <span class="n">spectrum</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fft2</span><span class="p">(</span><span class="n">wave</span><span class="p">)</span> <span class="o">*</span> <span class="n">transfer</span> <span class="o">*</span> <span class="n">objective_aperture</span>
+    <span class="n">image</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifft2</span><span class="p">(</span><span class="n">spectrum</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">signal</span> <span class="o">==</span> <span class="s2">&quot;amplitude&quot;</span><span class="p">:</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">image</span><span class="o">.</span><span class="n">abs</span><span class="p">()</span>
+    <span class="k">elif</span> <span class="n">signal</span> <span class="o">==</span> <span class="s2">&quot;intensity&quot;</span><span class="p">:</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">image</span><span class="o">.</span><span class="n">real</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">image</span><span class="o">.</span><span class="n">imag</span> <span class="o">**</span> <span class="mi">2</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown TEM signal </span><span class="si">{</span><span class="n">signal</span><span class="si">!r}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">crop</span><span class="p">(</span><span class="n">out</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">)</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># STEM</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="haadf_cross_section_A2">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.imaging.haadf_cross_section_A2">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">haadf_cross_section_A2</span><span class="p">(</span><span class="n">element</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">inner_mrad</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">outer_mrad</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">voltage_kV</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+                           <span class="n">u_rms_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">parametrization</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;kirkland&quot;</span><span class="p">,</span>
+                           <span class="n">samples</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">4000</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (8.4) in square Angstrom.&quot;&quot;&quot;</span>
+
+    <span class="n">lam_A</span> <span class="o">=</span> <span class="n">electron</span><span class="o">.</span><span class="n">wavelength_nm</span><span class="p">(</span><span class="n">voltage_kV</span><span class="p">)</span> <span class="o">*</span> <span class="mf">10.0</span>
+    <span class="n">q</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="n">inner_mrad</span> <span class="o">*</span> <span class="mf">1e-3</span> <span class="o">/</span> <span class="n">lam_A</span><span class="p">,</span> <span class="n">outer_mrad</span> <span class="o">*</span> <span class="mf">1e-3</span> <span class="o">/</span> <span class="n">lam_A</span><span class="p">,</span> <span class="n">samples</span><span class="p">)</span>
+    <span class="n">f</span> <span class="o">=</span> <span class="n">scattering_amplitude_A</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">element</span><span class="p">,</span> <span class="n">parametrization</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">u_rms_A</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">weight</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">4</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">u_rms_A</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">q</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">weight</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">q</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">lam_A</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_trapezoid</span><span class="p">(</span><span class="n">f</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">weight</span> <span class="o">*</span> <span class="n">q</span><span class="p">,</span> <span class="n">q</span><span class="p">))</span></div>
+
+
+
+<div class="viewcode-block" id="CrossSections">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.imaging.CrossSections">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">CrossSections</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Cache of Eq. (8.4) per (element, thermal displacement).&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">inner_mrad</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">outer_mrad</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">voltage_kV</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+                 <span class="n">parametrization</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;kirkland&quot;</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">args</span> <span class="o">=</span> <span class="p">(</span><span class="n">inner_mrad</span><span class="p">,</span> <span class="n">outer_mrad</span><span class="p">,</span> <span class="n">voltage_kV</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parametrization</span> <span class="o">=</span> <span class="n">parametrization</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_values</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="n">Tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">],</span> <span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">element</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">u_rms_A</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="nb">round</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">u_rms_A</span><span class="p">),</span> <span class="mi">4</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_values</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_values</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">haadf_cross_section_A2</span><span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">args</span><span class="p">,</span> <span class="n">u_rms_A</span><span class="o">=</span><span class="n">key</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+                                                       <span class="n">parametrization</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">parametrization</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_values</span><span class="p">[</span><span class="n">key</span><span class="p">]</span></div>
+
+
+
+<div class="viewcode-block" id="probe_intensity">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.imaging.probe_intensity">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">probe_intensity</span><span class="p">(</span><span class="n">chi</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">probe_aperture</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">source_size_A</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+                    <span class="n">pixel_size_A</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (8.3), FFT order (probe centre at pixel [0, 0]).&quot;&quot;&quot;</span>
+
+    <span class="n">probe</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifft2</span><span class="p">(</span><span class="n">probe_aperture</span> <span class="o">*</span> <span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="n">chi</span><span class="p">))</span>
+    <span class="n">intensity</span> <span class="o">=</span> <span class="n">probe</span><span class="o">.</span><span class="n">real</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">probe</span><span class="o">.</span><span class="n">imag</span> <span class="o">**</span> <span class="mi">2</span>
+    <span class="k">if</span> <span class="n">source_size_A</span> <span class="ow">and</span> <span class="n">source_size_A</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">fr</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftfreq</span><span class="p">(</span><span class="n">intensity</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">d</span><span class="o">=</span><span class="n">pixel_size_A</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">intensity</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+        <span class="n">fc</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfftfreq</span><span class="p">(</span><span class="n">intensity</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">d</span><span class="o">=</span><span class="n">pixel_size_A</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">intensity</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+        <span class="n">k2</span> <span class="o">=</span> <span class="n">fr</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">fc</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">**</span> <span class="mi">2</span>
+        <span class="n">blur</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">source_size_A</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">k2</span><span class="p">)</span>
+        <span class="n">intensity</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">irfft2</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">intensity</span><span class="p">)</span> <span class="o">*</span> <span class="n">blur</span><span class="p">,</span> <span class="n">s</span><span class="o">=</span><span class="n">intensity</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">intensity</span> <span class="o">/</span> <span class="n">intensity</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="object_map">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.imaging.object_map">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">object_map</span><span class="p">(</span><span class="n">densities</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Optional</span><span class="p">[</span><span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]]],</span> <span class="n">u_rms_A</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span>
+               <span class="n">cross_sections</span><span class="p">:</span> <span class="n">CrossSections</span><span class="p">,</span> <span class="n">shape_padded</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cpu&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (8.2), :math:`O = \\sum_e \\sigma_e \\rho_e` over all layers (``None`` layers are skipped).&quot;&quot;&quot;</span>
+
+    <span class="n">total</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">for</span> <span class="n">layer_densities</span><span class="p">,</span> <span class="n">u</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">densities</span><span class="p">,</span> <span class="n">u_rms_A</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">layer_densities</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">for</span> <span class="n">element</span><span class="p">,</span> <span class="n">density</span> <span class="ow">in</span> <span class="n">layer_densities</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">part</span> <span class="o">=</span> <span class="n">density</span> <span class="o">*</span> <span class="n">cross_sections</span><span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="n">u</span><span class="p">)</span>
+            <span class="n">total</span> <span class="o">=</span> <span class="n">part</span> <span class="k">if</span> <span class="n">total</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">total</span> <span class="o">+</span> <span class="n">part</span>
+    <span class="k">if</span> <span class="n">total</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="nb">tuple</span><span class="p">(</span><span class="n">shape_padded</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">total</span></div>
+
+
+
+<div class="viewcode-block" id="stem_image">
+<a class="viewcode-back" href="../../../part1_physics.html#temsim.physics.imaging.stem_image">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">stem_image</span><span class="p">(</span><span class="n">obj</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">probe</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Eq. (8.2): circular convolution on the padded grid, cropped.&quot;&quot;&quot;</span>
+
+    <span class="n">image</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">irfft2</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">obj</span><span class="p">)</span> <span class="o">*</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">rfft2</span><span class="p">(</span><span class="n">probe</span><span class="p">),</span> <span class="n">s</span><span class="o">=</span><span class="n">obj</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span><span class="p">:])</span>
+    <span class="k">return</span> <span class="n">crop</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">padding</span><span class="p">)</span></div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

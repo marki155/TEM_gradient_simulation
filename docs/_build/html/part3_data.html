@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Part III - Data management &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="_static/alabaster.css?v=27fed22d" />
+    <script src="_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Part IV - Service" href="part4_service.html" />
+    <link rel="prev" title="Part II - Learning" href="part2_learning.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="module-temsim.data.schema">
+<span id="part-iii-data-management"></span><h1>Part III - Data management<a class="headerlink" href="#module-temsim.data.schema" title="Link to this heading">¶</a></h1>
+<p>Part III - Data management.  Section 1: the data model.</p>
+<section id="theory">
+<h2>Theory<a class="headerlink" href="#theory" title="Link to this heading">¶</a></h2>
+<p>A reconstruction task has four kinds of information, and keeping them apart is
+the organising principle of the whole package.</p>
+<ol class="arabic">
+<li><p><strong>Specification</strong> (<a class="reference internal" href="#temsim.data.schema.Experiment" title="temsim.data.schema.Experiment"><code class="xref py py-class docutils literal notranslate"><span class="pre">Experiment</span></code></a>).  What is the sample made of and how
+is it imaged?  It consists of</p>
+<ul class="simple">
+<li><p>the imaging setup <span class="math notranslate nohighlight">\(\mathcal{I}\)</span> - mode (TEM or STEM-HAADF), image
+shape <span class="math notranslate nohighlight">\((H, W)\)</span>, pixel size <span class="math notranslate nohighlight">\(\Delta x\)</span>, acceleration voltage
+<span class="math notranslate nohighlight">\(U\)</span>, aberration coefficients, envelope, detector;</p></li>
+<li><p>the layer stack - an ordered list of slices <span class="math notranslate nohighlight">\(\ell = 1 \dots L\)</span> with
+element, height <span class="math notranslate nohighlight">\(z_\ell\)</span>, and membership in a <em>group</em>;</p></li>
+<li><p>the groups - rigid units that move together (global shift, rotation,
+scale, a smooth strain field);</p></li>
+<li><p>the initial atomic structure, one list of positions per layer
+(Eq. 3.1: <span class="math notranslate nohighlight">\(\mathbf{r}_{\ell,i} \in \mathbb{R}^2\)</span>, in pixels).</p></li>
+</ul>
+</li>
+<li><p><strong>Trainable state</strong> (<a class="reference internal" href="#temsim.data.schema.ModelState" title="temsim.data.schema.ModelState"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelState</span></code></a>).  The numbers the optimiser changes:
+per-atom position shifts <span class="math notranslate nohighlight">\(\delta\mathbf{r}_{\ell,i}\)</span>, intensity (a
+continuous atomic number) <span class="math notranslate nohighlight">\(Z_{\ell,i}\)</span>, occupancy logit
+<span class="math notranslate nohighlight">\(o_{\ell,i}\)</span>, per-group transformation and strain control points, and
+the microscope parameters.  The <em>effective</em> position of an atom is</p>
+<div class="math notranslate nohighlight">
+\[\mathbf{r}^{\rm eff}_{\ell,i} = \mathbf{r}_{\ell,i} + \delta\mathbf{r}_{\ell,i}
+\qquad (3.2)\]</div>
+<p>so the specification is never overwritten by training.</p>
+</li>
+<li><p><strong>Training settings</strong> (<a class="reference internal" href="#temsim.data.schema.TrainSettings" title="temsim.data.schema.TrainSettings"><code class="xref py py-class docutils literal notranslate"><span class="pre">TrainSettings</span></code></a>).  Which parts of the state may
+change, with which learning rate, how the loss terms are weighted, how strongly
+regularisers act, and which image regions count.  This is policy, not physics.</p></li>
+<li><p><strong>Observations</strong> (the target image and masks).  Bulk arrays; they live in
+<code class="docutils literal notranslate"><span class="pre">.npy</span></code>/<code class="docutils literal notranslate"><span class="pre">.npz</span></code> files next to the JSON, marked <code class="docutils literal notranslate"><span class="pre">external</span></code> below.</p></li>
+</ol>
+</section>
+<section id="implementation">
+<h2>Implementation<a class="headerlink" href="#implementation" title="Link to this heading">¶</a></h2>
+<p>All classes are dataclasses without behaviour beyond validation and lookup.  They
+import nothing but numpy, so that the user interface process can use them without
+loading torch.  <a class="reference internal" href="#module-temsim.data.codec" title="temsim.data.codec"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.codec</span></code></a> converts them to and from JSON;
+<a class="reference internal" href="#module-temsim.data.store" title="temsim.data.store"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.store</span></code></a> puts them on disk; <a class="reference internal" href="#module-temsim.data.legacy" title="temsim.data.legacy"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.legacy</span></code></a> reads the
+formats of earlier versions.</p>
+<p>Units: lengths in the structure are <em>pixels</em> (origin at the image corner),
+heights <code class="docutils literal notranslate"><span class="pre">z_nm</span></code> and the pixel size in nanometres, aberration coefficients in the
+units of <a class="reference internal" href="part1_physics.html#module-temsim.physics.optics" title="temsim.physics.optics"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.physics.optics</span></code></a> (documented there), angles in mrad or rad as
+named.</p>
+</section>
+<dl class="py data">
+<dt class="sig sig-object py" id="temsim.data.schema.TYPICAL_DEBYE_WALLER_U">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">TYPICAL_DEBYE_WALLER_U</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'B':</span> <span class="pre">0.07,</span> <span class="pre">'C':</span> <span class="pre">0.06,</span> <span class="pre">'N':</span> <span class="pre">0.06,</span> <span class="pre">'O':</span> <span class="pre">0.07,</span> <span class="pre">'S':</span> <span class="pre">0.07,</span> <span class="pre">'W':</span> <span class="pre">0.055}</span></em><a class="headerlink" href="#temsim.data.schema.TYPICAL_DEBYE_WALLER_U" title="Link to this definition">¶</a></dt>
+<dd><p>Typical one-dimensional thermal displacements u_rms [Angstrom] at room
+temperature; <code class="docutils literal notranslate"><span class="pre">u</span> <span class="pre">=</span> <span class="pre">sqrt(B</span> <span class="pre">/</span> <span class="pre">(8</span> <span class="pre">pi^2))</span></code> for a Debye-Waller factor B.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Layer">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Layer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name:</span> <span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">element:</span> <span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">z_nm:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">''</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_occupancy:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">2.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">occ_entropy:</span> <span class="pre">bool</span> <span class="pre">=</span> <span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">elements:</span> <span class="pre">~typing.List[str]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">debye_waller_u:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Layer"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Layer" title="Link to this definition">¶</a></dt>
+<dd><p>One multislice slice.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Layer.group">
+<span class="sig-name descname"><span class="pre">group</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></em><a class="headerlink" href="#temsim.data.schema.Layer.group" title="Link to this definition">¶</a></dt>
+<dd><p>Name of the group this layer moves with (empty -&gt; its own group).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Layer.init_occupancy">
+<span class="sig-name descname"><span class="pre">init_occupancy</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">2.0</span></em><a class="headerlink" href="#temsim.data.schema.Layer.init_occupancy" title="Link to this definition">¶</a></dt>
+<dd><p>Initial occupancy <em>logit</em> o; the weight of an atom is sigmoid(o).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Layer.occ_entropy">
+<span class="sig-name descname"><span class="pre">occ_entropy</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></em><a class="headerlink" href="#temsim.data.schema.Layer.occ_entropy" title="Link to this definition">¶</a></dt>
+<dd><p>Apply the occupancy-entropy regulariser to this layer.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Layer.elements">
+<span class="sig-name descname"><span class="pre">elements</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.Layer.elements" title="Link to this definition">¶</a></dt>
+<dd><p>Elements the atomic number may interpolate between (e.g. B, C, N, O).
+Empty: one scattering kernel (<code class="docutils literal notranslate"><span class="pre">element</span></code>), intensity scales its amplitude.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Layer.debye_waller_u">
+<span class="sig-name descname"><span class="pre">debye_waller_u</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.0</span></em><a class="headerlink" href="#temsim.data.schema.Layer.debye_waller_u" title="Link to this definition">¶</a></dt>
+<dd><p>Thermal displacement u_rms [Angstrom], 0 = frozen lattice.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Group">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Group</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name:</span> <span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">control_points:</span> <span class="pre">~typing.List[int]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_shift:</span> <span class="pre">float</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_rotation:</span> <span class="pre">float</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_shift:</span> <span class="pre">~typing.List[float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_rotation:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_scale:</span> <span class="pre">~typing.List[float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_contrast_factor:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mask_file:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_file:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">isolate_when_active:</span> <span class="pre">bool</span> <span class="pre">=</span> <span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Group"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Group" title="Link to this definition">¶</a></dt>
+<dd><p>Atoms that move as one rigid unit plus a smooth strain field.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Group.control_points">
+<span class="sig-name descname"><span class="pre">control_points</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.Group.control_points" title="Link to this definition">¶</a></dt>
+<dd><p>Strain field control grid (rows, columns).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Group.max_shift">
+<span class="sig-name descname"><span class="pre">max_shift</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.schema.Group.max_shift" title="Link to this definition">¶</a></dt>
+<dd><p>Clamp on the global shift [px] / rotation [rad]; None = unbounded.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Group.init_contrast_factor">
+<span class="sig-name descname"><span class="pre">init_contrast_factor</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1.0</span></em><a class="headerlink" href="#temsim.data.schema.Group.init_contrast_factor" title="Link to this definition">¶</a></dt>
+<dd><p>Empirical contrast factor of the group (Stobbs factor).  1 = untouched
+physical potential.  A documented fudge that makes the simulation/experiment
+discrepancy visible instead of hiding it in the occupancy.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Group.mask_file">
+<span class="sig-name descname"><span class="pre">mask_file</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.schema.Group.mask_file" title="Link to this definition">¶</a></dt>
+<dd><p>Data sources, relative to the dataset folder.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Group.isolate_when_active">
+<span class="sig-name descname"><span class="pre">isolate_when_active</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#temsim.data.schema.Group.isolate_when_active" title="Link to this definition">¶</a></dt>
+<dd><p>While this group is active only its layers contribute to the image.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Stem">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Stem</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">convergence_mrad</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">25.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">detector_mrad</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">(60.0,</span> <span class="pre">200.0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source_size_A</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aberrations</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Stem"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Stem" title="Link to this definition">¶</a></dt>
+<dd><p>STEM-HAADF specific setup.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Stem.detector_mrad">
+<span class="sig-name descname"><span class="pre">detector_mrad</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">(60.0,</span> <span class="pre">200.0)</span></em><a class="headerlink" href="#temsim.data.schema.Stem.detector_mrad" title="Link to this definition">¶</a></dt>
+<dd><p>Inner and outer detector half-angle [mrad].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Stem.source_size_A">
+<span class="sig-name descname"><span class="pre">source_size_A</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.5</span></em><a class="headerlink" href="#temsim.data.schema.Stem.source_size_A" title="Link to this definition">¶</a></dt>
+<dd><p>Gaussian source size, sigma [Angstrom].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Stem.aberrations">
+<span class="sig-name descname"><span class="pre">aberrations</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.schema.Stem.aberrations" title="Link to this definition">¶</a></dt>
+<dd><p>Probe aberrations; None -&gt; use <code class="docutils literal notranslate"><span class="pre">Imaging.aberrations</span></code>.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Imaging</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="pre">shape:</span> <span class="pre">~typing.Tuple[int,</span> <span class="pre">int],</span> <span class="pre">pixel_size_nm:</span> <span class="pre">float,</span> <span class="pre">mode:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'tem',</span> <span class="pre">voltage_kV:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">80.0,</span> <span class="pre">padding:</span> <span class="pre">int</span> <span class="pre">=</span> <span class="pre">100,</span> <span class="pre">beam_direction:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'+z',</span> <span class="pre">aberrations:</span> <span class="pre">~typing.Dict[str,</span> <span class="pre">float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;,</span> <span class="pre">envelope:</span> <span class="pre">~typing.Dict[str,</span> <span class="pre">~typing.Any]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;,</span> <span class="pre">amp_contrast:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.1,</span> <span class="pre">alpha_max_mrad:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">50.0,</span> <span class="pre">ctf_parametrization:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'cartesian',</span> <span class="pre">stem:</span> <span class="pre">~temsim.data.schema.Stem</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;,</span> <span class="pre">potential_parametrization:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'kirkland',</span> <span class="pre">band_limit:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.6666666666666666,</span> <span class="pre">tem_signal:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'amplitude'</span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Imaging"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Imaging" title="Link to this definition">¶</a></dt>
+<dd><p>How the sample is imaged.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.padding">
+<span class="sig-name descname"><span class="pre">padding</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">100</span></em><a class="headerlink" href="#temsim.data.schema.Imaging.padding" title="Link to this definition">¶</a></dt>
+<dd><p>Zero padding around the image for the propagation [px].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.beam_direction">
+<span class="sig-name descname"><span class="pre">beam_direction</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'+z'</span></em><a class="headerlink" href="#temsim.data.schema.Imaging.beam_direction" title="Link to this definition">¶</a></dt>
+<dd><p>the beam travels from small to large z.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>“+z”</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.aberrations">
+<span class="sig-name descname"><span class="pre">aberrations</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.Imaging.aberrations" title="Link to this definition">¶</a></dt>
+<dd><p>Aberration coefficients, polar (C, phi) or cartesian (a, b) - the
+optics module converts either way.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.envelope">
+<span class="sig-name descname"><span class="pre">envelope</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.Imaging.envelope" title="Link to this definition">¶</a></dt>
+<dd><p>Envelope parameters (deltaE, Cc_um, source_size, instab_defocus_nm, …).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.ctf_parametrization">
+<span class="sig-name descname"><span class="pre">ctf_parametrization</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'cartesian'</span></em><a class="headerlink" href="#temsim.data.schema.Imaging.ctf_parametrization" title="Link to this definition">¶</a></dt>
+<dd><p>“cartesian” or “polar”.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Parametrisation used for optimisation</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.potential_parametrization">
+<span class="sig-name descname"><span class="pre">potential_parametrization</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'kirkland'</span></em><a class="headerlink" href="#temsim.data.schema.Imaging.potential_parametrization" title="Link to this definition">¶</a></dt>
+<dd><p>“kirkland” or “lobato”.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Atomic potential tables</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.band_limit">
+<span class="sig-name descname"><span class="pre">band_limit</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.6666666666666666</span></em><a class="headerlink" href="#temsim.data.schema.Imaging.band_limit" title="Link to this definition">¶</a></dt>
+<dd><p>Band limit of the propagator as a fraction of the Nyquist frequency
+(2/3 suppresses aliasing of the transmission function; 0 = off, as in
+all files written before the rebuild).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Imaging.tem_signal">
+<span class="sig-name descname"><span class="pre">tem_signal</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'amplitude'</span></em><a class="headerlink" href="#temsim.data.schema.Imaging.tem_signal" title="Link to this definition">¶</a></dt>
+<dd><p>“amplitude” (modulus of the wave, as before) or “intensity” (its square).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>TEM image signal</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Structure">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Structure</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">positions:</span> <span class="pre">~typing.List[~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">atomic_numbers:</span> <span class="pre">~typing.List[~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_factors:</span> <span class="pre">~typing.List[~numpy.ndarray]</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Structure"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Structure" title="Link to this definition">¶</a></dt>
+<dd><p>Initial atoms, one array per layer (same order as <code class="docutils literal notranslate"><span class="pre">Experiment.layers</span></code>).</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Structure.positions">
+<span class="sig-name descname"><span class="pre">positions</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.Structure.positions" title="Link to this definition">¶</a></dt>
+<dd><p>(n, 2) positions in pixels, columns (y, x) as in the image array.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Structure.atomic_numbers">
+<span class="sig-name descname"><span class="pre">atomic_numbers</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.Structure.atomic_numbers" title="Link to this definition">¶</a></dt>
+<dd><p>(n,) continuous atomic number of each atom (the “intensity”).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Structure.weight_factors">
+<span class="sig-name descname"><span class="pre">weight_factors</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.schema.Structure.weight_factors" title="Link to this definition">¶</a></dt>
+<dd><p>Optional (n,) weight of each atom relative to its atomic number (seeding).</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Experiment">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Experiment</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="pre">imaging:</span> <span class="pre">~temsim.data.schema.Imaging,</span> <span class="pre">layers:</span> <span class="pre">~typing.List[~temsim.data.schema.Layer],</span> <span class="pre">groups:</span> <span class="pre">~typing.List[~temsim.data.schema.Group]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;,</span> <span class="pre">structure:</span> <span class="pre">~temsim.data.schema.Structure</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;,</span> <span class="pre">schema_version:</span> <span class="pre">int</span> <span class="pre">=</span> <span class="pre">3</span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Experiment"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Experiment" title="Link to this definition">¶</a></dt>
+<dd><p>The complete specification of a reconstruction problem.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.schema.resolve_layers_and_groups">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">resolve_layers_and_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layers</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#temsim.data.schema.Layer" title="temsim.data.schema.Layer"><span class="pre">Layer</span></a><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">groups</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#temsim.data.schema.Group" title="temsim.data.schema.Group"><span class="pre">Group</span></a><span class="p"><span class="pre">]</span></span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#resolve_layers_and_groups"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.resolve_layers_and_groups" title="Link to this definition">¶</a></dt>
+<dd><p>Validate names and add the groups that layers refer to but nobody defined.</p>
+<ul class="simple">
+<li><p>layers without a group get a group of their own name,</p></li>
+<li><p>names are unique and contain no <code class="docutils literal notranslate"><span class="pre">.</span></code> (they become dictionary keys such as
+<code class="docutils literal notranslate"><span class="pre">groups.&lt;name&gt;.shift</span></code>),</p></li>
+<li><p>groups without a layer are dropped.</p></li>
+</ul>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.OpticsState">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">OpticsState</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">amp_contrast:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">delta_E:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.45</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">Cc_um:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">1000.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aberrations:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#OpticsState"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.OpticsState" title="Link to this definition">¶</a></dt>
+<dd><p>Trained numbers of the aberration-bearing element (CTF in TEM, probe in STEM).</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">ModelState</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">position_shifts:</span> <span class="pre">~typing.List[~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intensities:</span> <span class="pre">~typing.List[~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">occupancies:</span> <span class="pre">~typing.List[~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shifts:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rotations:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scales:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">contrast_factors:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain_control:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain_convention:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'v3'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">optics:</span> <span class="pre">~temsim.data.schema.OpticsState</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalisation:</span> <span class="pre">~numpy.ndarray</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">schema_version:</span> <span class="pre">int</span> <span class="pre">=</span> <span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#ModelState"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.ModelState" title="Link to this definition">¶</a></dt>
+<dd><p>Everything the optimiser may change (Eq. 3.2 and the tables in Part II).</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.position_shifts">
+<span class="sig-name descname"><span class="pre">position_shifts</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.ModelState.position_shifts" title="Link to this definition">¶</a></dt>
+<dd><p>Per layer, (n, 2) shifts added to the initial positions [px].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.intensities">
+<span class="sig-name descname"><span class="pre">intensities</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.ModelState.intensities" title="Link to this definition">¶</a></dt>
+<dd><p>Per layer, (n,) effective atomic number.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.occupancies">
+<span class="sig-name descname"><span class="pre">occupancies</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.ModelState.occupancies" title="Link to this definition">¶</a></dt>
+<dd><p>Per layer, (n,) occupancy logits.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.shifts">
+<span class="sig-name descname"><span class="pre">shifts</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.ModelState.shifts" title="Link to this definition">¶</a></dt>
+<dd><p>Per group.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.strain_control">
+<span class="sig-name descname"><span class="pre">strain_control</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.ModelState.strain_control" title="Link to this definition">¶</a></dt>
+<dd><p>Per group, (1, 2, Hc, Wc) strain control displacements.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.strain_convention">
+<span class="sig-name descname"><span class="pre">strain_convention</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'v3'</span></em><a class="headerlink" href="#temsim.data.schema.ModelState.strain_convention" title="Link to this definition">¶</a></dt>
+<dd><p>earlier files
+(padded-image coordinates, transposed axes) - converted when the state is loaded.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>“v3”</p>
+</dd>
+<dt class="field-even">Type<span class="colon">:</span></dt>
+<dd class="field-even"><p>nodes span the image area (Part I, Section 5); “legacy”</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.ModelState.normalisation">
+<span class="sig-name descname"><span class="pre">normalisation</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.schema.ModelState.normalisation" title="Link to this definition">¶</a></dt>
+<dd><p>Two numbers that correct brightness and contrast of the simulation.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainParam">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">TrainParam</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">enabled</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'bool'</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lr</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="s"><span class="pre">'float'</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0001</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#TrainParam"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.TrainParam" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.GroupTrain">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">GroupTrain</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">shift:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rotation:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain_field:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">contrast:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#GroupTrain"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.GroupTrain" title="Link to this definition">¶</a></dt>
+<dd><dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.GroupTrain.contrast">
+<span class="sig-name descname"><span class="pre">contrast</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#temsim.data.schema.TrainParam" title="temsim.data.schema.TrainParam"><span class="pre">TrainParam</span></a></em><a class="headerlink" href="#temsim.data.schema.GroupTrain.contrast" title="Link to this definition">¶</a></dt>
+<dd><p>release only one.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Contrast factor and occupancy scale the same thing</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.LayerTrain">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">LayerTrain</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">free_positions:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intensities:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">occupancies:</span> <span class="pre">'TrainParam'</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#LayerTrain"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.LayerTrain" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.LossWeights">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">LossWeights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">var</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_var_100</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mse</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ncc</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_ncc_100</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ssim</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">l1</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.1</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#LossWeights"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.LossWeights" title="Link to this definition">¶</a></dt>
+<dd><p>Weights of the data-fidelity terms (see Part II, Section 1).</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.Regularisation">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">Regularisation</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">occ_entropy_a</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">position_shifts_a</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">repulsion_a</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">repulsion_distance_A</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain_energy_a</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain_energy_lambda</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strain_energy_mu</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">float</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#Regularisation"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.Regularisation" title="Link to this definition">¶</a></dt>
+<dd><p>Weights and ranges of the priors (Part II, Section 3).</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Regularisation.repulsion_a">
+<span class="sig-name descname"><span class="pre">repulsion_a</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.0</span></em><a class="headerlink" href="#temsim.data.schema.Regularisation.repulsion_a" title="Link to this definition">¶</a></dt>
+<dd><p>weight, and distance [Angstrom] below which it acts.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Pairwise repulsion</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.Regularisation.strain_energy_a">
+<span class="sig-name descname"><span class="pre">strain_energy_a</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0.0</span></em><a class="headerlink" href="#temsim.data.schema.Regularisation.strain_energy_a" title="Link to this definition">¶</a></dt>
+<dd><p>weight and Lame parameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Elastic energy of the strain field</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainSettings">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">TrainSettings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">groups:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~temsim.data.schema.GroupTrain]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layers:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~temsim.data.schema.LayerTrain]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">amp_contrast:</span> <span class="pre">~temsim.data.schema.TrainParam</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aberrations:</span> <span class="pre">~temsim.data.schema.TrainParam</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">envelope:</span> <span class="pre">~temsim.data.schema.TrainParam</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalisation:</span> <span class="pre">~temsim.data.schema.TrainParam</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aberration_flags:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bool]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">envelope_flags:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bool]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss:</span> <span class="pre">~temsim.data.schema.LossWeights</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regularisation:</span> <span class="pre">~temsim.data.schema.Regularisation</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">active_group:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">masks:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">targets:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">schema_version:</span> <span class="pre">int</span> <span class="pre">=</span> <span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#TrainSettings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.TrainSettings" title="Link to this definition">¶</a></dt>
+<dd><p>What is trained, how it is weighted, and where the image counts.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainSettings.aberrations">
+<span class="sig-name descname"><span class="pre">aberrations</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#temsim.data.schema.TrainParam" title="temsim.data.schema.TrainParam"><span class="pre">TrainParam</span></a></em><a class="headerlink" href="#temsim.data.schema.TrainSettings.aberrations" title="Link to this definition">¶</a></dt>
+<dd><p>Aberrations including their azimuth angles (C12 and phi12 belong together).</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainSettings.active_group">
+<span class="sig-name descname"><span class="pre">active_group</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.schema.TrainSettings.active_group" title="Link to this definition">¶</a></dt>
+<dd><p>Group that is currently being worked on (mask, target, isolation); None = all.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainSettings.masks">
+<span class="sig-name descname"><span class="pre">masks</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.TrainSettings.masks" title="Link to this definition">¶</a></dt>
+<dd><p>Bulk arrays, stored in .npz next to the JSON.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainSettings.GLOBAL_PARAMS">
+<span class="sig-name descname"><span class="pre">GLOBAL_PARAMS</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('amp_contrast',</span> <span class="pre">'aberrations',</span> <span class="pre">'envelope',</span> <span class="pre">'normalisation')</span></em><a class="headerlink" href="#temsim.data.schema.TrainSettings.GLOBAL_PARAMS" title="Link to this definition">¶</a></dt>
+<dd><p>Names of the global (non group/layer) trainable switches.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="temsim.data.schema.TrainSettings.params">
+<span class="sig-name descname"><span class="pre">params</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#temsim.data.schema.TrainParam" title="temsim.data.schema.TrainParam"><span class="pre">TrainParam</span></a><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim/data/schema.html#TrainSettings.params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.TrainSettings.params" title="Link to this definition">¶</a></dt>
+<dd><p>All switches by key: <code class="docutils literal notranslate"><span class="pre">aberrations</span></code>, <code class="docutils literal notranslate"><span class="pre">groups.&lt;g&gt;.shift</span></code>, <code class="docutils literal notranslate"><span class="pre">layers.&lt;l&gt;.occupancies</span></code> …</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.LatticeSpec">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">LatticeSpec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'lattice'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">type:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'graphene'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">a:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">2.46</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">b:</span> <span class="pre">float</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gamma_deg:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">120.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">formula:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'WS2'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">file:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">basis:</span> <span class="pre">~typing.List[~typing.Any]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rotation_deg:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">offset_px:</span> <span class="pre">~typing.Tuple[float</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]</span> <span class="pre">=</span> <span class="pre">(0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">0.0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">z_offset_nm:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">0.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#LatticeSpec"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.LatticeSpec" title="Link to this definition">¶</a></dt>
+<dd><p>Recipe for an initial atom lattice (executed by <a class="reference internal" href="part1_physics.html#module-temsim.physics.structure" title="temsim.physics.structure"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.physics.structure</span></code></a>).</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.LatticeSpec.a">
+<span class="sig-name descname"><span class="pre">a</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">2.46</span></em><a class="headerlink" href="#temsim.data.schema.LatticeSpec.a" title="Link to this definition">¶</a></dt>
+<dd><p>Lattice constants [Angstrom] and the angle between the lattice vectors.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.LatticeSpec.formula">
+<span class="sig-name descname"><span class="pre">formula</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'WS2'</span></em><a class="headerlink" href="#temsim.data.schema.LatticeSpec.formula" title="Link to this definition">¶</a></dt>
+<dd><p>structure file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><code class="docutils literal notranslate"><span class="pre">type</span> <span class="pre">==</span> <span class="pre">&quot;mx2&quot;</span></code></p>
+</dd>
+<dt class="field-even">Type<span class="colon">:</span></dt>
+<dd class="field-even"><p>chemical formula; <code class="docutils literal notranslate"><span class="pre">type</span> <span class="pre">==</span> <span class="pre">&quot;file&quot;</span></code></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.schema.LatticeSpec.basis">
+<span class="sig-name descname"><span class="pre">basis</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.schema.LatticeSpec.basis" title="Link to this definition">¶</a></dt>
+<dd><p>rows <code class="docutils literal notranslate"><span class="pre">(element,</span> <span class="pre">frac_a,</span> <span class="pre">frac_b,</span> <span class="pre">z_nm)</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><code class="docutils literal notranslate"><span class="pre">type</span> <span class="pre">==</span> <span class="pre">&quot;custom&quot;</span></code></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.LayerSource">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">LayerSource</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lattice</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lattice_layer</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#LayerSource"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.LayerSource" title="Link to this definition">¶</a></dt>
+<dd><p>Which layer of which lattice fills a given experiment layer.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.InitTrain">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">InitTrain</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">enable:</span> <span class="pre">~typing.List[str]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">learning_rates:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">losses:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">float]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">active_group:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#InitTrain"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.InitTrain" title="Link to this definition">¶</a></dt>
+<dd><p>The <code class="docutils literal notranslate"><span class="pre">train</span></code> block of an <code class="docutils literal notranslate"><span class="pre">init.json</span></code>: what to release at the start.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.schema.DatasetSpec">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.schema.</span></span><span class="sig-name descname"><span class="pre">DatasetSpec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pixel_size_nm:</span> <span class="pre">float</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">voltage_kV:</span> <span class="pre">float</span> <span class="pre">=</span> <span class="pre">80.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shape:</span> <span class="pre">~typing.Tuple[int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">int]</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">padding:</span> <span class="pre">int</span> <span class="pre">=</span> <span class="pre">100</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">imaging:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~typing.Any]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layers:</span> <span class="pre">~typing.List[~temsim.data.schema.Layer]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">groups:</span> <span class="pre">~typing.List[~temsim.data.schema.Group]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lattices:</span> <span class="pre">~typing.List[~temsim.data.schema.LatticeSpec]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_sources:</span> <span class="pre">~typing.List[~temsim.data.schema.LayerSource]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">train:</span> <span class="pre">~temsim.data.schema.InitTrain</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_file:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_zero_handling:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'median'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config_dir:</span> <span class="pre">str</span> <span class="pre">=</span> <span class="pre">'config'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~typing.Any]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">version:</span> <span class="pre">int</span> <span class="pre">=</span> <span class="pre">2</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/schema.html#DatasetSpec"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.schema.DatasetSpec" title="Link to this definition">¶</a></dt>
+<dd><p>Everything a data folder says about an experiment, before atoms exist.</p>
+<p><code class="docutils literal notranslate"><span class="pre">shape</span></code> is optional because a bare folder only reveals it through the target
+image.  <code class="docutils literal notranslate"><span class="pre">imaging</span></code> holds the raw <code class="docutils literal notranslate"><span class="pre">imaging</span></code> block (mode, aberrations,
+envelope, stem …); <code class="xref py py-meth docutils literal notranslate"><span class="pre">to_imaging()</span></code> merges it with the shape.</p>
+</dd></dl>
+
+<p id="module-temsim.data.codec">Generic conversion between dataclasses and JSON-compatible values.</p>
+<p>Every persistent object in <a class="reference internal" href="#module-temsim.data.schema" title="temsim.data.schema"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.schema</span></code></a> is a plain dataclass.  Rather
+than writing a <code class="docutils literal notranslate"><span class="pre">to_dict</span></code>/<code class="docutils literal notranslate"><span class="pre">from_dict</span></code> pair per class, one pair of functions
+walks the <em>type annotations</em>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">encode</span></code> turns a dataclass tree into dicts, lists, numbers and strings,</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">decode</span></code> rebuilds the tree from such values, guided by the target class.</p></li>
+</ul>
+<section id="rules">
+<h2>Rules<a class="headerlink" href="#rules" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p>numpy arrays become nested lists and come back as <code class="docutils literal notranslate"><span class="pre">float64</span></code> arrays,</p></li>
+<li><p>tuples become lists and come back as tuples where the annotation says so,</p></li>
+<li><p>fields marked <code class="docutils literal notranslate"><span class="pre">metadata={&quot;external&quot;:</span> <span class="pre">True}</span></code> hold bulk arrays (masks, target
+images) that live in <code class="docutils literal notranslate"><span class="pre">.npz</span></code> files; they are skipped here,</p></li>
+<li><p>unknown keys are <em>ignored</em> by default so that a file written by a newer
+version still loads; pass <code class="docutils literal notranslate"><span class="pre">strict=True</span></code> to turn them into errors.</p></li>
+</ul>
+</section>
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.codec.encode">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.codec.</span></span><span class="sig-name descname"><span class="pre">encode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">obj</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span><a class="reference internal" href="_modules/temsim/data/codec.html#encode"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.codec.encode" title="Link to this definition">¶</a></dt>
+<dd><p>Dataclass tree -&gt; JSON-compatible value.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.codec.decode">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.codec.</span></span><span class="sig-name descname"><span class="pre">decode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tp</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strict</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">''</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span><a class="reference internal" href="_modules/temsim/data/codec.html#decode"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.codec.decode" title="Link to this definition">¶</a></dt>
+<dd><p>JSON-compatible value -&gt; value of annotation <code class="docutils literal notranslate"><span class="pre">tp</span></code>.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.codec.round_trip">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.codec.</span></span><span class="sig-name descname"><span class="pre">round_trip</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">obj</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span><a class="reference internal" href="_modules/temsim/data/codec.html#round_trip"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.codec.round_trip" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">decode(type(obj),</span> <span class="pre">encode(obj))</span></code> - handy in tests.</p>
+</dd></dl>
+
+<p id="module-temsim.data.dataset">Part III, Section 2: the data-folder convention.</p>
+<section id="id1">
+<h2>Theory<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<p>A measurement is a folder.  Convention (every item optional unless stated):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="o">&lt;</span><span class="n">folder</span><span class="o">&gt;/</span>
+    <span class="n">target</span><span class="o">.</span><span class="n">tif</span> <span class="o">|</span> <span class="n">target</span><span class="o">.</span><span class="n">npy</span>       <span class="n">the</span> <span class="n">measured</span> <span class="n">image</span> <span class="p">(</span><span class="n">required</span><span class="p">)</span>
+    <span class="n">mask_</span><span class="o">&lt;</span><span class="n">group</span><span class="o">&gt;.</span><span class="n">tif</span> <span class="o">|</span> <span class="o">&lt;</span><span class="n">group</span><span class="o">&gt;</span><span class="n">_mask</span><span class="o">.</span><span class="n">tif</span> <span class="o">|</span> <span class="n">mask</span><span class="o">.</span><span class="n">tif</span>
+                                  <span class="n">region</span> <span class="ow">in</span> <span class="n">which</span> <span class="n">atoms</span> <span class="n">of</span> <span class="o">&lt;</span><span class="n">group</span><span class="o">&gt;</span> <span class="n">are</span> <span class="n">expected</span>
+    <span class="n">init</span><span class="o">.</span><span class="n">json</span> <span class="o">|</span> <span class="n">init_random</span><span class="o">.</span><span class="n">json</span>  <span class="n">setup</span> <span class="p">(</span><span class="n">pixel</span> <span class="n">size</span><span class="p">,</span> <span class="n">voltage</span><span class="p">,</span> <span class="n">mode</span><span class="p">,</span> <span class="n">lattices</span> <span class="o">...</span><span class="p">)</span>
+    <span class="o">&lt;</span><span class="n">config_dir</span><span class="o">&gt;/</span>                 <span class="n">run</span> <span class="n">directories</span> <span class="n">written</span> <span class="n">by</span> <span class="n">the</span> <span class="n">programs</span>
+</pre></div>
+</div>
+<p>The image is dimensionless; Part II normalises it (Eq. 5.1), so the file’s grey
+values are irrelevant except for one defect: detectors write exact zeros for
+pixels that were never read.  Those would pull the minimum of the image to zero and
+distort the normalisation, therefore <code class="docutils literal notranslate"><span class="pre">target_zero_handling</span> <span class="pre">==</span> <span class="pre">&quot;median&quot;</span></code> (the
+default, as in the ImageJ plug-in) replaces exact zeros by the image median.</p>
+<p><code class="docutils literal notranslate"><span class="pre">init.json</span></code> is written by the ImageJ plug-in (<code class="docutils literal notranslate"><span class="pre">version</span></code> 2) and, in reduced
+form, by the headless seeding command (<code class="docutils literal notranslate"><span class="pre">init_random.json</span></code>).  Length units in it
+follow the plug-in’s conventions (shift in pixels, rotation in <em>degrees</em>); this
+module converts to the internal convention of <a class="reference internal" href="#module-temsim.data.schema" title="temsim.data.schema"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.schema</span></code></a> (radians).
+Turning lattice recipes into atoms is physics and lives in
+<a class="reference internal" href="part1_physics.html#module-temsim.physics.structure" title="temsim.physics.structure"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.physics.structure</span></code></a>.</p>
+</section>
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.read_image">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">read_image</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">ndarray</span></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#read_image"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.read_image" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">.npy</span></code> or <code class="docutils literal notranslate"><span class="pre">.tif</span></code> -&gt; array (as stored).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.prepare_target">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">prepare_target</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zero_handling</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">'median'</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">ndarray</span></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#prepare_target"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.prepare_target" title="Link to this definition">¶</a></dt>
+<dd><p>Float32 copy; exact zeros replaced by the median if requested.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.group_name_from_mask">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">group_name_from_mask</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#group_name_from_mask"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.group_name_from_mask" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">mask_Gr.tif</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">Gr</span></code>, <code class="docutils literal notranslate"><span class="pre">gr_mask.tif</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">gr</span></code>, <code class="docutils literal notranslate"><span class="pre">mask.tif</span></code> -&gt; default.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.find_masks">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">find_masks</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">folder</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#find_masks"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.find_masks" title="Link to this definition">¶</a></dt>
+<dd><p>Mask files of a folder, sorted, <code class="docutils literal notranslate"><span class="pre">.tif</span></code>/<code class="docutils literal notranslate"><span class="pre">.tiff</span></code>/<code class="docutils literal notranslate"><span class="pre">.npy</span></code> only.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.train_key">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">train_key</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">key</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#train_key"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.train_key" title="Link to this definition">¶</a></dt>
+<dd><p>Switch name written by the plug-in (old names allowed) -&gt; key of <code class="docutils literal notranslate"><span class="pre">TrainSettings.params()</span></code>.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.apply_init_train">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">apply_init_train</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">settings</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim.data.schema.TrainSettings" title="temsim.data.schema.TrainSettings"><span class="pre">TrainSettings</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">init</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim.data.schema.InitTrain" title="temsim.data.schema.InitTrain"><span class="pre">InitTrain</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#apply_init_train"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.apply_init_train" title="Link to this definition">¶</a></dt>
+<dd><p>Apply the <code class="docutils literal notranslate"><span class="pre">train</span></code> block of an init file; returns the keys that were not understood.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.spec_from_init">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">spec_from_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">init</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">dict</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim.data.schema.DatasetSpec" title="temsim.data.schema.DatasetSpec"><span class="pre">DatasetSpec</span></a></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#spec_from_init"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.spec_from_init" title="Link to this definition">¶</a></dt>
+<dd><p>Parsed <code class="docutils literal notranslate"><span class="pre">init.json</span></code> / <code class="docutils literal notranslate"><span class="pre">init_random.json</span></code> -&gt; <code class="xref py py-class docutils literal notranslate"><span class="pre">DatasetSpec</span></code>.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.dataset.Dataset">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">Dataset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">folder:</span> <span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">spec:</span> <span class="pre">~temsim.data.schema.DatasetSpec</span> <span class="pre">|</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target:</span> <span class="pre">~numpy.ndarray</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">masks:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group_targets:</span> <span class="pre">~typing.Dict[str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">~numpy.ndarray]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">init_path:</span> <span class="pre">str</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/dataset.html#Dataset"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.Dataset" title="Link to this definition">¶</a></dt>
+<dd><p>A loaded data folder.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.dataset.Dataset.target">
+<span class="sig-name descname"><span class="pre">target</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#temsim.data.dataset.Dataset.target" title="Link to this definition">¶</a></dt>
+<dd><p>Raw target (zero handling applied), not yet normalised.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.dataset.Dataset.masks">
+<span class="sig-name descname"><span class="pre">masks</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.dataset.Dataset.masks" title="Link to this definition">¶</a></dt>
+<dd><p>Boolean masks by group name.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.dataset.Dataset.group_targets">
+<span class="sig-name descname"><span class="pre">group_targets</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.dataset.Dataset.group_targets" title="Link to this definition">¶</a></dt>
+<dd><p>Group targets (when <code class="docutils literal notranslate"><span class="pre">group.target_file</span></code> is set).</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.dataset.load_dataset">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.dataset.</span></span><span class="sig-name descname"><span class="pre">load_dataset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim.data.dataset.Dataset" title="temsim.data.dataset.Dataset"><span class="pre">Dataset</span></a></span></span><a class="reference internal" href="_modules/temsim/data/dataset.html#load_dataset"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.dataset.load_dataset" title="Link to this definition">¶</a></dt>
+<dd><p>Load a data folder or an <code class="docutils literal notranslate"><span class="pre">init.json</span></code> path.</p>
+<p>The spec is <code class="docutils literal notranslate"><span class="pre">None</span></code> when no init file exists; the caller then has to supply
+pixel size and voltage.</p>
+</dd></dl>
+
+<p id="module-temsim.data.store">Part III, Section 3: persistence and versioning.</p>
+<section id="id2">
+<h2>Theory<a class="headerlink" href="#id2" title="Link to this heading">¶</a></h2>
+<p>A <em>run directory</em> is the unit of reproducibility.  It holds exactly the objects of
+the data model (<a class="reference internal" href="#module-temsim.data.schema" title="temsim.data.schema"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.schema</span></code></a>):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">experiment</span><span class="o">.</span><span class="n">json</span>   <span class="n">Experiment</span>    <span class="n">the</span> <span class="n">specification</span><span class="p">,</span> <span class="n">incl</span><span class="o">.</span> <span class="n">initial</span> <span class="n">atoms</span>
+<span class="n">train</span><span class="o">.</span><span class="n">json</span>        <span class="n">TrainSettings</span> <span class="n">policy</span> <span class="p">(</span><span class="n">without</span> <span class="n">bulk</span> <span class="n">arrays</span><span class="p">)</span>
+<span class="n">state</span><span class="o">.</span><span class="n">json</span>        <span class="n">ModelState</span>    <span class="n">trained</span> <span class="n">numbers</span> <span class="p">(</span><span class="n">optional</span><span class="p">)</span>
+<span class="n">masks</span><span class="o">.</span><span class="n">npz</span>         <span class="n">masks</span> <span class="n">by</span> <span class="n">group</span> <span class="n">name</span>          <span class="p">(</span><span class="n">optional</span><span class="p">)</span>
+<span class="n">targets</span><span class="o">.</span><span class="n">npz</span>       <span class="n">group</span> <span class="n">targets</span> <span class="n">by</span> <span class="n">group</span> <span class="n">name</span>  <span class="p">(</span><span class="n">optional</span><span class="p">)</span>
+<span class="n">target</span><span class="o">.</span><span class="n">npy</span>        <span class="n">the</span> <span class="n">measured</span> <span class="n">image</span>           <span class="p">(</span><span class="n">optional</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Together they determine a run up to the random seed (Section 4: seeds are part of
+<code class="docutils literal notranslate"><span class="pre">train.json</span></code> once a seeding run has used them).</p>
+<p>Versioning follows one rule.  Every JSON file carries <code class="docutils literal notranslate"><span class="pre">schema_version</span></code>; files of
+the current version are decoded by the generic codec, everything else is routed to
+<a class="reference internal" href="#module-temsim.data.legacy" title="temsim.data.legacy"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.data.legacy</span></code></a>.  <em>Legacy detection is structural</em>, not by file name,
+because the old programs wrote files without any version marker:</p>
+<ul class="simple">
+<li><p>experiment: <code class="docutils literal notranslate"><span class="pre">&quot;imaging&quot;</span></code> key present -&gt; current, <code class="docutils literal notranslate"><span class="pre">&quot;init_positions&quot;</span></code> -&gt; legacy;</p></li>
+<li><p>train settings: nested <code class="docutils literal notranslate"><span class="pre">&quot;loss&quot;</span></code> object -&gt; current, otherwise legacy;</p></li>
+<li><p>model state: <code class="docutils literal notranslate"><span class="pre">&quot;position_shifts&quot;</span></code> at the top level -&gt; current,
+<code class="docutils literal notranslate"><span class="pre">&quot;potential_parameters&quot;</span></code> -&gt; legacy.</p></li>
+</ul>
+<p>For reading, the file names of the old programs are also understood
+(<code class="docutils literal notranslate"><span class="pre">config.json</span></code>, <code class="docutils literal notranslate"><span class="pre">train_method.json</span></code>, <code class="docutils literal notranslate"><span class="pre">area_masks.npz/.npy</span></code>,
+<code class="docutils literal notranslate"><span class="pre">group_targets.npz</span></code>, <code class="docutils literal notranslate"><span class="pre">target_gr.npy</span></code>); on writing only the new names are used.
+Writing is atomic (temporary file, then rename) so that an interrupted save never
+leaves half a file behind.</p>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="temsim.data.store.Run">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">temsim.data.store.</span></span><span class="sig-name descname"><span class="pre">Run</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">experiment:</span> <span class="pre">~temsim.data.schema.Experiment</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">train:</span> <span class="pre">~temsim.data.schema.TrainSettings</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state:</span> <span class="pre">~temsim.data.schema.ModelState</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target:</span> <span class="pre">~numpy.ndarray</span> <span class="pre">|</span> <span class="pre">None</span> <span class="pre">=</span> <span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">notes:</span> <span class="pre">~typing.List[str]</span> <span class="pre">=</span> <span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/store.html#Run"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.store.Run" title="Link to this definition">¶</a></dt>
+<dd><p>A run directory in memory.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.store.Run.target">
+<span class="sig-name descname"><span class="pre">target</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#temsim.data.store.Run.target" title="Link to this definition">¶</a></dt>
+<dd><p>Measured image used for the run, if stored with it.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="temsim.data.store.Run.notes">
+<span class="sig-name descname"><span class="pre">notes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#temsim.data.store.Run.notes" title="Link to this definition">¶</a></dt>
+<dd><p>Remarks about legacy conversions that happened while loading.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.store.load_run">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.store.</span></span><span class="sig-name descname"><span class="pre">load_run</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">directory</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim.data.store.Run" title="temsim.data.store.Run"><span class="pre">Run</span></a></span></span><a class="reference internal" href="_modules/temsim/data/store.html#load_run"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.store.load_run" title="Link to this definition">¶</a></dt>
+<dd><p>Load a run directory of the current or any legacy layout.</p>
+</dd></dl>
+
+<p id="module-temsim.data.legacy">Part III, Section 3: reading the formats of earlier versions.</p>
+<section id="id3">
+<h2>Theory<a class="headerlink" href="#id3" title="Link to this heading">¶</a></h2>
+<p>A file format is a contract that outlives the code that wrote it.  Four formats
+exist in the wild, and all of them must stay readable:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>File</p></th>
+<th class="head"><p>Generations</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">config.json</span></code></p></td>
+<td><p>(a) fixed four layers <code class="docutils literal notranslate"><span class="pre">Gr/S1/W/S2</span></code> with <code class="docutils literal notranslate"><span class="pre">z_positions_nm</span></code>
+and <code class="docutils literal notranslate"><span class="pre">control_points_*</span></code>; (b) <code class="docutils literal notranslate"><span class="pre">layers</span></code>/<code class="docutils literal notranslate"><span class="pre">groups</span></code>;
+each either written with <code class="docutils literal notranslate"><span class="pre">asdict</span></code> or wrapped as
+<code class="docutils literal notranslate"><span class="pre">{&quot;__type__&quot;:</span> <span class="pre">&quot;dataclass&quot;,</span> <span class="pre">...}</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">train_method.json</span></code></p></td>
+<td><p>(a) flat flags <code class="docutils literal notranslate"><span class="pre">graphen_shift</span></code> …; (b) groups/layers
+dictionaries; plain or wrapped.</p></td>
+</tr>
+<tr class="row-even"><td><p>parameter dumps</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">scale_Gr</span></code>, <code class="docutils literal notranslate"><span class="pre">shift_WS2</span></code>, <code class="docutils literal notranslate"><span class="pre">graphene_potential_factor</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>(<code class="docutils literal notranslate"><span class="pre">best.json</span></code> …)</p></td>
+<td><p>or the group dictionaries; polar or cartesian aberrations.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">init.json</span></code></p></td>
+<td><p>written by the ImageJ plug-in (input, version 1 and 2).</p></td>
+</tr>
+</tbody>
+</table>
+<p>Strategy (Eq. 3.3): a migration is a pure function from the raw JSON value to the
+current schema, <code class="docutils literal notranslate"><span class="pre">new</span> <span class="pre">=</span> <span class="pre">M_k(M_{k-1}(...(old)))</span></code>.  Nothing in the rest of the code
+knows an old name.  Every function here has a test that loads real files.</p>
+<p>Aberration coefficients are passed through unchanged: converting between the polar
+and the cartesian form is optics, not data management (see
+<a class="reference internal" href="part1_physics.html#module-temsim.physics.optics" title="temsim.physics.optics"><code class="xref py py-mod docutils literal notranslate"><span class="pre">temsim.physics.optics</span></code></a>).  Likewise, resampling a strain control grid to a
+different resolution happens where the grid is applied.</p>
+</section>
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.legacy.unwrap">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">unwrap</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Any</span></span></span><a class="reference internal" href="_modules/temsim/data/legacy.html#unwrap"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.legacy.unwrap" title="Link to this definition">¶</a></dt>
+<dd><p>Strip the <code class="docutils literal notranslate"><span class="pre">__type__</span></code> envelopes written by the old serialisers.</p>
+<p><code class="docutils literal notranslate"><span class="pre">dataclass</span></code> -&gt; its <code class="docutils literal notranslate"><span class="pre">data</span></code> object, <code class="docutils literal notranslate"><span class="pre">ndarray</span></code> and <code class="docutils literal notranslate"><span class="pre">tensor</span></code> -&gt; nested list,
+<code class="docutils literal notranslate"><span class="pre">tuple</span></code> -&gt; list.  Plain values pass through.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.legacy.legacy_layers_and_groups">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">legacy_layers_and_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">z_positions_nm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">control_points_graphen</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(10,</span> <span class="pre">10)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">control_points_ws2</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(10,</span> <span class="pre">10)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_shifts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_rotations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_layers</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/temsim/data/legacy.html#legacy_layers_and_groups"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.legacy.legacy_layers_and_groups" title="Link to this definition">¶</a></dt>
+<dd><p>The original fixed constellation <code class="docutils literal notranslate"><span class="pre">Gr</span> <span class="pre">=</span> <span class="pre">[Gr]</span></code>, <code class="docutils literal notranslate"><span class="pre">WS2</span> <span class="pre">=</span> <span class="pre">[S1,</span> <span class="pre">W,</span> <span class="pre">S2]</span></code>.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.legacy.experiment_from_legacy">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">experiment_from_legacy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">raw</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">dict</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim.data.schema.Experiment" title="temsim.data.schema.Experiment"><span class="pre">Experiment</span></a></span></span><a class="reference internal" href="_modules/temsim/data/legacy.html#experiment_from_legacy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.legacy.experiment_from_legacy" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">config.json</span></code> (any generation) -&gt; <code class="xref py py-class docutils literal notranslate"><span class="pre">Experiment</span></code>.</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="temsim.data.legacy.TRAIN_KEY_ALIASES">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">TRAIN_KEY_ALIASES</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'train_amplitude_contrast':</span> <span class="pre">'amp_contrast',</span> <span class="pre">'train_ctf_aberrations':</span> <span class="pre">'aberrations',</span> <span class="pre">'train_env_parameters':</span> <span class="pre">'envelope',</span> <span class="pre">'train_normalisation_parameters':</span> <span class="pre">'normalisation'}</span></em><a class="headerlink" href="#temsim.data.legacy.TRAIN_KEY_ALIASES" title="Link to this definition">¶</a></dt>
+<dd><p>switch names of the old TrainMethod -&gt; TrainSettings key</p>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="temsim.data.legacy.LOSS_KEY_ALIASES">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">LOSS_KEY_ALIASES</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'loss_l1':</span> <span class="pre">'l1',</span> <span class="pre">'loss_local_ncc_100':</span> <span class="pre">'local_ncc_100',</span> <span class="pre">'loss_local_var_100':</span> <span class="pre">'local_var_100',</span> <span class="pre">'loss_mse':</span> <span class="pre">'mse',</span> <span class="pre">'loss_ncc':</span> <span class="pre">'ncc',</span> <span class="pre">'loss_ssim':</span> <span class="pre">'ssim',</span> <span class="pre">'loss_var':</span> <span class="pre">'var'}</span></em><a class="headerlink" href="#temsim.data.legacy.LOSS_KEY_ALIASES" title="Link to this definition">¶</a></dt>
+<dd><p>old flat loss name -&gt; field of <code class="xref py py-class docutils literal notranslate"><span class="pre">LossWeights</span></code></p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.legacy.train_settings_from_legacy">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">train_settings_from_legacy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">raw</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">dict</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim.data.schema.TrainSettings" title="temsim.data.schema.TrainSettings"><span class="pre">TrainSettings</span></a></span></span><a class="reference internal" href="_modules/temsim/data/legacy.html#train_settings_from_legacy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.legacy.train_settings_from_legacy" title="Link to this definition">¶</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">train_method.json</span></code> (any generation) -&gt; <code class="xref py py-class docutils literal notranslate"><span class="pre">TrainSettings</span></code>.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="temsim.data.legacy.state_from_legacy">
+<span class="sig-prename descclassname"><span class="pre">temsim.data.legacy.</span></span><span class="sig-name descname"><span class="pre">state_from_legacy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">raw</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">experiment</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="#temsim.data.schema.Experiment" title="temsim.data.schema.Experiment"><span class="pre">Experiment</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="#temsim.data.schema.ModelState" title="temsim.data.schema.ModelState"><span class="pre">ModelState</span></a></span></span><a class="reference internal" href="_modules/temsim/data/legacy.html#state_from_legacy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#temsim.data.legacy.state_from_legacy" title="Link to this definition">¶</a></dt>
+<dd><p>Parameter dump (<code class="docutils literal notranslate"><span class="pre">best.json</span></code> &amp; co.) -&gt; <code class="xref py py-class docutils literal notranslate"><span class="pre">ModelState</span></code>.</p>
+</dd></dl>
+
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Part III - Data management</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#theory">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#implementation">Implementation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.TYPICAL_DEBYE_WALLER_U"><code class="docutils literal notranslate"><span class="pre">TYPICAL_DEBYE_WALLER_U</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Layer"><code class="docutils literal notranslate"><span class="pre">Layer</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Group"><code class="docutils literal notranslate"><span class="pre">Group</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Stem"><code class="docutils literal notranslate"><span class="pre">Stem</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Imaging"><code class="docutils literal notranslate"><span class="pre">Imaging</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Structure"><code class="docutils literal notranslate"><span class="pre">Structure</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Experiment"><code class="docutils literal notranslate"><span class="pre">Experiment</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.resolve_layers_and_groups"><code class="docutils literal notranslate"><span class="pre">resolve_layers_and_groups()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.OpticsState"><code class="docutils literal notranslate"><span class="pre">OpticsState</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.ModelState"><code class="docutils literal notranslate"><span class="pre">ModelState</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.TrainParam"><code class="docutils literal notranslate"><span class="pre">TrainParam</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.GroupTrain"><code class="docutils literal notranslate"><span class="pre">GroupTrain</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.LayerTrain"><code class="docutils literal notranslate"><span class="pre">LayerTrain</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.LossWeights"><code class="docutils literal notranslate"><span class="pre">LossWeights</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.Regularisation"><code class="docutils literal notranslate"><span class="pre">Regularisation</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.TrainSettings"><code class="docutils literal notranslate"><span class="pre">TrainSettings</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.LatticeSpec"><code class="docutils literal notranslate"><span class="pre">LatticeSpec</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.LayerSource"><code class="docutils literal notranslate"><span class="pre">LayerSource</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.InitTrain"><code class="docutils literal notranslate"><span class="pre">InitTrain</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.schema.DatasetSpec"><code class="docutils literal notranslate"><span class="pre">DatasetSpec</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#rules">Rules</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.codec.encode"><code class="docutils literal notranslate"><span class="pre">encode()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.codec.decode"><code class="docutils literal notranslate"><span class="pre">decode()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.codec.round_trip"><code class="docutils literal notranslate"><span class="pre">round_trip()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id1">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.read_image"><code class="docutils literal notranslate"><span class="pre">read_image()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.prepare_target"><code class="docutils literal notranslate"><span class="pre">prepare_target()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.group_name_from_mask"><code class="docutils literal notranslate"><span class="pre">group_name_from_mask()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.find_masks"><code class="docutils literal notranslate"><span class="pre">find_masks()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.train_key"><code class="docutils literal notranslate"><span class="pre">train_key()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.apply_init_train"><code class="docutils literal notranslate"><span class="pre">apply_init_train()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.spec_from_init"><code class="docutils literal notranslate"><span class="pre">spec_from_init()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.Dataset"><code class="docutils literal notranslate"><span class="pre">Dataset</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.dataset.load_dataset"><code class="docutils literal notranslate"><span class="pre">load_dataset()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id2">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.store.Run"><code class="docutils literal notranslate"><span class="pre">Run</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.store.load_run"><code class="docutils literal notranslate"><span class="pre">load_run()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id3">Theory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.unwrap"><code class="docutils literal notranslate"><span class="pre">unwrap()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.legacy_layers_and_groups"><code class="docutils literal notranslate"><span class="pre">legacy_layers_and_groups()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.experiment_from_legacy"><code class="docutils literal notranslate"><span class="pre">experiment_from_legacy()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.TRAIN_KEY_ALIASES"><code class="docutils literal notranslate"><span class="pre">TRAIN_KEY_ALIASES</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.LOSS_KEY_ALIASES"><code class="docutils literal notranslate"><span class="pre">LOSS_KEY_ALIASES</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.train_settings_from_legacy"><code class="docutils literal notranslate"><span class="pre">train_settings_from_legacy()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#temsim.data.legacy.state_from_legacy"><code class="docutils literal notranslate"><span class="pre">state_from_legacy()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="part4_service.html">Part IV - Service</a></li>
+<li class="toctree-l1"><a class="reference internal" href="part5_gui.html">Part V - Graphical client</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="part2_learning.html" title="previous chapter">Part II - Learning</a></li>
+      <li>Next: <a href="part4_service.html" title="next chapter">Part IV - Service</a></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+      |
+      <a href="_sources/part3_data.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

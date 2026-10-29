@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>temsim.service.session &#8212; temsim  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/basic.css?v=686e5160" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=27fed22d" />
+    <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for temsim.service.session</h1><div class="highlight"><pre>
+<span></span><span class="sa">r</span><span class="sd">&quot;&quot;&quot;Part IV, Section 2: the session, the one owner of a reconstruction.</span>
+
+<span class="sd">Theory</span>
+<span class="sd">======</span>
+
+<span class="sd">A reconstruction is a sequence of *states*; the optimiser (Part II, Section 5) and</span>
+<span class="sd">the seeding (Part II, Section 6) move from one state to the next.  Everything that</span>
+<span class="sd">a person does in the meantime -- switching a parameter, changing a weight,</span>
+<span class="sd">deleting weak atoms, inserting candidate sites -- is a *change of state between</span>
+<span class="sd">two steps*.  To make this well defined the model has exactly one owner, the</span>
+<span class="sd">:class:`Session`, and every access goes through it.  The session is **not**</span>
+<span class="sd">thread safe by design: the server (Section 4) calls it from one thread only and</span>
+<span class="sd">interleaves the commands of the clients with the steps of the running job.</span>
+
+<span class="sd">The session answers three kinds of requests.</span>
+
+<span class="sd">**Queries** change nothing: :meth:`Session.info`, :meth:`Session.frame` (images,</span>
+<span class="sd">atoms, optional extras), :meth:`Session.minima`.</span>
+
+<span class="sd">**Settings** change the objective or the switches, never the parameters:</span>
+<span class="sd">:meth:`~Session.set_param`, :meth:`~Session.set_loss`, ... Because the model</span>
+<span class="sd">reads its settings at every step (Part II, Section 4) they act on the next step</span>
+<span class="sd">without rebuilding anything.  The optimiser keeps the Adam moments of all</span>
+<span class="sd">tensors that stay trainable (Part II, Section 5).</span>
+
+<span class="sd">**Edits** change the parameters or the atom list (:meth:`~Session.edit`,</span>
+<span class="sd">:meth:`~Session.insert_minima`).  After an edit the seeder re-reads the state</span>
+<span class="sd">(:meth:`~temsim.learning.seeding.seeder.Seeder.resync`) because its running sums</span>
+<span class="sd">(Part II, Eq. 6.4) are only valid for the state they were computed from.</span>
+
+<span class="sd">The *frame* is the picture of the state that a client draws.  It contains</span>
+
+<span class="sd">* the simulated image :math:`s`, the measured image :math:`t` and the difference</span>
+<span class="sd">  :math:`\delta = x - y` of the standardised images (Part II, Eq. 2.2),</span>
+<span class="sd">* the mask of the active group,</span>
+<span class="sd">* for every layer the effective positions :math:`\mathbf r^{\rm eff}`</span>
+<span class="sd">  (Part I, Eq. 1.2), the occupancies :math:`o` and the intensities :math:`I`,</span>
+
+<span class="sd">and, on request, the optics (phase of the transfer function and the aperture ring</span>
+<span class="sd">in TEM, the probe in STEM), the strain maps of the active group, the projected</span>
+<span class="sd">potentials, and the gradient :math:`\partial\mathcal L/\partial\,\Delta\mathbf r` of the</span>
+<span class="sd">loss with respect to the free position shifts.  Positions are in pixels</span>
+<span class="sd">``(row, column)`` throughout.</span>
+
+<span class="sd">Implementation</span>
+<span class="sd">==============</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">copy</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">dataclasses</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">..data</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataset</span> <span class="k">as</span> <span class="n">datasets</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..data</span><span class="w"> </span><span class="kn">import</span> <span class="n">store</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..data.schema</span><span class="w"> </span><span class="kn">import</span> <span class="n">Experiment</span><span class="p">,</span> <span class="n">TrainSettings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..learning.model</span><span class="w"> </span><span class="kn">import</span> <span class="n">Model</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..learning.seeding</span><span class="w"> </span><span class="kn">import</span> <span class="n">SeedConfig</span><span class="p">,</span> <span class="n">Seeder</span><span class="p">,</span> <span class="n">minima_positions</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..learning.trainer</span><span class="w"> </span><span class="kn">import</span> <span class="n">Trainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..physics</span><span class="w"> </span><span class="kn">import</span> <span class="n">optics</span><span class="p">,</span> <span class="n">strain</span> <span class="k">as</span> <span class="n">strain_fields</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">assemble</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.assemble</span><span class="w"> </span><span class="kn">import</span> <span class="n">Assembly</span>
+
+<span class="n">STRAIN_MAP_RESOLUTION</span> <span class="o">=</span> <span class="mi">256</span>
+<span class="n">CTF_MAX_ANGLE_MRAD</span> <span class="o">=</span> <span class="mf">42.0</span>
+<span class="n">PROBE_WINDOW_PX</span> <span class="o">=</span> <span class="mi">64</span>
+
+<span class="n">Arrays</span> <span class="o">=</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span>
+
+
+<div class="viewcode-block" id="SessionError">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.SessionError">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">SessionError</span><span class="p">(</span><span class="ne">RuntimeError</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;A request that cannot be fulfilled (reported to the client, the model is unchanged).&quot;&quot;&quot;</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_pick_device</span><span class="p">(</span><span class="n">device</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">device</span> <span class="o">==</span> <span class="s2">&quot;auto&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s2">&quot;cuda&quot;</span> <span class="k">if</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">is_available</span><span class="p">()</span> <span class="k">else</span> <span class="s2">&quot;cpu&quot;</span>
+    <span class="k">return</span> <span class="n">device</span>
+
+
+<div class="viewcode-block" id="Session">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Session</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;One reconstruction: assembly, model, trainer and (lazily) seeder.&quot;&quot;&quot;</span>
+
+    <span class="c1">#: Seeding options that a running seeder reads afresh at every trial; any other change builds a new seeder.</span>
+    <span class="n">LIVE_SEED_OPTIONS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">({</span><span class="s2">&quot;touch_A&quot;</span><span class="p">,</span> <span class="s2">&quot;merge_A&quot;</span><span class="p">,</span> <span class="s2">&quot;move_prob&quot;</span><span class="p">,</span> <span class="s2">&quot;remove_prob&quot;</span><span class="p">,</span> <span class="s2">&quot;relax_prob&quot;</span><span class="p">,</span> <span class="s2">&quot;move_sigma_A&quot;</span><span class="p">,</span>
+                                   <span class="s2">&quot;relax_A&quot;</span><span class="p">,</span> <span class="s2">&quot;neighbour_seeding&quot;</span><span class="p">,</span> <span class="s2">&quot;bond_A&quot;</span><span class="p">,</span> <span class="s2">&quot;bond_sigma_A&quot;</span><span class="p">,</span> <span class="s2">&quot;neighbour_min_A&quot;</span><span class="p">,</span>
+                                   <span class="s2">&quot;neighbour_max_A&quot;</span><span class="p">,</span> <span class="s2">&quot;gradient_seeding&quot;</span><span class="p">,</span> <span class="s2">&quot;gradient_temperature&quot;</span><span class="p">,</span> <span class="s2">&quot;weight_options&quot;</span><span class="p">,</span>
+                                   <span class="s2">&quot;max_atoms&quot;</span><span class="p">})</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">device</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;auto&quot;</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">device</span> <span class="o">=</span> <span class="n">_pick_device</span><span class="p">(</span><span class="n">device</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Assembly</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Model</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Trainer</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Seeder</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">seed_config</span> <span class="o">=</span> <span class="n">SeedConfig</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">seed_layer</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">last_save</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+
+    <span class="c1"># ------------------------------------------------------------------ opening</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">is_open</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">require_model</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Model</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="s2">&quot;nothing is open; send open_run or open_dataset first&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">open_assembly</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">assembly</span><span class="p">:</span> <span class="n">Assembly</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">Model</span><span class="p">(</span><span class="n">assembly</span><span class="o">.</span><span class="n">experiment</span><span class="p">,</span> <span class="n">assembly</span><span class="o">.</span><span class="n">target</span><span class="p">,</span> <span class="n">assembly</span><span class="o">.</span><span class="n">settings</span><span class="p">,</span> <span class="n">assembly</span><span class="o">.</span><span class="n">state</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">assembly</span><span class="p">,</span> <span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="o">=</span> <span class="n">Trainer</span><span class="p">(</span><span class="n">model</span><span class="p">),</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">seed_layer</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">candidates</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">info</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">open_run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">directory</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">target_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">open_assembly</span><span class="p">(</span><span class="n">assemble</span><span class="o">.</span><span class="n">run_assembly</span><span class="p">(</span><span class="n">directory</span><span class="p">,</span> <span class="n">target_path</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Session.open_dataset">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.open_dataset">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">open_dataset</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">route</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;auto&quot;</span><span class="p">,</span> <span class="o">**</span><span class="n">options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;``route``: ``&quot;lattice&quot;``, ``&quot;seed&quot;``, ``&quot;run&quot;`` or ``&quot;auto&quot;``.</span>
+
+<span class="sd">        ``auto``: a directory with an experiment file is a run; an ``init.json`` with layers and a</span>
+<span class="sd">        lattice starts the lattice route; everything else the seeding route.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">is_run</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">path</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">any</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">n</span><span class="p">))</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">store</span><span class="o">.</span><span class="n">EXPERIMENT_FILES</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">route</span> <span class="o">==</span> <span class="s2">&quot;run&quot;</span> <span class="ow">or</span> <span class="p">(</span><span class="n">route</span> <span class="o">==</span> <span class="s2">&quot;auto&quot;</span> <span class="ow">and</span> <span class="n">is_run</span><span class="p">):</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">open_run</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">datasets</span><span class="o">.</span><span class="n">load_dataset</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">spec</span>
+        <span class="k">if</span> <span class="n">route</span> <span class="o">==</span> <span class="s2">&quot;auto&quot;</span><span class="p">:</span>
+            <span class="n">route</span> <span class="o">=</span> <span class="s2">&quot;lattice&quot;</span> <span class="k">if</span> <span class="n">spec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">spec</span><span class="o">.</span><span class="n">layers</span> <span class="ow">and</span> <span class="n">spec</span><span class="o">.</span><span class="n">lattices</span> <span class="k">else</span> <span class="s2">&quot;seed&quot;</span>
+        <span class="k">if</span> <span class="n">route</span> <span class="o">==</span> <span class="s2">&quot;lattice&quot;</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">open_assembly</span><span class="p">(</span><span class="n">assemble</span><span class="o">.</span><span class="n">lattice_assembly</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">route</span> <span class="o">==</span> <span class="s2">&quot;seed&quot;</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">open_assembly</span><span class="p">(</span><span class="n">assemble</span><span class="o">.</span><span class="n">seeding_assembly</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="o">**</span><span class="n">options</span><span class="p">))</span>
+        <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown route </span><span class="si">{</span><span class="n">route</span><span class="si">!r}</span><span class="s2">&quot;</span><span class="p">)</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ description</span>
+<div class="viewcode-block" id="Session.experiment">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.experiment">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">experiment</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Experiment</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The specification with the atoms as they are now.&quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="p">)</span>
+        <span class="n">out</span><span class="o">.</span><span class="n">structure</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">to_structure</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">out</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">info</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;open&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">}</span>
+        <span class="n">model</span><span class="p">,</span> <span class="n">a</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span>
+        <span class="n">imaging</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">imaging</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;open&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;kind&quot;</span><span class="p">:</span> <span class="n">a</span><span class="o">.</span><span class="n">kind</span><span class="p">,</span> <span class="s2">&quot;revision&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">revision</span><span class="p">,</span> <span class="s2">&quot;device&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
+                <span class="s2">&quot;shape&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">imaging</span><span class="o">.</span><span class="n">shape</span><span class="p">),</span> <span class="s2">&quot;pixel_size_nm&quot;</span><span class="p">:</span> <span class="n">imaging</span><span class="o">.</span><span class="n">pixel_size_nm</span><span class="p">,</span> <span class="s2">&quot;mode&quot;</span><span class="p">:</span> <span class="n">imaging</span><span class="o">.</span><span class="n">mode</span><span class="p">,</span>
+                <span class="s2">&quot;voltage_kV&quot;</span><span class="p">:</span> <span class="n">imaging</span><span class="o">.</span><span class="n">voltage_kV</span><span class="p">,</span>
+                <span class="s2">&quot;layers&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;group&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">group</span><span class="p">,</span> <span class="s2">&quot;element&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">element</span><span class="p">,</span> <span class="s2">&quot;z_nm&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">z_nm</span><span class="p">,</span>
+                            <span class="s2">&quot;atoms&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">n</span><span class="p">)}</span> <span class="k">for</span> <span class="n">s</span><span class="p">,</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">layers</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">counts</span><span class="p">())],</span>
+                <span class="s2">&quot;groups&quot;</span><span class="p">:</span> <span class="p">[</span><span class="n">g</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">groups</span><span class="p">],</span>
+                <span class="s2">&quot;active_group&quot;</span><span class="p">:</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span><span class="p">,</span> <span class="s2">&quot;out_dir&quot;</span><span class="p">:</span> <span class="n">a</span><span class="o">.</span><span class="n">out_dir</span><span class="p">,</span> <span class="s2">&quot;notes&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">notes</span><span class="p">),</span>
+                <span class="s2">&quot;steps&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="o">.</span><span class="n">steps</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span> <span class="k">else</span> <span class="mi">0</span><span class="p">,</span>
+                <span class="s2">&quot;seeding&quot;</span><span class="p">:</span> <span class="kc">None</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeding_status</span><span class="p">()}</span>
+
+    <span class="c1"># ------------------------------------------------------------------ settings</span>
+<div class="viewcode-block" id="Session.settings_changed">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.settings_changed">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">settings_changed</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Call after a change that the seeder&#39;s sums do not know about.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span><span class="o">.</span><span class="n">resync</span><span class="p">(</span><span class="n">sync_store</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Session.set_train">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.set_train">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_train</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">new</span><span class="p">:</span> <span class="n">TrainSettings</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Replace the settings *in place* (model, objective and optimiser hold a reference).</span>
+
+<span class="sd">        Masks and group targets are kept if ``new`` carries none.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">current</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span>
+        <span class="n">masks</span><span class="p">,</span> <span class="n">targets</span> <span class="o">=</span> <span class="n">current</span><span class="o">.</span><span class="n">masks</span><span class="p">,</span> <span class="n">current</span><span class="o">.</span><span class="n">targets</span>
+        <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">dataclasses</span><span class="o">.</span><span class="n">fields</span><span class="p">(</span><span class="n">TrainSettings</span><span class="p">):</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">current</span><span class="p">,</span> <span class="n">f</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">new</span><span class="p">,</span> <span class="n">f</span><span class="o">.</span><span class="n">name</span><span class="p">))</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">new</span><span class="o">.</span><span class="n">masks</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">new</span><span class="o">.</span><span class="n">targets</span><span class="p">:</span>
+            <span class="n">current</span><span class="o">.</span><span class="n">masks</span><span class="p">,</span> <span class="n">current</span><span class="o">.</span><span class="n">targets</span> <span class="o">=</span> <span class="n">masks</span><span class="p">,</span> <span class="n">targets</span>
+        <span class="n">current</span><span class="o">.</span><span class="n">ensure_for</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">settings_changed</span><span class="p">()</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_param</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">enabled</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">lr</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">param</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">param</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">param</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown trainable key </span><span class="si">{</span><span class="n">key</span><span class="si">!r}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">enabled</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">param</span><span class="o">.</span><span class="n">enabled</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">enabled</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">lr</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">param</span><span class="o">.</span><span class="n">lr</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">lr</span><span class="p">)</span>
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_patch</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">what</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">names</span> <span class="o">=</span> <span class="p">{</span><span class="n">f</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">dataclasses</span><span class="o">.</span><span class="n">fields</span><span class="p">(</span><span class="n">target</span><span class="p">)}</span>
+        <span class="n">unknown</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="o">-</span> <span class="n">names</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">unknown</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown </span><span class="si">{</span><span class="n">what</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">unknown</span><span class="si">}</span><span class="s2">; known: </span><span class="si">{</span><span class="nb">sorted</span><span class="p">(</span><span class="n">names</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_loss</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">weights</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_patch</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span> <span class="n">weights</span><span class="p">,</span> <span class="s2">&quot;loss weight&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_regularisation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">weights</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_patch</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">regularisation</span><span class="p">,</span> <span class="n">weights</span><span class="p">,</span> <span class="s2">&quot;prior weight&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_active_group</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">group_names</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown group </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">; known: </span><span class="si">{</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">group_names</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span> <span class="o">=</span> <span class="n">name</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">settings_changed</span><span class="p">()</span>
+
+<div class="viewcode-block" id="Session.seeding_config">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.seeding_config">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">seeding_config</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">patch</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Read, and if ``patch`` is given change, the seeding configuration.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="n">patch</span><span class="p">:</span>
+            <span class="n">names</span> <span class="o">=</span> <span class="p">{</span><span class="n">f</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">dataclasses</span><span class="o">.</span><span class="n">fields</span><span class="p">(</span><span class="n">SeedConfig</span><span class="p">)}</span>
+            <span class="n">unknown</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">patch</span><span class="p">)</span> <span class="o">-</span> <span class="n">names</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">unknown</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown seeding option: </span><span class="si">{</span><span class="n">unknown</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">seed_config</span> <span class="o">=</span> <span class="n">SeedConfig</span><span class="p">(</span><span class="o">**</span><span class="p">{</span><span class="o">**</span><span class="n">dataclasses</span><span class="o">.</span><span class="n">asdict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">seed_config</span><span class="p">),</span> <span class="o">**</span><span class="n">patch</span><span class="p">})</span>
+            <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">))</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">set</span><span class="p">(</span><span class="n">patch</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">LIVE_SEED_OPTIONS</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed_config</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">return</span> <span class="n">dataclasses</span><span class="o">.</span><span class="n">asdict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">seed_config</span><span class="p">)</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ editable numbers</span>
+<div class="viewcode-block" id="Session.values">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.values">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">values</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The few numbers a person edits by hand, under flat keys.</span>
+
+<span class="sd">        ``optics.amp_contrast``, ``optics.delta_E``, ``optics.Cc_um``, one ``optics.&lt;key&gt;``</span>
+<span class="sd">        per aberration (always magnitude and angle, ``C12`` and ``phi12``, whatever the</span>
+<span class="sd">        internal parametrisation is), ``normalisation``, and per group</span>
+<span class="sd">        ``groups.&lt;g&gt;.shift|rotation|scale|contrast``.  Per-atom numbers are not included.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">p</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span><span class="o">.</span><span class="n">params</span>
+        <span class="n">out</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;optics.amp_contrast&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">amp_contrast</span><span class="p">),</span> <span class="s2">&quot;optics.delta_E&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">delta_E</span><span class="p">),</span>
+                               <span class="s2">&quot;optics.Cc_um&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">Cc_um</span><span class="p">),</span>
+                               <span class="s2">&quot;normalisation&quot;</span><span class="p">:</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">normalisation</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()]}</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_polar_aberrations</span><span class="p">()</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">out</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;optics.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">groups</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">out</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;groups.</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.shift&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">g</span><span class="o">.</span><span class="n">shift</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()]</span>
+            <span class="n">out</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;groups.</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.rotation&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">rotation</span><span class="p">)</span>
+            <span class="n">out</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;groups.</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.scale&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">g</span><span class="o">.</span><span class="n">scale</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()]</span>
+            <span class="n">out</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;groups.</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">.contrast&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">contrast</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">out</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_polar_aberrations</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+        <span class="n">p</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span><span class="o">.</span><span class="n">params</span>
+        <span class="n">raw</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">aberrations</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+        <span class="k">return</span> <span class="n">optics</span><span class="o">.</span><span class="n">cartesian_to_polar</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">parametrization</span> <span class="o">==</span> <span class="s2">&quot;cartesian&quot;</span> <span class="k">else</span> <span class="n">raw</span>
+
+<div class="viewcode-block" id="Session.set_values">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.set_values">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_values</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Write numbers of :meth:`values`; all keys are checked before anything is written.&quot;&quot;&quot;</span>
+
+        <span class="n">p</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span><span class="o">.</span><span class="n">params</span>
+        <span class="n">known</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">values</span><span class="p">()</span>
+        <span class="n">unknown</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="o">-</span> <span class="nb">set</span><span class="p">(</span><span class="n">known</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">unknown</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown value keys </span><span class="si">{</span><span class="n">unknown</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">!=</span> <span class="n">np</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">known</span><span class="p">[</span><span class="n">key</span><span class="p">]):</span>
+                <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">key</span><span class="si">!r}</span><span class="s2"> needs shape </span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">known</span><span class="p">[</span><span class="n">key</span><span class="p">])</span><span class="si">}</span><span class="s2">, got </span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">scalar</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;optics.amp_contrast&quot;</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">amp_contrast</span><span class="p">,</span> <span class="s2">&quot;optics.delta_E&quot;</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">delta_E</span><span class="p">,</span> <span class="s2">&quot;optics.Cc_um&quot;</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">Cc_um</span><span class="p">,</span>
+                  <span class="s2">&quot;normalisation&quot;</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">normalisation</span><span class="p">}</span>
+        <span class="n">polar</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_polar_aberrations</span><span class="p">()</span>
+        <span class="n">polar_changed</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+            <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">scalar</span><span class="p">:</span>
+                    <span class="n">tensor</span> <span class="o">=</span> <span class="n">scalar</span><span class="p">[</span><span class="n">key</span><span class="p">]</span>
+                <span class="k">elif</span> <span class="n">key</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;groups.&quot;</span><span class="p">):</span>
+                    <span class="n">_</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">attr</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;.&quot;</span><span class="p">)</span>
+                    <span class="n">tensor</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">groups</span><span class="p">[</span><span class="n">name</span><span class="p">],</span> <span class="n">attr</span><span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">polar</span><span class="p">[</span><span class="n">key</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="s2">&quot;optics.&quot;</span><span class="p">):]]</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+                    <span class="n">polar_changed</span> <span class="o">=</span> <span class="kc">True</span>
+                    <span class="k">continue</span>
+                <span class="n">tensor</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="n">device</span><span class="o">=</span><span class="n">tensor</span><span class="o">.</span><span class="n">device</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">tensor</span><span class="o">.</span><span class="n">shape</span><span class="p">))</span>
+            <span class="k">if</span> <span class="n">polar_changed</span><span class="p">:</span>
+                <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">optics</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">polar</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">parametrization</span><span class="p">)</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                    <span class="k">if</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">aberrations</span><span class="p">:</span>
+                        <span class="n">p</span><span class="o">.</span><span class="n">aberrations</span><span class="p">[</span><span class="n">k</span><span class="p">]</span><span class="o">.</span><span class="n">fill_</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">settings_changed</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">values</span><span class="p">()</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ jobs</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">layer_index</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">layer</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">layer</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">group</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">spec</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">layers</span><span class="p">):</span>
+                <span class="k">if</span> <span class="n">group</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">spec</span><span class="o">.</span><span class="n">group</span> <span class="o">==</span> <span class="n">group</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="n">i</span>
+            <span class="k">return</span> <span class="mi">0</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">layer</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">layer_index</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+        <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Session.make_seeder">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.make_seeder">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">make_seeder</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">layer</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Seeder</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The seeder for ``layer`` (default: first layer of the active group), synchronised with the state.&quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">index</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">layer_index</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed_layer</span> <span class="o">!=</span> <span class="n">index</span><span class="p">:</span>
+            <span class="n">region</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="o">.</span><span class="n">region</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="o">=</span> <span class="n">Seeder</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">index</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed_config</span><span class="p">,</span> <span class="n">region</span><span class="o">=</span><span class="n">region</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">seed_layer</span> <span class="o">=</span> <span class="n">index</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span><span class="o">.</span><span class="n">resync</span><span class="p">(</span><span class="n">sync_store</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">seeding_status</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;layer&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">seed_layer</span><span class="p">,</span> <span class="s2">&quot;atoms&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">n_atoms</span><span class="p">,</span> <span class="s2">&quot;loss&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">loss</span> <span class="k">if</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">loss</span><span class="p">)</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
+                <span class="s2">&quot;trials&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">trials</span><span class="p">,</span> <span class="s2">&quot;accepted&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">accepted</span><span class="p">,</span> <span class="s2">&quot;merged&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">merged</span><span class="p">,</span>
+                <span class="s2">&quot;removed&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">removed</span><span class="p">,</span> <span class="s2">&quot;relaxed&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">relaxed</span><span class="p">,</span> <span class="s2">&quot;full&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">stats</span><span class="o">.</span><span class="n">full</span><span class="p">,</span>
+                <span class="s2">&quot;local&quot;</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">uses_local</span><span class="p">}</span>
+
+<div class="viewcode-block" id="Session.refine">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.refine">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refine</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">layer</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">repulsion</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">10.0</span><span class="p">,</span> <span class="n">repulsion_A</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.42</span><span class="p">,</span>
+               <span class="n">train_occupancies</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Switch the settings to those of a refinement of a seeded layer (Section 3).&quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">name</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">layer_index</span><span class="p">(</span><span class="n">layer</span><span class="p">)]</span><span class="o">.</span><span class="n">name</span>
+        <span class="n">region</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="o">.</span><span class="n">region</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">set_train</span><span class="p">(</span><span class="n">assemble</span><span class="o">.</span><span class="n">training_start</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">region</span><span class="p">,</span> <span class="n">repulsion</span><span class="p">,</span> <span class="n">repulsion_A</span><span class="p">,</span>
+                                               <span class="n">train_occupancies</span><span class="p">))</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ edits</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_layers_of</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">group</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">group</span> <span class="o">=</span> <span class="n">group</span> <span class="k">if</span> <span class="n">group</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">s</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">layers</span><span class="p">)</span> <span class="k">if</span> <span class="n">group</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">s</span><span class="o">.</span><span class="n">group</span> <span class="o">==</span> <span class="n">group</span><span class="p">]</span>
+
+<div class="viewcode-block" id="Session.edit">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.edit">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">edit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">args</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Named edits between two steps; returns a small report.</span>
+
+<span class="sd">        ``reset_occupancies``, ``reset_intensities``, ``reset_free_positions``,</span>
+<span class="sd">        ``remove_low_occupancy`` (``threshold``), ``resample_control`` (``control_points``);</span>
+<span class="sd">        all act on the layers of ``group`` (default: the active group).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">params</span><span class="p">,</span> <span class="n">spec</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span>
+        <span class="n">group</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;group&quot;</span><span class="p">)</span>
+        <span class="n">report</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;reset_occupancies&quot;</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_layers_of</span><span class="p">(</span><span class="n">group</span><span class="p">):</span>
+                <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+                    <span class="n">params</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">logit</span><span class="o">.</span><span class="n">fill_</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">init_occupancy</span><span class="p">))</span>
+        <span class="k">elif</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;reset_intensities&quot;</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_layers_of</span><span class="p">(</span><span class="n">group</span><span class="p">):</span>
+                <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+                    <span class="n">params</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">intensity</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">reference</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;reset_free_positions&quot;</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_layers_of</span><span class="p">(</span><span class="n">group</span><span class="p">):</span>
+                <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+                    <span class="n">params</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">shifts</span><span class="o">.</span><span class="n">zero_</span><span class="p">()</span>
+        <span class="k">elif</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;remove_low_occupancy&quot;</span><span class="p">:</span>
+            <span class="n">threshold</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;threshold&quot;</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">))</span>
+            <span class="n">removed</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_layers_of</span><span class="p">(</span><span class="n">group</span><span class="p">):</span>
+                <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+                    <span class="n">keep</span> <span class="o">=</span> <span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">occupancy</span><span class="p">(</span><span class="n">i</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">threshold</span><span class="p">)</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+                <span class="n">removed</span> <span class="o">+=</span> <span class="nb">int</span><span class="p">((</span><span class="o">~</span><span class="n">keep</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">keep</span><span class="o">.</span><span class="n">all</span><span class="p">():</span>
+                    <span class="n">params</span><span class="o">.</span><span class="n">remove_atoms</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">keep</span><span class="p">)</span>
+            <span class="n">report</span><span class="p">[</span><span class="s2">&quot;removed&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">removed</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">elif</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;resample_control&quot;</span><span class="p">:</span>
+            <span class="n">report</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_resample_control</span><span class="p">(</span><span class="n">group</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;control_points&quot;</span><span class="p">)))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unknown edit </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">report</span><span class="p">[</span><span class="s2">&quot;atoms&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">counts</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">settings_changed</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">report</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_resample_control</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">group</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">control_points</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">group</span> <span class="o">=</span> <span class="n">group</span> <span class="k">if</span> <span class="n">group</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span>
+        <span class="k">if</span> <span class="n">group</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">group</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">groups</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="s2">&quot;resample_control needs a group&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">control_points</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">control_points</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="s2">&quot;control_points must be [rows, columns]&quot;</span><span class="p">)</span>
+        <span class="n">gp</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">groups</span><span class="p">[</span><span class="n">group</span><span class="p">]</span>
+        <span class="n">flag</span> <span class="o">=</span> <span class="n">gp</span><span class="o">.</span><span class="n">strain</span><span class="o">.</span><span class="n">requires_grad</span>
+        <span class="n">new</span> <span class="o">=</span> <span class="n">strain_fields</span><span class="o">.</span><span class="n">resample_control</span><span class="p">(</span><span class="n">gp</span><span class="o">.</span><span class="n">strain</span><span class="o">.</span><span class="n">detach</span><span class="p">(),</span> <span class="n">control_points</span><span class="p">)</span>
+        <span class="n">deviation</span> <span class="o">=</span> <span class="n">strain_fields</span><span class="o">.</span><span class="n">resample_deviation</span><span class="p">(</span><span class="n">gp</span><span class="o">.</span><span class="n">strain</span><span class="o">.</span><span class="n">detach</span><span class="p">(),</span> <span class="n">new</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+        <span class="n">gp</span><span class="o">.</span><span class="n">strain</span> <span class="o">=</span> <span class="n">new</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">device</span><span class="p">)</span><span class="o">.</span><span class="n">clone</span><span class="p">()</span><span class="o">.</span><span class="n">requires_grad_</span><span class="p">(</span><span class="n">flag</span><span class="p">)</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="n">group</span><span class="p">)</span><span class="o">.</span><span class="n">control_points</span> <span class="o">=</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">control_points</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">control_points</span><span class="p">[</span><span class="mi">1</span><span class="p">])]</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;max_deviation_px&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">deviation</span><span class="p">)}</span>
+
+    <span class="c1"># ------------------------------------------------------------------ candidate sites</span>
+<div class="viewcode-block" id="Session.minima">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.minima">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">minima</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">threshold</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.5</span><span class="p">,</span> <span class="n">distance_px</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">3.0</span><span class="p">,</span> <span class="n">layer</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+               <span class="n">atom_distance</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span> <span class="n">verify</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Candidate sites of Part II, Eq. (7.1) of ``layer`` (``(n, 2)``).</span>
+
+<span class="sd">        ``atom_distance``: drop sites closer than ``distance_px`` to an existing atom.</span>
+<span class="sd">        ``verify``: ``{check_margin, check_collisions, check_loss}``; if given, the sites are</span>
+<span class="sd">        additionally tested by the criteria of an ``add`` trial (nothing is inserted).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">diff</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">evaluate</span><span class="p">()[</span><span class="s2">&quot;diff&quot;</span><span class="p">]</span>
+        <span class="n">index</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">layer_index</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+        <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+            <span class="n">atoms</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">positions</span><span class="p">(</span><span class="n">index</span><span class="p">)</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span> <span class="k">if</span> <span class="n">atom_distance</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="n">points</span> <span class="o">=</span> <span class="n">minima_positions</span><span class="p">(</span><span class="n">diff</span><span class="p">,</span> <span class="n">threshold</span><span class="p">,</span> <span class="n">distance_px</span><span class="p">,</span> <span class="n">atoms</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">verify</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">points</span><span class="p">):</span>
+            <span class="n">points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">make_seeder</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span><span class="o">.</span><span class="n">filter_points</span><span class="p">(</span><span class="n">points</span><span class="p">,</span> <span class="n">commit</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="o">**</span><span class="n">verify</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">candidates</span> <span class="o">=</span> <span class="n">points</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">candidates</span></div>
+
+
+<div class="viewcode-block" id="Session.insert_minima">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.insert_minima">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">insert_minima</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">threshold</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.5</span><span class="p">,</span> <span class="n">distance_px</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">3.0</span><span class="p">,</span> <span class="n">layer</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+                      <span class="n">check_margin</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span> <span class="n">check_collisions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+                      <span class="n">check_loss</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span> <span class="n">atom_distance</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Insert the candidate sites that pass the criteria of an ``add`` trial.&quot;&quot;&quot;</span>
+
+        <span class="n">points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">minima</span><span class="p">(</span><span class="n">threshold</span><span class="p">,</span> <span class="n">distance_px</span><span class="p">,</span> <span class="n">layer</span><span class="p">,</span> <span class="n">atom_distance</span><span class="p">)</span>
+        <span class="n">seeder</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">make_seeder</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+        <span class="n">before</span> <span class="o">=</span> <span class="n">seeder</span><span class="o">.</span><span class="n">n_atoms</span>
+        <span class="n">accepted</span> <span class="o">=</span> <span class="n">seeder</span><span class="o">.</span><span class="n">filter_points</span><span class="p">(</span><span class="n">points</span><span class="p">,</span> <span class="n">commit</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">check_margin</span><span class="o">=</span><span class="n">check_margin</span><span class="p">,</span>
+                                        <span class="n">check_collisions</span><span class="o">=</span><span class="n">check_collisions</span><span class="p">,</span> <span class="n">check_loss</span><span class="o">=</span><span class="n">check_loss</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">revision</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;candidates&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">points</span><span class="p">)),</span> <span class="s2">&quot;accepted&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">accepted</span><span class="p">)),</span> <span class="s2">&quot;atoms_before&quot;</span><span class="p">:</span> <span class="n">before</span><span class="p">,</span>
+                <span class="s2">&quot;atoms&quot;</span><span class="p">:</span> <span class="n">seeder</span><span class="o">.</span><span class="n">n_atoms</span><span class="p">,</span> <span class="s2">&quot;report&quot;</span><span class="p">:</span> <span class="nb">dict</span><span class="p">(</span><span class="n">seeder</span><span class="o">.</span><span class="n">filter_report</span><span class="p">)}</span></div>
+
+
+    <span class="c1"># ------------------------------------------------------------------ frame</span>
+<div class="viewcode-block" id="Session.frame">
+<a class="viewcode-back" href="../../../part4_service.html#temsim.service.session.Session.frame">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">frame</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">extras</span><span class="o">=</span><span class="p">(),</span> <span class="n">standardised</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span> <span class="n">Arrays</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The picture of the state; see the module docstring.  ``extras``: subset of</span>
+<span class="sd">        ``optics``, ``strain``, ``potentials``, ``gradients``.&quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">ev</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">evaluate</span><span class="p">()</span>
+        <span class="n">arrays</span><span class="p">:</span> <span class="n">Arrays</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;sim&quot;</span><span class="p">:</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;image&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span> <span class="s2">&quot;target&quot;</span><span class="p">:</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;target&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+                          <span class="s2">&quot;diff&quot;</span><span class="p">:</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;diff&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)}</span>
+        <span class="k">if</span> <span class="n">standardised</span><span class="p">:</span>
+            <span class="n">arrays</span><span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;standardised&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+            <span class="n">arrays</span><span class="p">[</span><span class="s2">&quot;y&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;standardised_target&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="n">mask</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">mask_for</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">mask</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">arrays</span><span class="p">[</span><span class="s2">&quot;mask&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">mask</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
+        <span class="n">layers</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">spec</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">layers</span><span class="p">):</span>
+                <span class="n">lp</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
+                <span class="n">arrays</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;atoms.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">.pos&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">positions</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+                <span class="n">arrays</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;atoms.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">.occ&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">occupancy</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+                <span class="n">arrays</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;atoms.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">.int&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">lp</span><span class="o">.</span><span class="n">intensity</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+                <span class="n">layers</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="n">spec</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;group&quot;</span><span class="p">:</span> <span class="n">spec</span><span class="o">.</span><span class="n">group</span><span class="p">,</span> <span class="s2">&quot;element&quot;</span><span class="p">:</span> <span class="n">spec</span><span class="o">.</span><span class="n">element</span><span class="p">,</span> <span class="s2">&quot;atoms&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">lp</span><span class="p">)})</span>
+        <span class="n">extras</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">extras</span> <span class="ow">or</span> <span class="p">())</span>
+        <span class="k">if</span> <span class="s2">&quot;optics&quot;</span> <span class="ow">in</span> <span class="n">extras</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_optics</span><span class="p">(</span><span class="n">arrays</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;strain&quot;</span> <span class="ow">in</span> <span class="n">extras</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_strain</span><span class="p">(</span><span class="n">arrays</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;potentials&quot;</span> <span class="ow">in</span> <span class="n">extras</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_potentials</span><span class="p">(</span><span class="n">arrays</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;gradients&quot;</span> <span class="ow">in</span> <span class="n">extras</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_gradients</span><span class="p">(</span><span class="n">arrays</span><span class="p">)</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;loss&quot;</span><span class="p">:</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;loss&quot;</span><span class="p">],</span> <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">],</span> <span class="s2">&quot;prior&quot;</span><span class="p">:</span> <span class="n">ev</span><span class="p">[</span><span class="s2">&quot;prior&quot;</span><span class="p">],</span> <span class="s2">&quot;layers&quot;</span><span class="p">:</span> <span class="n">layers</span><span class="p">,</span>
+                <span class="s2">&quot;active_group&quot;</span><span class="p">:</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span><span class="p">,</span> <span class="s2">&quot;revision&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">revision</span><span class="p">,</span>
+                <span class="s2">&quot;steps&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span><span class="o">.</span><span class="n">steps</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">trainer</span> <span class="k">else</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">&quot;mode&quot;</span><span class="p">:</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">imaging</span><span class="o">.</span><span class="n">mode</span><span class="p">}</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">data</span><span class="p">[</span><span class="s2">&quot;seeding&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">seeding_status</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">data</span><span class="p">,</span> <span class="n">arrays</span></div>
+
+
+    <span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_optics</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arrays</span><span class="p">:</span> <span class="n">Arrays</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">sim</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">simulator</span>
+        <span class="n">state</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">optics_state</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">sim</span><span class="o">.</span><span class="n">stem_mode</span><span class="p">:</span>
+            <span class="n">probe</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftshift</span><span class="p">(</span><span class="n">sim</span><span class="o">.</span><span class="n">probe_intensity</span><span class="p">(</span><span class="n">state</span><span class="p">))</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+            <span class="n">cy</span><span class="p">,</span> <span class="n">cx</span> <span class="o">=</span> <span class="n">probe</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">//</span> <span class="mi">2</span><span class="p">,</span> <span class="n">probe</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">//</span> <span class="mi">2</span>
+            <span class="n">r</span> <span class="o">=</span> <span class="n">PROBE_WINDOW_PX</span>
+            <span class="n">arrays</span><span class="p">[</span><span class="s2">&quot;probe&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">probe</span><span class="p">[</span><span class="n">cy</span> <span class="o">-</span> <span class="n">r</span><span class="p">:</span><span class="n">cy</span> <span class="o">+</span> <span class="n">r</span><span class="p">,</span> <span class="n">cx</span> <span class="o">-</span> <span class="n">r</span><span class="p">:</span><span class="n">cx</span> <span class="o">+</span> <span class="n">r</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+            <span class="k">return</span>
+        <span class="n">grid</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">grid</span>
+        <span class="n">n</span><span class="p">,</span> <span class="n">m</span> <span class="o">=</span> <span class="n">grid</span><span class="o">.</span><span class="n">shape</span>
+        <span class="n">reach</span> <span class="o">=</span> <span class="n">CTF_MAX_ANGLE_MRAD</span> <span class="o">*</span> <span class="mf">1e-3</span> <span class="o">/</span> <span class="n">grid</span><span class="o">.</span><span class="n">wavelength_nm</span>            <span class="c1"># 1/nm</span>
+        <span class="n">half_r</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">n</span> <span class="o">//</span> <span class="mi">2</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">reach</span> <span class="o">*</span> <span class="n">n</span> <span class="o">*</span> <span class="n">grid</span><span class="o">.</span><span class="n">pixel_size_nm</span><span class="p">))</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">half_c</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">m</span> <span class="o">//</span> <span class="mi">2</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">reach</span> <span class="o">*</span> <span class="n">m</span> <span class="o">*</span> <span class="n">grid</span><span class="o">.</span><span class="n">pixel_size_nm</span><span class="p">))</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">cut</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+            <span class="n">a</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftshift</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">a</span><span class="p">[</span><span class="n">n</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">-</span> <span class="n">half_r</span><span class="p">:</span><span class="n">n</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">half_r</span><span class="p">,</span> <span class="n">m</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">-</span> <span class="n">half_c</span><span class="p">:</span><span class="n">m</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">+</span> <span class="n">half_c</span><span class="p">]</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+
+        <span class="n">phase</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">angle</span><span class="p">(</span><span class="n">sim</span><span class="o">.</span><span class="n">transfer</span><span class="p">(</span><span class="n">state</span><span class="p">))</span>
+        <span class="n">arrays</span><span class="p">[</span><span class="s2">&quot;ctf_phase&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">cut</span><span class="p">(</span><span class="n">phase</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="n">arrays</span><span class="p">[</span><span class="s2">&quot;ctf_ring&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">cut</span><span class="p">(</span><span class="n">sim</span><span class="o">.</span><span class="n">objective_aperture</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">phase</span><span class="o">.</span><span class="n">dtype</span><span class="p">))</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_strain</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arrays</span><span class="p">:</span> <span class="n">Arrays</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">group</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">active_group</span> <span class="ow">or</span> <span class="n">model</span><span class="o">.</span><span class="n">experiment</span><span class="o">.</span><span class="n">groups</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">name</span>
+        <span class="n">shape</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">shape</span>
+        <span class="n">scale</span> <span class="o">=</span> <span class="n">STRAIN_MAP_RESOLUTION</span> <span class="o">/</span> <span class="nb">max</span><span class="p">(</span><span class="n">shape</span><span class="p">)</span>
+        <span class="n">resolution</span> <span class="o">=</span> <span class="p">(</span><span class="nb">max</span><span class="p">(</span><span class="mi">32</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="nb">round</span><span class="p">(</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">scale</span><span class="p">))),</span> <span class="nb">max</span><span class="p">(</span><span class="mi">32</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="nb">round</span><span class="p">(</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">scale</span><span class="p">))))</span>
+        <span class="n">reg</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="o">.</span><span class="n">regularisation</span>
+        <span class="n">maps</span> <span class="o">=</span> <span class="n">strain_fields</span><span class="o">.</span><span class="n">maps</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">groups</span><span class="p">[</span><span class="n">group</span><span class="p">]</span><span class="o">.</span><span class="n">strain</span><span class="o">.</span><span class="n">detach</span><span class="p">(),</span> <span class="n">shape</span><span class="p">,</span>
+                                  <span class="n">reg</span><span class="o">.</span><span class="n">strain_energy_lambda</span><span class="p">,</span> <span class="n">reg</span><span class="o">.</span><span class="n">strain_energy_mu</span><span class="p">,</span> <span class="n">resolution</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">maps</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">arrays</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;strain.</span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+
+    <span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_potentials</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arrays</span><span class="p">:</span> <span class="n">Arrays</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">p</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">simulator</span><span class="o">.</span><span class="n">padding</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">potential</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">simulator</span><span class="o">.</span><span class="n">potentials</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">())):</span>
+            <span class="k">if</span> <span class="n">potential</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">v</span> <span class="o">=</span> <span class="n">potential</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">v</span><span class="o">.</span><span class="n">is_complex</span><span class="p">():</span>
+                <span class="n">v</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">real</span>
+            <span class="k">if</span> <span class="n">p</span><span class="p">:</span>
+                <span class="n">v</span> <span class="o">=</span> <span class="n">v</span><span class="p">[</span><span class="n">p</span><span class="p">:</span><span class="o">-</span><span class="n">p</span><span class="p">,</span> <span class="n">p</span><span class="p">:</span><span class="o">-</span><span class="n">p</span><span class="p">]</span>
+            <span class="n">arrays</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;potential.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_gradients</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arrays</span><span class="p">:</span> <span class="n">Arrays</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Gradient of the loss with respect to the position shifts of every layer, ``(n, 2)`` px.&quot;&quot;&quot;</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">shifts</span> <span class="o">=</span> <span class="p">[</span><span class="n">lp</span><span class="o">.</span><span class="n">shifts</span> <span class="k">for</span> <span class="n">lp</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">layers</span><span class="p">]</span>
+        <span class="n">flags</span> <span class="o">=</span> <span class="p">[</span><span class="n">t</span><span class="o">.</span><span class="n">requires_grad</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">shifts</span><span class="p">]</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">shifts</span><span class="p">:</span>
+                <span class="n">t</span><span class="o">.</span><span class="n">requires_grad_</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+            <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">enable_grad</span><span class="p">():</span>
+                <span class="n">loss</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">loss</span><span class="p">()</span>
+                <span class="n">grads</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">autograd</span><span class="o">.</span><span class="n">grad</span><span class="p">(</span><span class="n">loss</span><span class="p">,</span> <span class="n">shifts</span><span class="p">,</span> <span class="n">allow_unused</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">t</span><span class="p">,</span> <span class="n">flag</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">shifts</span><span class="p">,</span> <span class="n">flags</span><span class="p">):</span>
+                <span class="n">t</span><span class="o">.</span><span class="n">requires_grad_</span><span class="p">(</span><span class="n">flag</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">g</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">grads</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">g</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">arrays</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;grad.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+
+    <span class="c1"># ------------------------------------------------------------------ saving</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">directory</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">require_model</span><span class="p">()</span>
+        <span class="n">directory</span> <span class="o">=</span> <span class="n">directory</span> <span class="ow">or</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="o">.</span><span class="n">out_dir</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span> <span class="k">else</span> <span class="kc">None</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">directory</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">SessionError</span><span class="p">(</span><span class="s2">&quot;no directory given and the session has no default one&quot;</span><span class="p">)</span>
+        <span class="n">run</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">Run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">experiment</span><span class="p">(),</span> <span class="n">model</span><span class="o">.</span><span class="n">settings</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">state</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="o">.</span><span class="n">target</span><span class="p">,</span>
+                        <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">assembly</span><span class="o">.</span><span class="n">notes</span><span class="p">))</span>
+        <span class="n">store</span><span class="o">.</span><span class="n">save_run</span><span class="p">(</span><span class="n">directory</span><span class="p">,</span> <span class="n">run</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">last_save</span> <span class="o">=</span> <span class="n">directory</span>
+        <span class="k">return</span> <span class="n">directory</span></div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">temsim</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../part1_physics.html">Part I - Physics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part2_learning.html">Part II - Learning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part3_data.html">Part III - Data management</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part4_service.html">Part IV - Service</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../part5_gui.html">Part V - Graphical client</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.1.3</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>
