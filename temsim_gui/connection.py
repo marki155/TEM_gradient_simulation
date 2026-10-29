@@ -22,7 +22,8 @@ handed back by a signal.  Because there is one worker, the order in which the us
 pressed buttons is the order in which the core sees the commands - the guarantee
 of Part IV, Section 1.  :meth:`Connection.submit` takes the callable that performs
 the call, a ``done`` callback for the result and an ``failed`` callback for a
-:class:`~temsim.service.client.RemoteError`.
+:class:`~temsim.service.client.RemoteError`.  The one exception is :meth:`Connection.submit_now`
+for stop and pause: they go out at once on their own thread instead of waiting behind slow commands.
 
 Starting a core.  :func:`spawn_core` runs ``python -m temsim.service serve`` as a child
 process on a free local port and waits until it answers; the interface then
@@ -137,6 +138,20 @@ class Connection(QtCore.QObject):
         """Run ``call()`` on the command thread; ``done(result)`` / ``failed(exc)`` run in the GUI thread."""
 
         self._worker.jobs.put((call, done, failed or self._report))
+
+    def submit_now(self, call: Callable[[], Any], done: Optional[Callable[[Any], None]] = None,
+                   failed: Optional[Callable[[BaseException], None]] = None) -> None:
+        """Like :meth:`submit`, but past the queue: for stop and pause, which must not wait for other commands."""
+
+        def run() -> None:
+            try:
+                result = call()
+            except BaseException as exc:
+                self._result.emit(failed or self._report, exc)
+            else:
+                self._result.emit(done, result)
+
+        threading.Thread(target=run, name="temsim-gui-express", daemon=True).start()
 
     def _report(self, exc: BaseException) -> None:
         trace = exc.trace if isinstance(exc, RemoteError) else ""
