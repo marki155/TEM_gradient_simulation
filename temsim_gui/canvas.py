@@ -37,11 +37,15 @@ MAX_POTENTIAL_PIXELS = 1024
 
 class PlotCanvas(FigureCanvasQTAgg):
     view_changed = QtCore.Signal()
+    #: a click in an image tile while ``click_mode`` is set: row, column, mouse button (1 left, 3 right)
+    picked = QtCore.Signal(float, float, int)
 
     def __init__(self, parent=None):
         self.fig = Figure(figsize=(12, 8), dpi=100, constrained_layout=True)
         super().__init__(self.fig)
         self.setParent(parent)
+        #: the constrained layout costs more than drawing; it is computed only when the tiles or the window size change
+        self._relayout = True
 
         self.layer_names: List[str] = []
         self.stem = False
@@ -85,8 +89,23 @@ class PlotCanvas(FigureCanvasQTAgg):
 
         self._build()
         self.mpl_connect("scroll_event", self._on_scroll)
+        self.mpl_connect("button_press_event", self._on_click)
+        self.click_mode = False
 
     # ------------------------------------------------------------------ layout
+    def draw(self) -> None:
+        if self._relayout:
+            self.fig.set_layout_engine("constrained")
+            super().draw()
+            self.fig.set_layout_engine("none")
+            self._relayout = False
+        else:
+            super().draw()
+
+    def resizeEvent(self, event) -> None:
+        self._relayout = True
+        super().resizeEvent(event)
+
     def configure(self, layer_names, stem: bool) -> bool:
         """Adapt to a model; returns True if the layout changed."""
 
@@ -122,6 +141,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._build()
 
     def _build(self) -> None:
+        self._relayout = True
         self.fig.clear()
         self.plan = plan = tiles.plan(self.view, len(self.layer_names), self.seeding)
         titles = self.titles()
@@ -465,6 +485,14 @@ class PlotCanvas(FigureCanvasQTAgg):
     def _on_view_changed(self, _ax) -> None:
         self._timer.start()
         self.view_changed.emit()
+
+    def _on_click(self, event) -> None:
+        if not self.click_mode or event.inaxes is None or event.button not in (1, 3) or event.xdata is None:
+            return
+        if getattr(self, "toolbar_mode", lambda: "")():
+            return
+        if event.inaxes in [self.axes_by_key.get(k) for k in ("sim", "diff", "target")]:
+            self.picked.emit(float(event.ydata), float(event.xdata), int(event.button))
 
     def _on_scroll(self, event) -> None:
         ax = event.inaxes

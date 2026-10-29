@@ -473,7 +473,8 @@ class SeedingPanel(QtWidgets.QWidget):
 class InsertPanel(QtWidgets.QGroupBox):
     """Insertion of atoms: one choice of method, the shared collision rule, the options of the method."""
 
-    METHODS = (("Zufaellig wuerfeln (Seeding)", "seeding"), ("Aus Diff-Minima", "minima"))
+    METHODS = (("Zufaellig wuerfeln (Seeding)", "seeding"), ("Aus Diff-Minima", "minima"),
+               ("Manuell (Klick)", "manual"))
     COLLISION = (("touch_A", "Entfernen bis [A]", "Atome, die naeher als das am neuen Atom liegen, werden entfernt."),
                  ("merge_A", "Verschieben bis [A]",
                   "Zwischen 'Entfernen bis' und diesem Radius wird nicht neu eingefuegt:\n"
@@ -505,6 +506,15 @@ class InsertPanel(QtWidgets.QGroupBox):
             self.collision[key] = spin
         layout.addWidget(self.seeding)
         layout.addWidget(self.minima)
+        self.manual = QtWidgets.QLabel("Linksklick in Sim, Diff oder Target setzt ein Atom,\nRechtsklick entfernt das naechste "
+                                       "(Radius unten).\nNicht aktiv, solange in der Toolbar Zoom oder Pan gewaehlt ist.")
+        self.radius_spin = double_spin(3.0, 0.5, 50.0, 0.5, 1, suffix=" px", tip="Suchradius fuers Entfernen per Rechtsklick")
+        self.manual_box = QtWidgets.QWidget()
+        manual_layout = QtWidgets.QFormLayout(self.manual_box)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.addRow(self.manual)
+        manual_layout.addRow("Entfernradius", self.radius_spin)
+        layout.addWidget(self.manual_box)
         self.seeding.config_changed.connect(self.config_changed.emit)
         self.method_combo.currentIndexChanged.connect(lambda _=None: self._method_changed())
         self._active = True
@@ -528,6 +538,7 @@ class InsertPanel(QtWidgets.QGroupBox):
         self.setVisible(self._active)
         self.seeding.setVisible(self.method == "seeding")
         self.minima.setVisible(self.method == "minima")
+        self.manual_box.setVisible(self.method == "manual")
         if not self._active or self.method != "minima":
             self.minima.show_check.setChecked(False)
 

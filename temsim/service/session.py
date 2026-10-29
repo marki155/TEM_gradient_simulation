@@ -403,7 +403,9 @@ class Session:
         ``reset_occupancies``, ``reset_intensities``, ``reset_free_positions``,
         ``remove_low_occupancy`` (``threshold``), ``merge_close`` (``distance_A``, default the merge distance
         of the regularisation; ``min_occupancy``), ``resample_control`` (``control_points``);
-        all act on the layers of ``group`` (default: the active group).  ``merge`` (``layer``, ``atoms``: a
+        all act on the layers of ``group`` (default: the active group).  ``add_atoms`` (``points`` as ``[[row, col], ...]`` in
+        pixels, ``layer``) and ``remove_near`` (``points``, ``radius_px``, ``layer``: the nearest atom within the radius
+        of every point goes) are for manual work; ``merge`` (``layer``, ``atoms``: a
         list of atom indices) fuses those atoms of one layer into one.
         """
 
@@ -442,6 +444,32 @@ class Session:
             for i in self._layers_of(group):
                 merged += params.merge_close(i, distance_px, float(args.get("min_occupancy", 0.5)))
             report["merged"] = merged
+            self.revision += 1
+        elif name == "add_atoms":
+            points = np.asarray(args.get("points", []), dtype=np.float64).reshape(-1, 2)
+            params.append_atoms(self.layer_index(args.get("layer")), points)
+            report["added"] = int(len(points))
+            self.revision += 1
+        elif name == "remove_near":
+            points = np.asarray(args.get("points", []), dtype=np.float64).reshape(-1, 2)
+            radius = float(args.get("radius_px", 3.0))
+            index = self.layer_index(args.get("layer"))
+            with torch.no_grad():
+                xy = params.positions(index).cpu().numpy()
+            drop = set()
+            for point in points:
+                if len(xy) == 0:
+                    break
+                distance = np.linalg.norm(xy - point, axis=1)
+                distance[list(drop)] = np.inf
+                nearest = int(np.argmin(distance))
+                if distance[nearest] <= radius:
+                    drop.add(nearest)
+            if drop:
+                keep = np.ones(len(xy), dtype=bool)
+                keep[list(drop)] = False
+                params.remove_atoms(index, keep)
+            report["removed"] = len(drop)
             self.revision += 1
         elif name == "merge":
             i = self.layer_index(args.get("layer"))

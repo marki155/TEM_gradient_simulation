@@ -146,6 +146,19 @@ def test_merge_edits_by_hand_and_by_the_training_job(run):
     assert job.merged >= 1 and len(params.layers[0]) < count
 
 
+def test_manual_add_and_remove_atoms(run):
+    s, *_ = run
+    params = s.model.params
+    n = len(params.layers[0])
+    assert s.edit("add_atoms", points=[[12.0, 13.0]])["added"] == 1
+    assert len(params.layers[0]) == n + 1
+    assert tuple(params.positions(0)[-1].tolist()) == pytest.approx((12.0, 13.0), abs=1e-4)
+    assert s.edit("remove_near", points=[[12.5, 13.0]], radius_px=2.0)["removed"] == 1
+    assert len(params.layers[0]) == n
+    assert s.edit("remove_near", points=[[1e4, 1e4]], radius_px=2.0)["removed"] == 0
+    s.trainer.step()
+
+
 def test_edits(run):
     s, *_ = run
     params = s.model.params

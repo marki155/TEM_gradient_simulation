@@ -54,7 +54,9 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self.values)
-        left_layout.addWidget(NavigationToolbar2QT(self.canvas, left))
+        toolbar = NavigationToolbar2QT(self.canvas, left)
+        self.canvas.toolbar_mode = lambda: str(toolbar.mode)
+        left_layout.addWidget(toolbar)
         left_layout.addWidget(self.canvas, 1)
 
         column = QtWidgets.QWidget()
@@ -101,6 +103,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         inserting = self.control.mode == INSERT
         self.insert.set_active(inserting)
+        self.canvas.click_mode = inserting and self.insert.method == "manual"
         self.control.show_actions(inserting, self.insert.method == "seeding")
         self.strain_section.setVisible(not inserting)
         self.editor_scroll.setVisible(not inserting)

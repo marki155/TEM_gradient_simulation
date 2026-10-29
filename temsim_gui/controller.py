@@ -54,6 +54,10 @@ from .values_editor import ValuesEditor
 
 BASE_EXTRAS = ("optics", "potentials")
 VALUES_INTERVAL = 2.0
+#: the loss curve is redrawn at most this often (seconds); the history keeps every point
+LOSS_INTERVAL = 0.25
+#: after drawing a frame the GUI stays idle for this multiple of the drawing time before it asks for the next one
+IDLE_FACTOR = 1.5
 MINIMA_DELAY_MS = 250
 
 
@@ -77,6 +81,7 @@ class Controller(QtCore.QObject):
         self.workspace: Optional[str] = None
         self.errors: List[str] = []
         self._minima_pending = False
+        self._loss_drawn = 0.0
         self._values_asked = 0.0
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
@@ -123,6 +128,7 @@ class Controller(QtCore.QObject):
         m.insert_btn.clicked.connect(self.insert_minima)
 
         self.insert.config_changed.connect(self.on_seeding_config)
+        self.canvas.picked.connect(self.on_pick)
         self.strain.apply_clicked.connect(self.apply_control_points)
         self.train.active_group_changed.connect(lambda _=None: self.render())
         self.values.save_clicked.connect(lambda: self.save(None))
@@ -196,15 +202,23 @@ class Controller(QtCore.QObject):
         self.control.set_progress(step, loss)
         if loss is not None and step is not None:
             self.canvas.history.add(step, loss)
-            self.canvas.update_loss()
+            now = time.monotonic()
+            if now - self._loss_drawn >= LOSS_INTERVAL:
+                self._loss_drawn = now
+                self.canvas.update_loss()
 
     def on_frame(self, frame: FrameModel) -> None:
+        start = time.monotonic()
         try:
             if self.canvas.configure([layer.name for layer in frame.layers], frame.stem):
                 self.fill_tiles()
             self.canvas.update_frame(frame)
+            self.canvas.draw()
         finally:
-            self.connection.acknowledge(frame)
+            # the core sends the next frame only after this; without the pause a slow drawing would keep the
+            # event loop busy for ever and the buttons would not even react to the mouse
+            delay = min(IDLE_FACTOR * (time.monotonic() - start), 5.0)
+            QtCore.QTimer.singleShot(int(1000 * delay), lambda f=frame: self.connection.acknowledge(f))
         if self.state == "idle":
             self.control.set_progress(frame.step, frame.loss)
         now = time.monotonic()
@@ -292,6 +306,14 @@ class Controller(QtCore.QObject):
 
     def remove_low_occupancy(self) -> None:
         self.edit("remove_low_occupancy", threshold=float(self.control.remove_spin.value()))
+
+    def on_pick(self, row: float, col: float, button: int) -> None:
+        """Manual mode: left click adds an atom at the spot, right click removes the nearest one."""
+
+        if button == 1:
+            self.edit("add_atoms", points=[[row, col]])
+        else:
+            self.edit("remove_near", points=[[row, col]], radius_px=float(self.insert.radius_spin.value()))
 
     def merge_close(self) -> None:
         self.edit("merge_close", distance_A=float(self.control.merge_spin.value()))
