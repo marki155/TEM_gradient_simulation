@@ -50,7 +50,7 @@ ACK_TIMEOUT = 10.0
 #: images that travel as float16
 HALF = ("sim", "diff", "x", "y")
 #: arrays that stay the same while one trains and are sent only when they change
-STATIC = ("target", "mask")
+STATIC = ("target", "i_target", "mask")
 
 
 @dataclass
@@ -70,8 +70,9 @@ def package(data: Dict[str, Any], arrays: Dict[str, Any]) -> Packet:
             arrays[name] = np.asarray(arrays[name]).astype(np.float16)
     packet = Packet([])
     if static:
-        if "target" in static:
-            static["target"] = np.ascontiguousarray(static["target"], dtype=np.float16)
+        for name in ("target", "i_target"):
+            if name in static:
+                static[name] = np.ascontiguousarray(static[name], dtype=np.float16)
         key = 0
         for name in sorted(static):
             static[name] = np.ascontiguousarray(static[name])

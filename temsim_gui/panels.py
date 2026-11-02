@@ -106,6 +106,14 @@ class ControlPanel(QtWidgets.QWidget):
         self.tile_combo.setToolTip("Eine Kachel gross zeigen - Simulation, Diff, Target, CTF, Potential ...\n"
                                    "Zoomen und Verschieben mit der Toolbar unter dem Bild.")
         form.addRow("Kachel", self.tile_combo)
+        self.target_combo = QtWidgets.QComboBox()
+        self.target_combo.addItem("Target", "target")
+        self.target_combo.addItem("I-Target (i_target.tif)", "i_target")
+        self.target_combo.setToolTip("Welches Target die Kachel Target und der Zoom-Vergleich zeigen.\n"
+                                     "Das I-Target ist nur zur Ansicht da; trainiert wird gegen das Target.\n"
+                                     "Es wird geladen, wenn im Daten-Ordner eine i_target.tif liegt.")
+        self.target_combo.setEnabled(False)
+        form.addRow("Anzeige-Target", self.target_combo)
         self.show_atoms = QtWidgets.QCheckBox("Atompositionen auf dem Target zeigen")
         self.show_atoms.setChecked(True)
         form.addRow(self.show_atoms)

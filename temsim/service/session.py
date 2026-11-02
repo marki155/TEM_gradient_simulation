@@ -74,6 +74,7 @@ from .assemble import Assembly
 STRAIN_MAP_RESOLUTION = 256
 CTF_MAX_ANGLE_MRAD = 42.0
 PROBE_WINDOW_PX = 64
+ALT_TARGET_NAMES = ("i_target.tif", "i_target.tiff", "i_target.npy")
 
 Arrays = Dict[str, np.ndarray]
 
@@ -91,6 +92,7 @@ class Capture:
     layers: List[Dict[str, Any]]
     data: Dict[str, Any]
     seq: int = 0
+    alt_target: Optional[np.ndarray] = None
 
 
 class SessionError(RuntimeError):
@@ -125,6 +127,8 @@ class Session:
         #: the directory of ``--workspace``: relative paths are read from and named runs written to it
         self.workspace: Optional[str] = None
         self.candidates = np.zeros((0, 2))
+        #: optional second target (``i_target.tif``) that is only shown, never trained against
+        self.alt_target: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------ opening
     @property
@@ -135,6 +139,20 @@ class Session:
         if self.model is None:
             raise SessionError("nothing is open; send open_run or open_dataset first")
         return self.model
+
+    def load_alt_target(self, *folders: str) -> None:
+        """Read ``i_target.tif|tiff|npy`` from the first of ``folders`` that has one (if its shape fits)."""
+
+        self.alt_target = None
+        shape = tuple(self.assembly.target.shape)
+        for folder in folders:
+            for name in ALT_TARGET_NAMES:
+                path = os.path.join(folder, name)
+                if os.path.exists(path):
+                    image = datasets.prepare_target(datasets.read_image(path))
+                    if tuple(image.shape) == shape:
+                        self.alt_target = image
+                        return
 
     def open_assembly(self, assembly: Assembly) -> Dict[str, Any]:
         model = Model(assembly.experiment, assembly.target, assembly.settings, assembly.state, self.device)
@@ -157,7 +175,11 @@ class Session:
         return {"root": self.workspace, "entries": workspaces.scan(self.workspace)}
 
     def open_run(self, directory: str, target_path: Optional[str] = None) -> Dict[str, Any]:
-        return self.open_assembly(assemble.run_assembly(workspaces.resolve(self.workspace, directory), target_path))
+        directory = workspaces.resolve(self.workspace, directory)
+        info = self.open_assembly(assemble.run_assembly(directory, target_path))
+        parent = os.path.dirname(os.path.abspath(directory))
+        self.load_alt_target(os.path.abspath(directory), parent, os.path.dirname(parent))
+        return info
 
     def open_dataset(self, path: str, route: str = "auto", resume: bool = True, **options) -> Dict[str, Any]:
         """``route``: ``"lattice"``, ``"seed"``, ``"run"`` or ``"auto"``.
@@ -181,7 +203,9 @@ class Session:
             built = assemble.seeding_assembly(data, **options)
         else:
             raise SessionError(f"unknown route {route!r}")
-        return self.open_assembly(assemble.resume_assembly(built) if resume else built)
+        info = self.open_assembly(assemble.resume_assembly(built) if resume else built)
+        self.load_alt_target(data.folder)
+        return info
 
     # ------------------------------------------------------------------ description
     def experiment(self) -> Experiment:
@@ -549,6 +573,8 @@ class Session:
         mask = model.settings.mask_for(model.settings.active_group)
         if mask is not None:
             arrays["mask"] = (np.asarray(mask) > 0).astype(np.uint8)
+        if self.alt_target is not None:
+            arrays["i_target"] = self.alt_target
         layers = []
         with torch.no_grad():
             for i, spec in enumerate(model.experiment.layers):
@@ -610,7 +636,8 @@ class Session:
                 "active_group": model.settings.active_group, "revision": self.revision, "steps": result.step,
                 "mode": model.experiment.imaging.mode, "partial": True}
         mask = model.settings.mask_for(model.settings.active_group)
-        return Capture(kept["x"], kept["y"], kept["loss_mask"], mask, atoms, layers, data)
+        return Capture(kept["x"], kept["y"], kept["loss_mask"], mask, atoms, layers, data,
+                       alt_target=self.alt_target)
 
     @staticmethod
     def compose(capture: Capture) -> Tuple[Dict[str, Any], Arrays]:
@@ -619,6 +646,8 @@ class Session:
         arrays = Session._images(capture.x, capture.y, capture.loss_mask)
         if capture.mask is not None:
             arrays["mask"] = (np.asarray(capture.mask) > 0).astype(np.uint8)
+        if capture.alt_target is not None:
+            arrays["i_target"] = capture.alt_target
         for i, (pos, occ, intensity) in enumerate(capture.atoms):
             arrays[f"atoms.{i}.pos"] = pos.cpu().numpy().astype(np.float32, copy=False)
             arrays[f"atoms.{i}.occ"] = occ.cpu().numpy().astype(np.float32, copy=False)

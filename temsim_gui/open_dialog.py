@@ -58,6 +58,28 @@ class OpenDialog(QtWidgets.QDialog):
         self.fresh_check = QtWidgets.QCheckBox("neu beginnen (Autosave ignorieren)")
         self.fresh_check.setEnabled(False)
         layout.addWidget(self.fresh_check)
+        self.image_box = QtWidgets.QGroupBox("Bildparameter (0 / automatisch: aus init.json)")
+        form = QtWidgets.QFormLayout(self.image_box)
+        self.pixel_spin = QtWidgets.QDoubleSpinBox()
+        self.pixel_spin.setDecimals(6)
+        self.pixel_spin.setRange(0.0, 100.0)
+        self.pixel_spin.setSingleStep(0.001)
+        self.pixel_spin.setSuffix(" nm / Pixel")
+        self.fov_spin = QtWidgets.QDoubleSpinBox()
+        self.fov_spin.setDecimals(3)
+        self.fov_spin.setRange(0.0, 100000.0)
+        self.fov_spin.setSuffix(" nm Bildbreite")
+        self.fov_spin.setToolTip("Alternative zur Pixelgroesse: Breite des ganzen Bildes; wird nur ohne Pixelgroesse benutzt.")
+        self.voltage_spin = QtWidgets.QDoubleSpinBox()
+        self.voltage_spin.setRange(0.0, 1000.0)
+        self.voltage_spin.setSuffix(" kV")
+        self.mode_combo = QtWidgets.QComboBox()
+        for label, key in (("automatisch", None), ("STEM (HAADF)", "stem_haadf"), ("TEM", "tem")):
+            self.mode_combo.addItem(label, key)
+        for label, widget in (("Pixelgroesse", self.pixel_spin), ("oder Bildbreite", self.fov_spin),
+                              ("Spannung", self.voltage_spin), ("Modus", self.mode_combo)):
+            form.addRow(label, widget)
+        layout.addWidget(self.image_box)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Open | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -75,10 +97,25 @@ class OpenDialog(QtWidgets.QDialog):
         entry = self.selected()
         self.open_button.setEnabled(entry is not None)
         self.fresh_check.setEnabled(bool(entry and entry.get("autosave")))
+        self.image_box.setEnabled(bool(entry and entry.get("kind") == "dataset"))
 
     def selected(self) -> Optional[Dict[str, Any]]:
         items = self.tree.selectedItems()
         return items[0].data(0, QtCore.Qt.UserRole) if items else None
+
+    def image_options(self) -> Dict[str, Any]:
+        """Only what was filled in; used when a measurement is started without an init.json."""
+
+        options: Dict[str, Any] = {}
+        if self.pixel_spin.value() > 0:
+            options["pixel_size_nm"] = float(self.pixel_spin.value())
+        elif self.fov_spin.value() > 0:
+            options["fov_nm"] = float(self.fov_spin.value())
+        if self.voltage_spin.value() > 0:
+            options["voltage_kV"] = float(self.voltage_spin.value())
+        if self.mode_combo.currentData() is not None:
+            options["mode"] = self.mode_combo.currentData()
+        return options
 
     @property
     def resume(self) -> bool:

@@ -1,5 +1,6 @@
 """Part IV, Section 2: the session."""
 
+import os
 import numpy as np
 import pytest
 import torch
@@ -334,3 +335,19 @@ def test_a_capture_keeps_the_atoms_of_its_step(run):
     with torch.no_grad():
         s.model.params.layers[0].shifts += 1.0               # the optimiser moves the atoms in place
     assert torch.equal(capture.atoms[0][0], before)
+
+
+def test_second_target_is_loaded_and_sent(tmp_path):
+    from temsim.service import sender
+    folder = make_folder(tmp_path / "f", mode="stem_haadf", with_lattice=False)
+    s = Session("cpu")
+    s.open_dataset(folder, border_px=5)
+    assert s.alt_target is None and "i_target" not in s.frame()[1]
+    shape = s.assembly.target.shape
+    np.save(os.path.join(folder, "i_target.npy"), np.arange(np.prod(shape), dtype=np.float32).reshape(shape))
+    s.open_dataset(folder, border_px=5)
+    assert s.alt_target.shape == tuple(shape)
+    data, arrays = s.frame()
+    assert arrays["i_target"].shape == tuple(shape)
+    packet = sender.package(data, arrays)
+    assert packet.target_frames is not None

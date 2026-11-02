@@ -105,6 +105,7 @@ class Controller(QtCore.QObject):
         p.render_btn.clicked.connect(self.render)
         p.tile_combo.currentIndexChanged.connect(lambda _=None: self.canvas.set_view(p.tile_combo.currentData()))
         p.show_atoms.toggled.connect(self.on_show_atoms)
+        p.target_combo.currentIndexChanged.connect(self.on_target_choice)
         p.show_occ_spin.valueChanged.connect(self.on_show_occupancy)
         p.reset_occ_btn.clicked.connect(lambda: self.edit("reset_occupancies"))
         p.reset_int_btn.clicked.connect(lambda: self.edit("reset_intensities"))
@@ -212,6 +213,11 @@ class Controller(QtCore.QObject):
         try:
             if self.canvas.configure([layer.name for layer in frame.layers], frame.stem):
                 self.fill_tiles()
+            combo = self.control.target_combo
+            if combo.isEnabled() != (frame.i_target is not None):
+                combo.setEnabled(frame.i_target is not None)
+                if frame.i_target is None:
+                    combo.setCurrentIndex(0)
             self.canvas.update_frame(frame)
             self.canvas.draw()
         finally:
@@ -242,6 +248,10 @@ class Controller(QtCore.QObject):
     def set_seeding_view(self, seeding: bool) -> None:
         if self.canvas.set_seeding(seeding):
             self.fill_tiles()
+
+    def on_target_choice(self, _index: int) -> None:
+        self.canvas.target_choice = self.control.target_combo.currentData()
+        self._redraw()
 
     def on_show_atoms(self, on: bool) -> None:
         self.canvas.show_atoms = bool(on)
@@ -433,10 +443,10 @@ class Controller(QtCore.QObject):
     def choose_entry(self, listing: Dict[str, Any]) -> None:
         dialog = OpenDialog(listing, self.canvas)
         if dialog.exec() and dialog.selected() is not None:
-            self.open_entry(dialog.selected(), dialog.resume)
+            self.open_entry(dialog.selected(), dialog.resume, **dialog.image_options())
 
-    def open_entry(self, entry: Dict[str, Any], resume: bool = True) -> None:
-        self.open_dataset(entry["path"], resume=resume)
+    def open_entry(self, entry: Dict[str, Any], resume: bool = True, **options) -> None:
+        self.open_dataset(entry["path"], resume=resume, **(options if entry.get("kind") == "dataset" else {}))
 
     def finish(self, save: bool, stop_job: bool = True) -> None:
         """Stop the job (unless ``stop_job`` is false: a core that outlives the window keeps working)

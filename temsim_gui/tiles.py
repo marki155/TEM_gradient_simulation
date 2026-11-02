@@ -17,7 +17,7 @@ field is not trained then.
 
 Three *views* exist: all tiles in a grid of five columns; one tile large with the
 loss curve beside it; and the *comparison* ``sim | target | diff`` with a common
-zoom and the loss underneath.  :func:`plan` turns a view into rows, columns and
+zoom and underneath the loss and a histogram of the pixel intensities inside the zoom window.  :func:`plan` turns a view into rows, columns and
 the positions of the tiles, so that the canvas only has to draw.
 
 Implementation
@@ -37,7 +37,7 @@ HISTOGRAMS = ("hist", "hist_w")
 #: strain maps are not shown for now (the core is told not to send them either)
 SHOW_STRAIN = False
 COMPARE = "compare"
-COMPARE_TILES = ("sim", "target", "diff", "loss")
+COMPARE_TILES = ("sim", "target", "diff", "loss", "zhist")
 COLUMNS = 5
 
 
@@ -51,7 +51,7 @@ def tile_keys(n_layers: int, seeding: bool = False) -> List[str]:
 def titles(layer_names: Sequence[str], stem: bool = False) -> Dict[str, str]:
     out = {COMPARE: "Zoom-Vergleich (Sim | Target | Diff + Loss)",
            "loss": "Loss", "sim": "Simulated", "diff": "Diff", "target": "Target",
-           "ctf": "Probe" if stem else "CTF", "hist": "Histogramm Intensitaet I", "hist_w": "Histogramm Besetzung * I",
+           "ctf": "Probe" if stem else "CTF", "hist": "Histogramm Intensitaet I", "hist_w": "Histogramm Besetzung * I", "zhist": "Intensitaeten im Zoom",
            "ux": "ux", "uy": "uy", "eps_xx": "eps xx", "eps_yy": "eps yy", "eps_xy": "eps xy"}
     for i in range(max(len(layer_names), 1)):
         out[f"pot{i}"] = f"Potential {layer_names[i] if i < len(layer_names) else i}"
@@ -81,7 +81,8 @@ def plan(view: Optional[str], n_layers: int, seeding: bool = False) -> Plan:
 
     keys = tile_keys(n_layers, seeding)
     if view == COMPARE:
-        cells = {"sim": (0, 0, 1, 1), "target": (0, 1, 1, 1), "diff": (0, 2, 1, 1), "loss": (1, 0, 1, 3)}
+        cells = {"sim": (0, 0, 1, 1), "target": (0, 1, 1, 1), "diff": (0, 2, 1, 1), "loss": (1, 0, 1, 2),
+                 "zhist": (1, 2, 1, 1)}
         return Plan(COMPARE, COMPARE_TILES, 2, 3, cells, height_ratios=(3.0, 1.0), share=("sim", "target", "diff"))
     if view in keys:
         if view == "loss":

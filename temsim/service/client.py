@@ -138,7 +138,7 @@ class Client:
         key = data.get("target_key")
         if key is not None and self._target[0] == key:
             arrays.update(self._target[1])
-        for name in ("sim", "diff", "target", "x", "y"):
+        for name in ("sim", "diff", "target", "i_target", "x", "y"):
             if name in arrays and arrays[name].dtype != np.float32:
                 arrays[name] = arrays[name].astype(np.float32)
 

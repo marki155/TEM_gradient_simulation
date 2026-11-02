@@ -69,6 +69,7 @@ class FrameModel:
     diff: np.ndarray
     layers: List[LayerView]
     mask: Optional[np.ndarray] = None
+    i_target: Optional[np.ndarray] = None   # second target (i_target.tif), only shown
     ctf_phase: Optional[np.ndarray] = None
     ctf_ring: Optional[np.ndarray] = None
     probe: Optional[np.ndarray] = None
@@ -110,7 +111,7 @@ class FrameModel:
                    step=int(data.get("steps", 0)), mode=data.get("mode", "tem"),
                    active_group=data.get("active_group"), revision=int(data.get("revision", 0)),
                    sim=arrays["sim"], target=arrays["target"], diff=arrays["diff"], layers=layers,
-                   mask=None if mask is None else np.asarray(mask) > 0,
+                   mask=None if mask is None else np.asarray(mask) > 0, i_target=arrays.get("i_target"),
                    ctf_phase=arrays.get("ctf_phase"), ctf_ring=arrays.get("ctf_ring"), probe=arrays.get("probe"),
                    strain=strain, seeding=data.get("seeding"), group_names=groups, seq=data.get("seq"))
         if data.get("partial") and previous is not None:
@@ -120,7 +121,7 @@ class FrameModel:
     def _take_extras(self, old: "FrameModel") -> None:
         """Keep what a partial frame does not carry; atoms of another count get no stale potentials or arrows."""
 
-        for name in ("ctf_phase", "ctf_ring", "probe"):
+        for name in ("ctf_phase", "ctf_ring", "probe", "i_target"):
             if getattr(self, name) is None:
                 setattr(self, name, getattr(old, name))
         if not self.strain:

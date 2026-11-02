@@ -63,6 +63,8 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.minima_points = np.zeros((0, 2))
         self.minima_verified = True
         self.ctf_note = ""
+        #: which target the target tile shows: ``"target"`` or ``"i_target"`` (if the frame has one)
+        self.target_choice = "target"
 
         self.frame: Optional[FrameModel] = None
         self.history = LossHistory()
@@ -81,6 +83,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.pot_scatters: List[object] = []
         self.hist_lines: Dict[str, list] = {}
         self.compare_scatters: Dict[str, object] = {}
+        self.zoom_hist_lines: list = []
 
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
@@ -154,7 +157,7 @@ class PlotCanvas(FigureCanvasQTAgg):
             first = self.axes_by_key.get(plan.share[0]) if key in plan.share and plan.share[0] in self.axes_by_key else None
             ax = self.fig.add_subplot(spec, sharex=first, sharey=first) if first is not None else self.fig.add_subplot(spec)
             ax.set_title(titles.get(key, key))
-            if key not in ("loss", *tiles.HISTOGRAMS):
+            if key not in ("loss", "zhist", *tiles.HISTOGRAMS):
                 ax.set_xticks([])
                 ax.set_yticks([])
             self.axes_by_key[key] = ax
@@ -225,6 +228,14 @@ class PlotCanvas(FigureCanvasQTAgg):
                 self.hist_lines[key] = lines
                 self.axes_by_key[key].legend(fontsize="x-small")
 
+        self.zoom_hist_lines = []
+        if "zhist" in self.axes_by_key:
+            ax = self.axes_by_key["zhist"]
+            for label in ("Sim", "Target"):
+                line, = ax.plot([], [], label=label, drawstyle="steps-mid")
+                self.zoom_hist_lines.append(line)
+            ax.legend(fontsize="x-small")
+
         self._quivers, self._minima_artists = [], []
         if self.frame is not None:
             self.update_frame(self.frame)
@@ -250,6 +261,12 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._draw_history()
         try:
             renderer = self.get_renderer()
+            # a blit into a buffer that has another size than the figure (after a resize, before the next
+            # full draw) writes outside of it
+            size = (int(renderer.width), int(renderer.height))
+            if self._relayout or size != (int(self.fig.bbox.width), int(self.fig.bbox.height)):
+                self.draw_idle()
+                return False
             box = ax.get_tightbbox(renderer)
             box = (box if box is not None else ax.bbox).expanded(1.15, 1.15)
             if self._loss_box is not None:
@@ -284,6 +301,12 @@ class PlotCanvas(FigureCanvasQTAgg):
         ax.set_xlim(-0.5, shape[1] - 0.5)
         ax.set_ylim(-0.5, shape[0] - 0.5)
 
+    def shown_target(self, frame: Optional[FrameModel] = None) -> np.ndarray:
+        frame = frame or self.frame
+        if self.target_choice == "i_target" and frame.i_target is not None:
+            return frame.i_target
+        return frame.target
+
     def update_frame(self, frame: FrameModel) -> None:
         self.frame = frame
         images, axes = self.images, self.axes_by_key
@@ -291,7 +314,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._shape = frame.shape
         step = frame.step
 
-        for key, array in (("sim", frame.sim), ("diff", frame.diff), ("target", frame.target)):
+        for key, array in (("sim", frame.sim), ("diff", frame.diff), ("target", self.shown_target(frame))):
             artist = images.get(key)
             if artist is None:
                 continue
@@ -301,7 +324,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         if self.view == tiles.COMPARE:
             self.images["diff"].set_cmap("RdBu_r")
         if "target" in axes:
-            axes["target"].set_title(f"Target (Step {step})")
+            axes["target"].set_title(f"{'I-Target' if self.shown_target(frame) is frame.i_target else 'Target'} (Step {step})")
             self._update_target_atoms()
 
         for key in tiles.STRAIN:
@@ -386,6 +409,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._refresh_arrows()
         self._refresh_compare()
         self._refresh_minima()
+        self._refresh_zoom_hist()
         if self.target_scatter is not None and len(self.target_scatter.get_offsets()):
             self.target_scatter.set_sizes(np.full(len(self.target_scatter.get_offsets()),
                                                   self._marker_size(self.axes_by_key.get("target"))))
@@ -433,7 +457,7 @@ class PlotCanvas(FigureCanvasQTAgg):
             scatter.set_offsets(np.column_stack([pos[keep, 1], pos[keep, 0]]) if keep.any() else np.empty((0, 2)))
             scatter.set_sizes(np.full(int(keep.sum()), self._marker_size(ax) * 2))
         ax = self.axes_by_key["sim"]
-        limits = overlays.window_limits(frame.sim, frame.target, ax.get_xlim(), ax.get_ylim())
+        limits = overlays.window_limits(frame.sim, self.shown_target(frame), ax.get_xlim(), ax.get_ylim())
         if limits is None:
             return
         self.images["sim"].set_clim(*limits)
@@ -446,6 +470,39 @@ class PlotCanvas(FigureCanvasQTAgg):
             self.images["diff"].set_clim(-limit, limit)
         for key, title in (("sim", "Simulated"), ("target", "Target"), ("diff", "Diff (Sim - Target)")):
             self.axes_by_key[key].set_title(f"{title} (Step {frame.step})")
+
+    def _refresh_zoom_hist(self) -> None:
+        """Histogram of the pixel intensities of sim and target inside the zoom window (comparison view)."""
+
+        frame, ax = self.frame, self.axes_by_key.get("zhist")
+        view = self.axes_by_key.get("sim")
+        if frame is None or ax is None or view is None or len(self.zoom_hist_lines) != 2:
+            return
+        x0, x1, y0, y1 = overlays.window(view.get_xlim(), view.get_ylim())
+        height, width = frame.sim.shape
+        r0, r1 = int(max(np.floor(y0), 0)), int(min(np.ceil(y1) + 1, height))
+        c0, c1 = int(max(np.floor(x0), 0)), int(min(np.ceil(x1) + 1, width))
+        if r1 <= r0 or c1 <= c0:
+            return
+        crops = [frame.sim[r0:r1, c0:c1], self.shown_target(frame)[r0:r1, c0:c1]]
+        if frame.mask is not None:
+            keep = frame.mask[r0:r1, c0:c1]
+            crops = [c[keep] if keep.any() else c.ravel() for c in crops]
+        crops = [c[np.isfinite(c)].ravel() for c in crops]
+        if not all(c.size for c in crops):
+            return
+        low, high = min(float(c.min()) for c in crops), max(float(c.max()) for c in crops)
+        if high <= low:
+            low, high = low - 0.5, high + 0.5
+        edges = np.linspace(low, high, 65)
+        centres = 0.5 * (edges[:-1] + edges[1:])
+        top = 1.0
+        for line, values in zip(self.zoom_hist_lines, crops):
+            counts = np.histogram(values, bins=edges)[0]
+            line.set_data(centres, counts)
+            top = max(top, float(counts.max()))
+        ax.set_xlim(low, high)
+        ax.set_ylim(0, top * 1.05)
 
     def _refresh_minima(self) -> None:
         self._drop(self._minima_artists)
