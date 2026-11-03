@@ -537,12 +537,19 @@ class InsertPanel(QtWidgets.QGroupBox):
         self.prop_angles.setToolTip("Anzahl der Drehwinkel zwischen 0 und 180 Grad, die je Atom probiert werden.")
         self.prop_gain = double_spin(0.0, 0.0, 1.0, 0.0005, 5,
                                      tip="Der Loss muss mindestens um diesen Betrag besser werden, damit gespalten wird.")
+        self.prop_first = QtWidgets.QComboBox()
+        self.prop_first.addItem("Alle Winkel probieren, den besten nehmen", False)
+        self.prop_first.addItem("Beim ersten Winkel mit besserem Loss weiter", True)
+        self.prop_first.setToolTip("Erster Treffer: sobald ein Winkel den Loss um den Mindestgewinn unter den aktuellen\n"
+                                   "Loss bringt, wird gespalten und das naechste Atom kommt dran (schneller).\n"
+                                   "Sonst werden alle Winkel getestet und der beste genommen.")
         self.propeller_btn = QtWidgets.QPushButton("Propeller starten")
         self.propeller_btn.setToolTip("Pause/Resume/Stop gelten auch hierfuer.")
         prop.addRow(note)
         prop.addRow("Abstand", self.prop_distance)
         prop.addRow("Winkel", self.prop_angles)
         prop.addRow("Mindestgewinn Loss", self.prop_gain)
+        prop.addRow("Suche", self.prop_first)
         prop.addRow(self.propeller_btn)
         layout.addWidget(self.propeller_box)
 
@@ -553,7 +560,7 @@ class InsertPanel(QtWidgets.QGroupBox):
 
     def propeller_options(self) -> Dict[str, Any]:
         return {"distance_A": float(self.prop_distance.value()), "angles": int(self.prop_angles.value()),
-                "min_gain": float(self.prop_gain.value())}
+                "min_gain": float(self.prop_gain.value()), "first": bool(self.prop_first.currentData())}
 
     @property
     def method(self) -> str:

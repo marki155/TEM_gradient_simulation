@@ -442,13 +442,15 @@ class Seeder:
         return self._accept_or_reject(remove, add, removed, merged)
 
     # ------------------------------------------------------------------ propeller
-    def propeller(self, index: int, distance_px: float, n_angles: int = 12, min_gain: float = 0.0) -> bool:
+    def propeller(self, index: int, distance_px: float, n_angles: int = 12, min_gain: float = 0.0,
+                  first: bool = False) -> bool:
         """Split atom ``index`` into two atoms at distance ``distance_px`` (centred on it).
 
         The axis of the pair is turned through ``n_angles`` angles in [0, pi); the angle with the best
         loss counts.  The split is kept only if that loss is lower than the current one by more than
         ``min_gain``; otherwise nothing changes.  The new atoms are appended, so atoms with a smaller
-        index keep theirs.  Returns whether the atom was split.
+        index keep theirs.  With ``first`` the search ends at the first angle that is good enough, otherwise
+        all angles are tried and the best one counts.  Returns whether the atom was split.
         """
 
         c, store = self.config, self.store
@@ -473,6 +475,8 @@ class Seeder:
                     store.undo(token)
             if math.isfinite(loss) and (best is None or loss < best[0]):
                 best = (loss, add, options)
+                if first and loss < self.loss - float(min_gain):
+                    break
         self.stats.trials += 1
         if best is None or not best[0] < self.loss - float(min_gain):
             return False

@@ -174,11 +174,11 @@ class PropellerJob(Job):
     BUDGET = 0.4
 
     def __init__(self, session: Session, layer=None, distance_A: float = 0.5, angles: int = 12,
-                 min_gain: float = 0.0):
+                 min_gain: float = 0.0, first: bool = False):
         super().__init__(session)
         self.seeder = session.make_seeder(layer)
         self.distance_px = float(distance_A) / self.seeder.pixel_A
-        self.angles, self.min_gain = int(angles), float(min_gain)
+        self.angles, self.min_gain, self.first = int(angles), float(min_gain), bool(first)
         self.total = self.seeder.n_atoms
         self.cursor = self.total - 1
         self.count = 0
@@ -190,7 +190,7 @@ class PropellerJob(Job):
             raise SessionError("the seeding configuration changed; start again")
         deadline = time.monotonic() + self.BUDGET
         while self.cursor >= 0 and time.monotonic() < deadline:
-            if seeder.propeller(self.cursor, self.distance_px, self.angles, self.min_gain):
+            if seeder.propeller(self.cursor, self.distance_px, self.angles, self.min_gain, self.first):
                 self.split += 1
             self.cursor -= 1
             self.count += 1

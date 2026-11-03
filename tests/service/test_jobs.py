@@ -116,3 +116,14 @@ def test_propeller_job_visits_every_atom_and_never_worsens_the_loss(tmp_path):
     assert job.count == before_atoms == status["limit"]
     assert status["atoms"] == before_atoms + job.split and status["loss"] <= before_loss
     assert s.info()["layers"][0]["atoms"] == status["atoms"]
+
+
+def test_propeller_first_hit_needs_no_more_trials_than_the_full_search(tmp_path):
+    s = Session("cpu")
+    s.open_dataset(make_folder(tmp_path / "f", mode="stem_haadf", with_lattice=False), border_px=5)
+    SeedingJob(s, trials=60, chunk=60).advance()
+    job = PropellerJob(s, distance_A=0.4, angles=6, first=True)
+    before = s.seeder.loss
+    while not job.done:
+        status = job.advance()
+    assert status["loss"] <= before and job.count == status["limit"]

@@ -386,7 +386,7 @@ class Server:
 
     def cmd_start_propeller(self, identity, args, arrays) -> Result:
         self.session.require_model()
-        keys = ("layer", "distance_A", "angles", "min_gain")
+        keys = ("layer", "distance_A", "angles", "min_gain", "first")
         return self._start(PropellerJob(self.session, **{k: args[k] for k in keys if k in args}))
 
     def cmd_pause(self, identity, args, arrays) -> Result:
