@@ -99,6 +99,7 @@ class Controller(QtCore.QObject):
         c.error.connect(self.on_error)
         p.start_btn.clicked.connect(self.start_training)
         p.seed_btn.clicked.connect(self.start_seeding)
+        self.insert.propeller_btn.clicked.connect(self.start_propeller)
         p.pause_btn.clicked.connect(lambda: self.connection.submit_now(self.client.pause))
         p.resume_btn.clicked.connect(lambda: self.send(self.client.resume))
         p.stop_btn.clicked.connect(lambda: self.connection.submit_now(self.client.stop))
@@ -187,8 +188,9 @@ class Controller(QtCore.QObject):
         self.state = data.get("state", "idle")
         self.job_kind = job.get("kind") if self.state != "idle" else None
         self.control.set_state(self.state, self.job_kind, open_=bool(data.get("open", True)))
+        self.insert.propeller_btn.setEnabled(self.state == "idle" and bool(data.get("open", True)))
         if self.job_kind is not None:
-            self.control.set_mode(INSERT if self.job_kind == "seeding" else TRAINING)
+            self.control.set_mode(INSERT if self.job_kind in ("seeding", "propeller") else TRAINING)
         if previous != "idle" and self.state == "idle":
             self.render()
             self.request_values()
@@ -198,6 +200,8 @@ class Controller(QtCore.QObject):
     def on_light(self, data: Dict[str, Any]) -> None:
         if data.get("kind") == "seeding":
             step, loss = data.get("trials"), data.get("loss")
+        elif data.get("kind") == "propeller":
+            step, loss = data.get("count"), data.get("loss")
         else:
             step, loss = data.get("step"), data.get("loss")
         self.control.set_progress(step, loss)
@@ -307,6 +311,12 @@ class Controller(QtCore.QObject):
         self.set_seeding_view(True)
         options = self.seeding.job_options()
         self.send(lambda: self.client.start_seeding(**options))
+
+    def start_propeller(self) -> None:
+        self.seeded = True
+        self.set_seeding_view(True)
+        options = self.insert.propeller_options()
+        self.send(lambda: self.client.start_propeller(**options), lambda _status: self.notify("Propeller laeuft"))
 
     def edit(self, name: str, **args) -> None:
         def done(report) -> None:

@@ -243,6 +243,9 @@ class Client:
     def start_training(self, steps: Optional[int] = None, refine: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.call("start_training", {"steps": steps, "refine": refine}).result["status"]
 
+    def start_propeller(self, **options) -> Dict[str, Any]:
+        return self.call("start_propeller", options).result["status"]
+
     def start_seeding(self, **options) -> Dict[str, Any]:
         return self.call("start_seeding", options).result["status"]
 

@@ -164,3 +164,42 @@ class SeedingJob(Job):
     def status(self) -> Dict[str, Any]:
         return {**self.session.seeding_status(), "kind": self.kind, "done": self.done, "count": self.count,
                 "limit": self.limit}
+
+
+class PropellerJob(Job):
+    """Go through all atoms of a layer once and split each where that lowers the loss
+    (:meth:`~temsim.learning.seeding.seeder.Seeder.propeller`); the atoms are visited from the last to the first."""
+
+    kind = "propeller"
+    BUDGET = 0.4
+
+    def __init__(self, session: Session, layer=None, distance_A: float = 0.5, angles: int = 12,
+                 min_gain: float = 0.0):
+        super().__init__(session)
+        self.seeder = session.make_seeder(layer)
+        self.distance_px = float(distance_A) / self.seeder.pixel_A
+        self.angles, self.min_gain = int(angles), float(min_gain)
+        self.total = self.seeder.n_atoms
+        self.cursor = self.total - 1
+        self.count = 0
+        self.split = 0
+
+    def advance(self, capture: bool = False) -> Dict[str, Any]:
+        seeder = self.seeder
+        if self.session.seeder is not seeder:
+            raise SessionError("the seeding configuration changed; start again")
+        deadline = time.monotonic() + self.BUDGET
+        while self.cursor >= 0 and time.monotonic() < deadline:
+            if seeder.propeller(self.cursor, self.distance_px, self.angles, self.min_gain):
+                self.split += 1
+            self.cursor -= 1
+            self.count += 1
+        if self.cursor < 0:
+            self.done = True
+            self.session.revision += 1
+        return self.status()
+
+    def status(self) -> Dict[str, Any]:
+        s = self.seeder
+        return {"kind": self.kind, "done": self.done, "count": self.count, "limit": self.total, "split": self.split,
+                "atoms": s.n_atoms, "loss": s.loss if math.isfinite(s.loss) else None}

@@ -441,6 +441,43 @@ class Seeder:
         removed = len(remove) - (1 if kind == "move" else 0)
         return self._accept_or_reject(remove, add, removed, merged)
 
+    # ------------------------------------------------------------------ propeller
+    def propeller(self, index: int, distance_px: float, n_angles: int = 12, min_gain: float = 0.0) -> bool:
+        """Split atom ``index`` into two atoms at distance ``distance_px`` (centred on it).
+
+        The axis of the pair is turned through ``n_angles`` angles in [0, pi); the angle with the best
+        loss counts.  The split is kept only if that loss is lower than the current one by more than
+        ``min_gain``; otherwise nothing changes.  The new atoms are appended, so atoms with a smaller
+        index keep theirs.  Returns whether the atom was split.
+        """
+
+        c, store = self.config, self.store
+        if not 0 <= index < store.n or (c.max_atoms is not None and store.n >= c.max_atoms):
+            return False
+        centre, half = store.positions[index].copy(), 0.5 * float(distance_px)
+        best = None                                          # (loss, add, options)
+        for k in range(max(int(n_angles), 1)):
+            theta = math.pi * k / max(int(n_angles), 1)
+            shift = half * np.array([math.sin(theta), math.cos(theta)])
+            add = np.array([centre + shift, centre - shift])
+            if not all(self.region.inside(*xy, self.margin) for xy in add):
+                continue
+            if self.uses_local:
+                trial, options = self._best_trial([index], add)
+                loss = math.inf if trial is None else trial.loss
+            else:
+                token = store.apply([index], add)
+                try:
+                    loss, options = self.evaluate(), None
+                finally:
+                    store.undo(token)
+            if math.isfinite(loss) and (best is None or loss < best[0]):
+                best = (loss, add, options)
+        self.stats.trials += 1
+        if best is None or not best[0] < self.loss - float(min_gain):
+            return False
+        return self._accept_or_reject([index], best[1], 0, False, options=best[2])
+
     # ------------------------------------------------------------------ given points
     def filter_points(self, points, commit=False, check_margin=True, check_collisions=True,
                       check_loss=True) -> np.ndarray:

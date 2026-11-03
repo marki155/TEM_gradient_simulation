@@ -2,7 +2,7 @@
 
 import pytest
 
-from temsim.service.jobs import Clock, SeedingJob, TrainingJob
+from temsim.service.jobs import Clock, PropellerJob, SeedingJob, TrainingJob
 from temsim.service.session import Session, SessionError
 
 from .helpers import make_folder, make_run
@@ -103,3 +103,16 @@ def test_seeding_chunk_ends_early_so_stop_is_not_kept_waiting(monkeypatch):
     start = time.monotonic()
     job.advance()
     assert time.monotonic() - start < 1.5 and 0 < job.count < 1000
+
+
+def test_propeller_job_visits_every_atom_and_never_worsens_the_loss(tmp_path):
+    s = Session("cpu")
+    s.open_dataset(make_folder(tmp_path / "f", mode="stem_haadf", with_lattice=False), border_px=5)
+    SeedingJob(s, trials=60, chunk=60).advance()
+    before_atoms, before_loss = s.seeder.n_atoms, s.seeder.loss
+    job = PropellerJob(s, distance_A=0.4, angles=6)
+    while not job.done:
+        status = job.advance()
+    assert job.count == before_atoms == status["limit"]
+    assert status["atoms"] == before_atoms + job.split and status["loss"] <= before_loss
+    assert s.info()["layers"][0]["atoms"] == status["atoms"]

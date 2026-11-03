@@ -231,8 +231,9 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.zoom_hist_lines = []
         if "zhist" in self.axes_by_key:
             ax = self.axes_by_key["zhist"]
-            for label in ("Sim", "Target"):
-                line, = ax.plot([], [], label=label, drawstyle="steps-mid")
+            for i in range(max(len(self.layer_names), 1)):
+                label = self.layer_names[i] if i < len(self.layer_names) else str(i)
+                line, = ax.plot([], [], label=label)
                 self.zoom_hist_lines.append(line)
             ax.legend(fontsize="x-small")
 
@@ -472,33 +473,33 @@ class PlotCanvas(FigureCanvasQTAgg):
             self.axes_by_key[key].set_title(f"{title} (Step {frame.step})")
 
     def _refresh_zoom_hist(self) -> None:
-        """Histogram of the pixel intensities of sim and target inside the zoom window (comparison view)."""
+        """Histogram of the atom intensities I (as ``hist``) of the atoms inside the zoom window (comparison view)."""
 
         frame, ax = self.frame, self.axes_by_key.get("zhist")
         view = self.axes_by_key.get("sim")
-        if frame is None or ax is None or view is None or len(self.zoom_hist_lines) != 2:
+        if frame is None or ax is None or view is None or len(self.zoom_hist_lines) != max(len(frame.layers), 1):
             return
         x0, x1, y0, y1 = overlays.window(view.get_xlim(), view.get_ylim())
-        height, width = frame.sim.shape
-        r0, r1 = int(max(np.floor(y0), 0)), int(min(np.ceil(y1) + 1, height))
-        c0, c1 = int(max(np.floor(x0), 0)), int(min(np.ceil(x1) + 1, width))
-        if r1 <= r0 or c1 <= c0:
+        values = []
+        for layer in frame.layers:
+            keep = layer.visible(self.min_occupancy)
+            pos = layer.pos
+            keep = keep & (pos[:, 0] >= y0) & (pos[:, 0] <= y1) & (pos[:, 1] >= x0) & (pos[:, 1] <= x1)
+            values.append(layer.intensity[keep])
+        finite = np.concatenate(values) if values else np.zeros(0)
+        ax.set_title(f"{tiles.titles(self.layer_names, self.stem)['zhist']} ({finite.size} Atome)")
+        if finite.size == 0:
+            for line in self.zoom_hist_lines:
+                line.set_data([], [])
             return
-        crops = [frame.sim[r0:r1, c0:c1], self.shown_target(frame)[r0:r1, c0:c1]]
-        if frame.mask is not None:
-            keep = frame.mask[r0:r1, c0:c1]
-            crops = [c[keep] if keep.any() else c.ravel() for c in crops]
-        crops = [c[np.isfinite(c)].ravel() for c in crops]
-        if not all(c.size for c in crops):
-            return
-        low, high = min(float(c.min()) for c in crops), max(float(c.max()) for c in crops)
+        low, high = float(finite.min()), float(finite.max())
         if high <= low:
             low, high = low - 0.5, high + 0.5
-        edges = np.linspace(low, high, 65)
+        edges = np.linspace(low, high, 41)
         centres = 0.5 * (edges[:-1] + edges[1:])
         top = 1.0
-        for line, values in zip(self.zoom_hist_lines, crops):
-            counts = np.histogram(values, bins=edges)[0]
+        for line, v in zip(self.zoom_hist_lines, values):
+            counts = np.histogram(v, bins=edges)[0]
             line.set_data(centres, counts)
             top = max(top, float(counts.max()))
         ax.set_xlim(low, high)

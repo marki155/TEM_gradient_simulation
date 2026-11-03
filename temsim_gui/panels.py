@@ -482,7 +482,7 @@ class InsertPanel(QtWidgets.QGroupBox):
     """Insertion of atoms: one choice of method, the shared collision rule, the options of the method."""
 
     METHODS = (("Zufaellig wuerfeln (Seeding)", "seeding"), ("Aus Diff-Minima", "minima"),
-               ("Manuell (Klick)", "manual"))
+               ("Manuell (Klick)", "manual"), ("Propeller (Atome spalten)", "propeller"))
     COLLISION = (("touch_A", "Entfernen bis [A]", "Atome, die naeher als das am neuen Atom liegen, werden entfernt."),
                  ("merge_A", "Verschieben bis [A]",
                   "Zwischen 'Entfernen bis' und diesem Radius wird nicht neu eingefuegt:\n"
@@ -523,10 +523,37 @@ class InsertPanel(QtWidgets.QGroupBox):
         manual_layout.addRow(self.manual)
         manual_layout.addRow("Entfernradius", self.radius_spin)
         layout.addWidget(self.manual_box)
+        self.propeller_box = QtWidgets.QWidget()
+        prop = QtWidgets.QFormLayout(self.propeller_box)
+        prop.setContentsMargins(0, 0, 0, 0)
+        note = QtWidgets.QLabel("Geht alle Atome durch (vom letzten zum ersten) und spaltet jedes in zwei Atome im\n"
+                                "gewaehlten Abstand. Die Achse des Paares wird gedreht, der Winkel mit dem besten\n"
+                                "Loss zaehlt. Wird der Loss mit keinem Winkel besser, bleibt das Atom ungespalten.")
+        self.prop_distance = double_spin(0.5, 0.05, 10.0, 0.05, 2, suffix=" A",
+                                         tip="Abstand der beiden neuen Atome voneinander (Angstroem).")
+        self.prop_angles = QtWidgets.QSpinBox()
+        self.prop_angles.setRange(1, 90)
+        self.prop_angles.setValue(12)
+        self.prop_angles.setToolTip("Anzahl der Drehwinkel zwischen 0 und 180 Grad, die je Atom probiert werden.")
+        self.prop_gain = double_spin(0.0, 0.0, 1.0, 0.0005, 5,
+                                     tip="Der Loss muss mindestens um diesen Betrag besser werden, damit gespalten wird.")
+        self.propeller_btn = QtWidgets.QPushButton("Propeller starten")
+        self.propeller_btn.setToolTip("Pause/Resume/Stop gelten auch hierfuer.")
+        prop.addRow(note)
+        prop.addRow("Abstand", self.prop_distance)
+        prop.addRow("Winkel", self.prop_angles)
+        prop.addRow("Mindestgewinn Loss", self.prop_gain)
+        prop.addRow(self.propeller_btn)
+        layout.addWidget(self.propeller_box)
+
         self.seeding.config_changed.connect(self.config_changed.emit)
         self.method_combo.currentIndexChanged.connect(lambda _=None: self._method_changed())
         self._active = True
         self.set_active(False)
+
+    def propeller_options(self) -> Dict[str, Any]:
+        return {"distance_A": float(self.prop_distance.value()), "angles": int(self.prop_angles.value()),
+                "min_gain": float(self.prop_gain.value())}
 
     @property
     def method(self) -> str:
@@ -547,6 +574,7 @@ class InsertPanel(QtWidgets.QGroupBox):
         self.seeding.setVisible(self.method == "seeding")
         self.minima.setVisible(self.method == "minima")
         self.manual_box.setVisible(self.method == "manual")
+        self.propeller_box.setVisible(self.method == "propeller")
         if not self._active or self.method != "minima":
             self.minima.show_check.setChecked(False)
 

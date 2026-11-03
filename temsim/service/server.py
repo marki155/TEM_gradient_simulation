@@ -38,7 +38,7 @@ import numpy as np
 import zmq
 
 from . import assemble, protocol
-from .jobs import Clock, Job, SeedingJob, TrainingJob
+from .jobs import Clock, Job, PropellerJob, SeedingJob, TrainingJob
 from .sender import Flow, FrameSender, Packet, package
 from .session import Session, SessionError
 
@@ -383,6 +383,11 @@ class Server:
             self.session.seeding_config(args["config"])
         keys = ("layer", "trials", "chunk", "tune_every", "tune_steps")
         return self._start(SeedingJob(self.session, **{k: args[k] for k in keys if k in args}))
+
+    def cmd_start_propeller(self, identity, args, arrays) -> Result:
+        self.session.require_model()
+        keys = ("layer", "distance_A", "angles", "min_gain")
+        return self._start(PropellerJob(self.session, **{k: args[k] for k in keys if k in args}))
 
     def cmd_pause(self, identity, args, arrays) -> Result:
         if self.job is not None:

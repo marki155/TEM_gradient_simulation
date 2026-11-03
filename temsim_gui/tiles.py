@@ -17,7 +17,7 @@ field is not trained then.
 
 Three *views* exist: all tiles in a grid of five columns; one tile large with the
 loss curve beside it; and the *comparison* ``sim | target | diff`` with a common
-zoom and underneath the loss and a histogram of the pixel intensities inside the zoom window.  :func:`plan` turns a view into rows, columns and
+zoom and underneath the loss and a histogram of the atom intensities inside the zoom window.  :func:`plan` turns a view into rows, columns and
 the positions of the tiles, so that the canvas only has to draw.
 
 Implementation
@@ -51,7 +51,7 @@ def tile_keys(n_layers: int, seeding: bool = False) -> List[str]:
 def titles(layer_names: Sequence[str], stem: bool = False) -> Dict[str, str]:
     out = {COMPARE: "Zoom-Vergleich (Sim | Target | Diff + Loss)",
            "loss": "Loss", "sim": "Simulated", "diff": "Diff", "target": "Target",
-           "ctf": "Probe" if stem else "CTF", "hist": "Histogramm Intensitaet I", "hist_w": "Histogramm Besetzung * I", "zhist": "Intensitaeten im Zoom",
+           "ctf": "Probe" if stem else "CTF", "hist": "Histogramm Intensitaet I", "hist_w": "Histogramm Besetzung * I", "zhist": "Histogramm I im Zoom",
            "ux": "ux", "uy": "uy", "eps_xx": "eps xx", "eps_yy": "eps yy", "eps_xy": "eps xy"}
     for i in range(max(len(layer_names), 1)):
         out[f"pot{i}"] = f"Potential {layer_names[i] if i < len(layer_names) else i}"
