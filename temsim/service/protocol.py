@@ -108,6 +108,7 @@ COMMANDS: Dict[str, str] = {
     "set_active_group": "group whose mask, target and layers count",
     "start_training": "begin optimisation",
     "start_seeding": "begin seeding",
+    "set_window": "optimise and insert only inside [row0, row1, col0, col1] (null: everywhere)",
     "start_propeller": "split every atom into two where that lowers the loss (angle by angle)",
     "pause": "stop after the current step, keep the job",
     "resume": "continue a paused job",

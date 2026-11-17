@@ -16,6 +16,9 @@ import torch
 from .model import Model
 from .optimiser import AdamGroups
 
+#: per-atom tensors that stay put for atoms outside the loss window
+FROZEN_FIELDS = ("shifts", "intensity", "logit")
+
 
 @dataclass
 class StepResult:
@@ -56,13 +59,40 @@ class Trainer:
         kept: Optional[Dict[str, object]] = {} if keep else None
         loss, data, prior = self.model.loss(kept)
         if trainable:
+            frozen = self._outside_window()
             self.optimiser.zero_grad()
             loss.backward()
             self.optimiser.step()
+            self._restore(frozen)
         value = float(loss.detach())
         self.steps += 1
         self.history.append(value)
         return StepResult(self.steps, value, data, prior, kept)
+
+    @torch.no_grad()
+    def _outside_window(self) -> list:
+        """Per layer: the atoms outside the loss window and their values, so that a step leaves them alone."""
+
+        window = self.model.objective.window
+        if window is None:
+            return []
+        r0, r1, c0, c1 = window
+        params, frozen = self.model.params, []
+        for i, lp in enumerate(params.layers):
+            if len(lp) == 0:
+                continue
+            pos = params.positions(i)
+            out = (pos[:, 0] < r0) | (pos[:, 0] >= r1) | (pos[:, 1] < c0) | (pos[:, 1] >= c1)
+            if bool(out.any()):
+                frozen.append((lp, out, {name: getattr(lp, name)[out].clone() for name in FROZEN_FIELDS}))
+        return frozen
+
+    @staticmethod
+    @torch.no_grad()
+    def _restore(frozen: list) -> None:
+        for lp, out, values in frozen:
+            for name, value in values.items():
+                getattr(lp, name)[out] = value
 
     def run(self, n: int, callback: Optional[Callable[[StepResult], None]] = None,
             should_stop: Optional[Callable[[], bool]] = None) -> List[StepResult]:

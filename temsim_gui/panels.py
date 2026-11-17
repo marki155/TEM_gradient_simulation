@@ -121,6 +121,17 @@ class ControlPanel(QtWidgets.QWidget):
                                          tip="Nur Atome mit sigmoid(Occupancy) ab diesem Wert werden angezeigt "
                                              "(Positionen, Pfeile,\nHistogramm). 0 = alle. Das Modell bleibt unveraendert.")
         form.addRow("Anzeige ab Occ", self.show_occ_spin)
+        self.window_check = QtWidgets.QCheckBox("Nur im Zoom-Bereich optimieren / einfuegen")
+        self.window_check.setToolTip("Beim Anhaken wird der aktuelle Zoom (am besten im Zoom-Vergleich Sim | Target | Diff)\n"
+                                     "zum Arbeitsbereich (oranger Rahmen): der Loss zaehlt nur dort, Atome ausserhalb\n"
+                                     "behalten beim Training ihre Werte, Seeding / Propeller / Minima wirken nur dort.\n"
+                                     "Globale Parameter (Optik, Gruppen-Verschiebung, Verzerrung) lernen weiter, aber\n"
+                                     "nur aus dem Bereich.")
+        self.window_btn = QtWidgets.QPushButton("Bereich = aktueller Zoom")
+        self.window_btn.setToolTip("Den Arbeitsbereich auf den jetzigen Zoom setzen. Ein laufendes Seeding endet dabei.")
+        self.window_btn.setEnabled(False)
+        section.content_layout.addWidget(self.window_check)
+        section.content_layout.addWidget(self.window_btn)
         self.reset_zoom_btn = QtWidgets.QPushButton("Zoom zuruecksetzen")
         self.reset_losses_btn = QtWidgets.QPushButton("Loss-Verlauf leeren")
         section.content_layout.addWidget(row_of(self.reset_zoom_btn, self.reset_losses_btn))

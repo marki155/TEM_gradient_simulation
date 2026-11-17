@@ -147,6 +147,8 @@ class Seeder:
         self._raw = None
         self._landscape = None
         self._distance = (-1, None)
+        #: remove and move only atoms inside the region (set while the loss is cut to a window)
+        self.edit_inside_only = False
         self.resync(sync_store=False)
 
     # ------------------------------------------------------------------ radii in pixels
@@ -422,11 +424,14 @@ class Seeder:
             return bool(self._relax_trial())
 
         merged = False
+        if kind in ("remove", "move"):
+            index = self._pick_atom()
+            if index is None:
+                return False
         if kind == "remove":
-            remove = [int(self.rng.integers(n))]
+            remove = [index]
             add = np.zeros((0, 2))
         elif kind == "move":
-            index = int(self.rng.integers(n))
             if self.rng.random() < 0.5:
                 jump = store.positions[index] + self.rng.normal(0.0, self.move_sigma_px, 2)
                 xy, graveyard, merged = self.resolve(*jump, exclude=[index])
@@ -440,6 +445,15 @@ class Seeder:
             add = np.array([xy])
         removed = len(remove) - (1 if kind == "move" else 0)
         return self._accept_or_reject(remove, add, removed, merged)
+
+    def _pick_atom(self) -> Optional[int]:
+        """A random atom to remove or move; with ``edit_inside_only`` one inside the region."""
+
+        n = self.store.n
+        if not self.edit_inside_only:
+            return int(self.rng.integers(n))
+        inside = [i for i, (x, y) in enumerate(self.store.positions) if self.region.inside(x, y, 0.0)]
+        return int(self.rng.choice(inside)) if inside else None
 
     # ------------------------------------------------------------------ propeller
     def propeller(self, index: int, distance_px: float, n_angles: int = 12, min_gain: float = 0.0,

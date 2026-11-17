@@ -50,7 +50,7 @@ CHANGES_MODEL = frozenset({"set_values", "set_train", "set_param", "set_loss", "
                            "set_active_group", "edit", "insert_minima", "seeding_config"})
 #: commands after which the model is saved at once (the user has done something that is expensive to redo)
 #: commands after which a picture that is waiting to be sent would be wrong
-CANCELS_FRAMES = frozenset({"set_values", "set_train", "set_active_group", "edit", "insert_minima"})
+CANCELS_FRAMES = frozenset({"set_values", "set_train", "set_active_group", "edit", "insert_minima", "set_window"})
 SAVES_AT_ONCE = frozenset({"pause", "stop", "edit", "insert_minima"})
 LIGHT_INTERVAL = 0.05
 #: while training, every this many steps the images of that step are sent (0: only the paced frames)
@@ -413,6 +413,11 @@ class Server:
         report = self.session.edit(args["name"], **(args.get("args") or {}))
         self.clock.frame_now()
         return {"report": report}, {}
+
+    def cmd_set_window(self, identity, args, arrays) -> Result:
+        result = self.session.set_window(args.get("window"))
+        self.clock.frame_now()
+        return result, {}
 
     def cmd_minima(self, identity, args, arrays) -> Result:
         points = self.session.minima(**args)

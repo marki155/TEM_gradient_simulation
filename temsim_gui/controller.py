@@ -49,6 +49,7 @@ from .connection import Connection
 from .frame_model import FrameModel
 from .open_dialog import OpenDialog
 from .panels import INSERT, TRAINING, ControlPanel, InsertPanel, StrainPanel
+from .widgets import set_quietly
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
 
@@ -107,6 +108,8 @@ class Controller(QtCore.QObject):
         p.tile_combo.currentIndexChanged.connect(lambda _=None: self.canvas.set_view(p.tile_combo.currentData()))
         p.show_atoms.toggled.connect(self.on_show_atoms)
         p.target_combo.currentIndexChanged.connect(self.on_target_choice)
+        p.window_check.toggled.connect(self.on_window_toggled)
+        p.window_btn.clicked.connect(lambda: self.on_window_toggled(True))
         p.show_occ_spin.valueChanged.connect(self.on_show_occupancy)
         p.reset_occ_btn.clicked.connect(lambda: self.edit("reset_occupancies"))
         p.reset_int_btn.clicked.connect(lambda: self.edit("reset_intensities"))
@@ -163,6 +166,10 @@ class Controller(QtCore.QObject):
     def on_model(self, result) -> None:
         info, experiment, settings, config = result
         self.info = info
+        window = info.get("window")
+        set_quietly(self.control.window_check, window is not None)
+        self.control.window_btn.setEnabled(window is not None)
+        self.canvas.set_work_window(window)
         self.workspace = info.get("workspace")
         self.experiment = experiment
         self.control.set_state(self.state, self.job_kind, open_=bool(info.get("open")))
@@ -252,6 +259,24 @@ class Controller(QtCore.QObject):
     def set_seeding_view(self, seeding: bool) -> None:
         if self.canvas.set_seeding(seeding):
             self.fill_tiles()
+
+    def on_window_toggled(self, on: bool) -> None:
+        """Send the zoom as the working window of the core (or lift it)."""
+
+        window = self.canvas.zoom_window() if on else None
+        if on and window is None:
+            self.notify("Kein Bild zum Zoomen da")
+            set_quietly(self.control.window_check, False)
+            return
+        self.control.window_btn.setEnabled(bool(on))
+
+        def done(result) -> None:
+            shown = result.get("window")
+            self.canvas.set_work_window(shown)
+            self.notify("Arbeitsbereich: ganzes Bild" if shown is None else
+                        f"Arbeitsbereich: Zeilen {shown[0]}-{shown[1]}, Spalten {shown[2]}-{shown[3]}")
+            self.render()
+        self.send(lambda: self.client.set_window(window), done)
 
     def on_target_choice(self, _index: int) -> None:
         self.canvas.target_choice = self.control.target_combo.currentData()

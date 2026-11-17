@@ -351,3 +351,44 @@ def test_second_target_is_loaded_and_sent(tmp_path):
     assert arrays["i_target"].shape == tuple(shape)
     packet = sender.package(data, arrays)
     assert packet.target_frames is not None
+
+
+def test_window_restricts_training_to_the_zoom(run):
+    s, *_ = run
+    params = s.model.params
+    layer = s.model.settings.layer(s.model.experiment.layers[0].name)
+    layer.free_positions.enabled = layer.intensities.enabled = True
+    layer.intensities.lr = 0.05
+    assert s.set_window([0, 16, 0, 16])["window"] == [0, 16, 0, 16] and s.info()["window"] == [0, 16, 0, 16]
+    pos = params.positions(0).detach().clone()
+    outside = (pos[:, 0] >= 16) | (pos[:, 1] >= 16)
+    assert outside.any() and (~outside).any()
+    before = {name: getattr(params.layers[0], name).detach().clone() for name in ("shifts", "intensity", "logit")}
+    for _ in range(5):
+        s.trainer.step()
+    for name, value in before.items():
+        now = getattr(params.layers[0], name).detach()
+        assert torch.equal(now[outside], value[outside]), name
+    assert any(not torch.equal(getattr(params.layers[0], name).detach()[~outside], value[~outside])
+               for name, value in before.items())
+    data, arrays = s.frame()                          # the images are still shown in full
+    assert np.abs(arrays["sim"][20:, 20:]).sum() > 0
+    s.set_window(None)
+    assert s.info()["window"] is None
+
+
+def test_window_restricts_seeding_and_propeller(tmp_path):
+    from temsim.service.jobs import PropellerJob, SeedingJob
+    s = Session("cpu")
+    s.open_dataset(make_folder(tmp_path / "f", mode="stem_haadf", with_lattice=False), border_px=5)
+    SeedingJob(s, trials=60, chunk=60).advance()
+    outside_before = [tuple(p) for p in s.seeder.store.positions if not (p[0] < 20 and p[1] < 20)]
+    s.set_window([0, 20, 0, 20])
+    SeedingJob(s, trials=80, chunk=80).advance()
+    job = PropellerJob(s, distance_A=0.4, angles=4)
+    while not job.done:
+        job.advance()
+    positions = s.seeder.store.positions
+    outside_after = [tuple(p) for p in positions if not (p[0] < 20 and p[1] < 20)]
+    assert len(outside_after) == len(outside_before)
+    assert np.allclose(sorted(outside_after), sorted(outside_before), atol=1e-4)

@@ -84,6 +84,9 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.hist_lines: Dict[str, list] = {}
         self.compare_scatters: Dict[str, object] = {}
         self.zoom_hist_lines: list = []
+        #: ``(row0, row1, col0, col1)`` to which the core restricts optimising and inserting, drawn as a frame
+        self.work_window = None
+        self._window_artists: list = []
 
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
@@ -238,6 +241,8 @@ class PlotCanvas(FigureCanvasQTAgg):
             ax.legend(fontsize="x-small")
 
         self._quivers, self._minima_artists = [], []
+        self._window_artists = []
+        self._draw_work_window()
         if self.frame is not None:
             self.update_frame(self.frame)
         self.draw_idle()
@@ -528,6 +533,36 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.minima_verified = verified
         self._refresh_minima()
         self.draw_idle()
+
+    # ------------------------------------------------------------------ work window
+    def zoom_window(self):
+        """``(row0, row1, col0, col1)`` of the zoom of the first image tile (sim, target, diff), or ``None``."""
+
+        ax = next((self.axes_by_key[k] for k in ("sim", "target", "diff") if k in self.axes_by_key), None)
+        if ax is None or self._shape is None:
+            return None
+        x0, x1, y0, y1 = overlays.window(ax.get_xlim(), ax.get_ylim())
+        height, width = self._shape
+        r0, r1 = int(max(np.floor(y0 + 0.5), 0)), int(min(np.ceil(y1 + 0.5), height))
+        c0, c1 = int(max(np.floor(x0 + 0.5), 0)), int(min(np.ceil(x1 + 0.5), width))
+        return (r0, r1, c0, c1) if r1 > r0 and c1 > c0 else None
+
+    def set_work_window(self, window) -> None:
+        self.work_window = None if window is None else tuple(int(v) for v in window)
+        self._draw_work_window()
+        self.draw_idle()
+
+    def _draw_work_window(self) -> None:
+        self._drop(self._window_artists)
+        if self.work_window is None:
+            return
+        r0, r1, c0, c1 = self.work_window
+        for key in ("sim", "diff", "target"):
+            ax = self.axes_by_key.get(key)
+            if ax is not None:
+                self._window_artists.append(ax.add_patch(Rectangle(
+                    (c0 - 0.5, r0 - 0.5), c1 - c0, r1 - r0, fill=False, edgecolor="orange", linestyle="--",
+                    linewidth=1.2, zorder=7)))
 
     # ------------------------------------------------------------------ zoom
     def reset_zoom(self) -> None:

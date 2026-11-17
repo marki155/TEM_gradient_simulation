@@ -69,6 +69,26 @@ def test_seeding_view_and_live_patch(window, pump):
     pump(lambda: window.controller.state == "idle")
 
 
+def test_work_window_follows_the_zoom(window, pump):
+    from temsim_gui import tiles
+    canvas = window.canvas
+    canvas.set_view(tiles.COMPARE)
+    canvas.axes_by_key["sim"].set_xlim(9.5, 29.5)
+    canvas.axes_by_key["sim"].set_ylim(4.5, 24.5)
+    window.control.window_check.setChecked(True)
+    pump(lambda: canvas.work_window is not None)
+    assert canvas.work_window == (5, 25, 10, 30) and len(canvas._window_artists) == 3
+    with Client(window.connection.endpoint, timeout=60.0) as c:
+        assert c.info()["info"]["window"] == [5, 25, 10, 30]
+    window.control.start_btn.click()
+    pump(lambda: len(canvas.history) > 3)
+    window.control.stop_btn.click()
+    pump(lambda: window.controller.state == "idle")
+    window.control.window_check.setChecked(False)
+    pump(lambda: canvas.work_window is None)
+    assert not canvas._window_artists
+
+
 def test_minima_marks(window, pump):
     window.control.set_mode("insert")
     window.insert.method_combo.setCurrentIndex(window.insert.method_combo.findData("minima"))

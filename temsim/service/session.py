@@ -229,6 +229,7 @@ class Session:
                 "groups": [g.name for g in model.experiment.groups],
                 "active_group": model.settings.active_group, "out_dir": a.out_dir, "notes": list(a.notes),
                 "steps": self.trainer.steps if self.trainer else 0,
+                "window": None if model.objective.window is None else list(model.objective.window),
                 "seeding": None if self.seeder is None else self.seeding_status()}
 
     # ------------------------------------------------------------------ settings
@@ -381,6 +382,19 @@ class Session:
             return model.params.layer_index(layer)
         return int(layer)
 
+    def set_window(self, window: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Optimise and insert only inside ``[row0, row1, col0, col1]`` (pixels, half open); ``None``: everywhere.
+
+        The loss counts only the window, atoms outside it keep their values in training, and seeding,
+        propeller and minima work only inside it.
+        """
+
+        model = self.require_model()
+        model.objective.set_window(None if window is None else tuple(window))
+        self.seeder = None                     # its region and its sums depend on the window
+        self.revision += 1
+        return {"window": None if model.objective.window is None else list(model.objective.window)}
+
     def make_seeder(self, layer: Any = None, sync_store: bool = True) -> Seeder:
         """The seeder for ``layer`` (default: first layer of the active group), synchronised with the state.
 
@@ -391,12 +405,23 @@ class Session:
         model = self.require_model()
         index = self.layer_index(layer)
         if self.seeder is None or self.seed_layer != index:
-            region = self.assembly.region if self.assembly is not None else None
+            region = self._seeding_region()
             self.seeder = Seeder(model, index, self.seed_config, region=region, sync=sync_store)
+            self.seeder.edit_inside_only = model.objective.window is not None
             self.seed_layer = index
         else:
             self.seeder.resync(sync_store=sync_store)
         return self.seeder
+
+    def _seeding_region(self) -> Optional[np.ndarray]:
+        region = self.assembly.region if self.assembly is not None else None
+        window = self.model.objective.window
+        if window is None:
+            return region
+        r0, r1, c0, c1 = window
+        cut = np.zeros(tuple(self.model.experiment.imaging.shape), dtype=bool)
+        cut[r0:r1, c0:c1] = True
+        return cut if region is None else (np.asarray(region, dtype=bool) & cut)
 
     def seeding_status(self) -> Dict[str, Any]:
         s = self.seeder
@@ -568,7 +593,7 @@ class Session:
 
         model = self.require_model()
         ev = model.evaluate()
-        _, loss_mask, _ = model.objective.regions()
+        _, loss_mask, _ = model.objective.regions(windowed=False)
         arrays = self._images(ev["standardised"], ev["standardised_target"], loss_mask, standardised)
         mask = model.settings.mask_for(model.settings.active_group)
         if mask is not None:

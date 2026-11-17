@@ -243,6 +243,9 @@ class Client:
     def start_training(self, steps: Optional[int] = None, refine: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.call("start_training", {"steps": steps, "refine": refine}).result["status"]
 
+    def set_window(self, window=None) -> Dict[str, Any]:
+        return self.call("set_window", {"window": None if window is None else [int(v) for v in window]}).result
+
     def start_propeller(self, **options) -> Dict[str, Any]:
         return self.call("start_propeller", options).result["status"]
 

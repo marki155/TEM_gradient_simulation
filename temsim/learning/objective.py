@@ -305,6 +305,24 @@ class Objective:
         self.device = device
         self._target = self._to_tensor(target)
         self._cache: Dict[int, Tuple[np.ndarray, torch.Tensor]] = {}
+        #: ``(row0, row1, col0, col1)``: only this window counts for the loss (``None``: the whole image)
+        self.window: Optional[Tuple[int, int, int, int]] = None
+        self._window_mask: Optional[torch.Tensor] = None
+
+    def set_window(self, window: Optional[Tuple[int, int, int, int]]) -> None:
+        """Restrict the loss to a rectangle of the image (half-open pixel ranges), or lift it with ``None``."""
+
+        if window is None:
+            self.window, self._window_mask = None, None
+            return
+        h, w = self._target.shape[-2:]
+        r0, r1, c0, c1 = (int(v) for v in window)
+        r0, r1, c0, c1 = max(r0, 0), min(r1, h), max(c0, 0), min(c1, w)
+        if r1 <= r0 or c1 <= c0:
+            raise ValueError(f"empty window {window}")
+        mask = torch.zeros((h, w), dtype=torch.bool, device=self._target.device)
+        mask[r0:r1, c0:c1] = True
+        self.window, self._window_mask = (r0, r1, c0, c1), mask
 
     def _to_tensor(self, a) -> torch.Tensor:
         return torch.as_tensor(np.asarray(a, dtype=np.float32), device=self.device)
@@ -333,9 +351,19 @@ class Objective:
             out = out | m
         return out
 
-    def regions(self) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """``(target, loss mask, reference mask)`` for the active group (table in the module docstring)."""
+    def regions(self, windowed: bool = True) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """``(target, loss mask, reference mask)`` for the active group (table in the module docstring).
 
+        With a window (:meth:`set_window`) and ``windowed`` the loss mask is cut to it; the reference
+        mask (the statistics of the standardisation) stays as it is.
+        """
+
+        target, mask, reference = self._regions()
+        if windowed and self._window_mask is not None:
+            mask = self._window_mask if mask is None else (mask.bool() & self._window_mask)
+        return target, mask, reference
+
+    def _regions(self) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         s = self.settings
         active = s.active_group
         group_mask = s.mask_for(active)
@@ -359,5 +387,5 @@ class Objective:
         x, y = standardise(simulation, target, reference, normalisation)
         loss, parts = data_loss(x, y, mask, self.settings.loss)
         if keep is not None:
-            keep.update(x=x.detach(), y=y.detach(), loss_mask=mask)
+            keep.update(x=x.detach(), y=y.detach(), loss_mask=self.regions(windowed=False)[1])
         return loss, parts
