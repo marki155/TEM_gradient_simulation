@@ -48,7 +48,7 @@ from .canvas import PlotCanvas
 from .connection import Connection
 from .frame_model import FrameModel
 from .open_dialog import OpenDialog
-from .panels import INSERT, TRAINING, ControlPanel, InsertPanel, StrainPanel
+from .panels import INSERT, TRAINING, ConnectionPanel, ControlPanel, InsertPanel, StrainPanel
 from .widgets import set_quietly
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
@@ -57,6 +57,9 @@ BASE_EXTRAS = ("optics", "potentials")
 VALUES_INTERVAL = 2.0
 #: the loss curve is redrawn at most this often (seconds); the history keeps every point
 LOSS_INTERVAL = 0.25
+#: seconds between checks of the link to the core, and how long a check may wait for an answer
+LINK_INTERVAL = 2.0
+PING_TIMEOUT = 5.0
 #: after drawing a frame the GUI stays idle for this multiple of the drawing time before it asks for the next one
 IDLE_FACTOR = 1.5
 MINIMA_DELAY_MS = 250
@@ -88,6 +91,12 @@ class Controller(QtCore.QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(MINIMA_DELAY_MS)
         self._timer.timeout.connect(self.request_minima)
+        self.link: Optional[ConnectionPanel] = None
+        self._link_state = "verbunden"
+        self._ping_pending = False
+        self._link_timer = QtCore.QTimer(self)
+        self._link_timer.setInterval(int(1000 * LINK_INTERVAL))
+        self._link_timer.timeout.connect(self.check_link)
         self._connect()
         self.connection.set_extras(BASE_EXTRAS)
 
@@ -483,10 +492,64 @@ class Controller(QtCore.QObject):
     def open_entry(self, entry: Dict[str, Any], resume: bool = True, **options) -> None:
         self.open_dataset(entry["path"], resume=resume, **(options if entry.get("kind") == "dataset" else {}))
 
+    # ------------------------------------------------------------------ the link to the core
+    def attach_link(self, panel: ConnectionPanel, device: str = "") -> None:
+        self.link = panel
+        panel.endpoint_label.setText(self.connection.endpoint)
+        panel.device_label.setText(device or "-")
+        panel.shutdown_btn.clicked.connect(self.ask_shutdown)
+        self.check_link()
+        self._link_timer.start()
+
+    def check_link(self) -> None:
+        """Quiet core: ask it something cheap; the panel shows the age of the last message and the round trip."""
+
+        if self.link is None or self._link_state == "gestoppt":
+            return
+        age = time.monotonic() - self.connection.last_seen
+        if age < LINK_INTERVAL:
+            self.link.show_state("verbunden", age)
+            return
+        if self._ping_pending:
+            self.link.show_state("keine Antwort" if age > PING_TIMEOUT else "pruefe ...", age)
+            return
+        self._ping_pending = True
+
+        def done(rtt: float) -> None:
+            self._ping_pending = False
+            if self._link_state != "gestoppt":
+                self._link_state = "verbunden"
+                self.link.show_state("verbunden", 0.0, 1000 * rtt)
+
+        def failed(_exc) -> None:
+            self._ping_pending = False
+            if self._link_state != "gestoppt":
+                self._link_state = "keine Antwort"
+                self.link.show_state("keine Antwort", time.monotonic() - self.connection.last_seen)
+        self.connection.submit_now(lambda: self.connection.ping(PING_TIMEOUT), done, failed)
+
+    def ask_shutdown(self) -> None:
+        answer = QtWidgets.QMessageBox.question(
+            None, "Core stoppen", "Den Core wirklich beenden?\n\nEin laufender Job endet, der Zustand wird automatisch "
+            "gespeichert. Danach muss der Core neu gestartet werden.")
+        if answer == QtWidgets.QMessageBox.Yes:
+            self.shutdown_core()
+
+    def shutdown_core(self) -> None:
+        def done(_result) -> None:
+            self._link_state = "gestoppt"
+            if self.link is not None:
+                self.link.show_state("gestoppt", None)
+            self.control.set_state("idle", None, open_=False)
+            self.notify("Core gestoppt (autosave geschrieben)")
+        self.connection.submit_now(self.client.shutdown, done)
+
     def finish(self, save: bool, stop_job: bool = True) -> None:
         """Stop the job (unless ``stop_job`` is false: a core that outlives the window keeps working)
         and, if asked, save; the queued commands are completed by ``Connection.close``."""
 
+        if self._link_state == "gestoppt":           # nobody would answer
+            return
         if stop_job and self.state != "idle":
             self.connection.submit(self.client.stop)
         if save and self.info.get("open"):

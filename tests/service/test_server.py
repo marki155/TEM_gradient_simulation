@@ -51,7 +51,7 @@ def core():
 def test_hello_and_errors_do_not_stop_the_server(core):
     server, client, _ = core
     hello = client.hello(extras=["optics"])
-    assert hello["protocol"] == 1 and "open_run" in hello["commands"] and hello["info"] == {"open": False, "workspace": None}
+    assert hello["protocol"] == 1 and "open_run" in hello["commands"] and hello["info"]["open"] is False and hello["info"]["workspace"] is None
     with pytest.raises(RemoteError, match="nothing is open") as exc:
         client.frame()
     assert "Traceback" in exc.value.trace

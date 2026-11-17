@@ -24,7 +24,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from .canvas import PlotCanvas
 from .connection import Connection, SpawnedCore
 from .controller import Controller
-from .panels import INSERT, ControlPanel, InsertPanel, StrainPanel
+from .panels import INSERT, ConnectionPanel, ControlPanel, InsertPanel, StrainPanel
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
 from .widgets import CollapsibleSection
@@ -64,7 +64,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strain_section = CollapsibleSection("Strain-Kontrollgitter", expanded=False)
         self.strain_section.content_layout.addWidget(self.strain)
         self.control.add_mode_panel(self.insert)
-        for widget in (self.control, self.strain_section):
+        self.link = ConnectionPanel()
+        for widget in (self.link, self.control, self.strain_section):
             column_layout.addWidget(widget)
         column_layout.addStretch(1)
         scroll = QtWidgets.QScrollArea()
@@ -97,6 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controller.remote = core is None and not is_local(connection.endpoint)
         self.controller.notified.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self.controller.refresh_model()
+        self.controller.attach_link(self.link, str((connection.hello_info.get("info") or {}).get("device", "")))
 
     def apply_mode(self, *_args) -> None:
         """Show what the chosen mode (and insertion method) needs, nothing else."""
@@ -110,7 +112,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.controller.finish(self.control.save_on_close.isChecked(), stop_job=self.core is not None)
-        self.connection.close()
+        self.connection.close(timeout=2.0 if self.controller._link_state == "gestoppt" else 60.0)
         if self.core is not None:
             self.core.stop()
         super().closeEvent(event)

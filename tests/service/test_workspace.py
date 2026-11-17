@@ -47,7 +47,8 @@ def core(tmp_path):
 
 def test_listing_opening_by_relative_path_and_saving_by_name(core):
     root, client = core
-    assert client.info()["info"] == {"open": False, "workspace": str(root)}
+    info = client.info()["info"]
+    assert info["open"] is False and info["workspace"] == str(root)
     listing = client.workspace()
     assert listing["root"] == str(root) and {e["path"] for e in listing["entries"]} == {"runs/alt", "daten/probe1"}
     info = client.open_dataset("runs/alt")

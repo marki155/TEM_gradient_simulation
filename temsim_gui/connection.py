@@ -41,6 +41,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -88,6 +89,8 @@ class Connection(QtCore.QObject):
         self.endpoint = endpoint
         self.client = Client(endpoint, on_event=self._on_event, timeout=timeout, auto_ack=False)
         self._last_frame: Optional[FrameModel] = None
+        #: monotonic time of the last message from the core (event or answer)
+        self.last_seen = time.monotonic()
         self._result.connect(self._deliver)
         self._worker = _Worker(self._result.emit)
         self._worker.start()
@@ -96,6 +99,7 @@ class Connection(QtCore.QObject):
 
     # ------------------------------------------------------------------ events
     def _on_event(self, name: str, data: Dict[str, Any], arrays: Dict[str, np.ndarray]) -> None:
+        self.last_seen = time.monotonic()
         if name == "frame":
             frame = FrameModel.from_wire(data, arrays, self._last_frame)
             self._last_frame = frame
@@ -149,9 +153,18 @@ class Connection(QtCore.QObject):
             except BaseException as exc:
                 self._result.emit(failed or self._report, exc)
             else:
+                self.last_seen = time.monotonic()
                 self._result.emit(done, result)
 
         threading.Thread(target=run, name="temsim-gui-express", daemon=True).start()
+
+    def ping(self, timeout: float = 5.0) -> float:
+        """Round trip of a cheap command in seconds; raises if the core does not answer within ``timeout``."""
+
+        start = time.monotonic()
+        self.client.call("info", timeout=timeout)
+        self.last_seen = time.monotonic()
+        return self.last_seen - start
 
     def _report(self, exc: BaseException) -> None:
         trace = exc.trace if isinstance(exc, RemoteError) else ""

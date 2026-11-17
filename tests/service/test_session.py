@@ -30,7 +30,7 @@ def stem(tmp_path):
 
 def test_nothing_open():
     s = Session("cpu")
-    assert s.info() == {"open": False, "workspace": None}
+    assert s.info() == {"open": False, "workspace": None, "device": "cpu"}
     for call in (s.experiment, s.frame, s.save, lambda: s.set_param("x")):
         with pytest.raises(SessionError, match="nothing is open"):
             call()

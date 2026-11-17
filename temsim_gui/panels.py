@@ -38,6 +38,47 @@ from .widgets import CollapsibleSection, double_spin, int_spin, row_of, set_quie
 TRAINING, INSERT = "training", "insert"
 
 
+class ConnectionPanel(CollapsibleSection):
+    """The link to the core: endpoint, state, last answer, and a button that ends the core."""
+
+    COLOURS = {"verbunden": "#2e7d32", "pruefe ...": "#f9a825", "keine Antwort": "#c62828",
+               "gestoppt": "#616161"}
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__("Verbindung zum Core", expanded=False, parent=parent)
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.addLayout(form)
+        self.endpoint_label = QtWidgets.QLabel("-")
+        self.endpoint_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.state_label = QtWidgets.QLabel("-")
+        self.seen_label = QtWidgets.QLabel("-")
+        self.rtt_label = QtWidgets.QLabel("-")
+        self.device_label = QtWidgets.QLabel("-")
+        form.addRow("Adresse", self.endpoint_label)
+        form.addRow("Status", self.state_label)
+        form.addRow("Letzte Nachricht", self.seen_label)
+        form.addRow("Antwortzeit", self.rtt_label)
+        form.addRow("Rechnet auf", self.device_label)
+        self.shutdown_btn = QtWidgets.QPushButton("Core stoppen")
+        self.shutdown_btn.setToolTip("Beendet den Core-Prozess (auch in tmux). Ein laufender Job endet, der Zustand\n"
+                                     "wird vorher automatisch gespeichert (autosave). Danach muss der Core neu\n"
+                                     "gestartet und die GUI neu verbunden werden.")
+        self.content_layout.addWidget(self.shutdown_btn)
+
+    def show_state(self, state: str, seen_s: Optional[float] = None, rtt_ms: Optional[float] = None) -> None:
+        colour = self.COLOURS.get(state, "#000000")
+        self.state_label.setText(f"<b style='color:{colour}'>&#9679; {state}</b>")
+        self.seen_label.setText("-" if seen_s is None else f"vor {seen_s:.1f} s")
+        if rtt_ms is not None:
+            self.rtt_label.setText(f"{rtt_ms:.0f} ms")
+        self.shutdown_btn.setEnabled(state != "gestoppt")
+        if self.isEnabled() and state != "verbunden":
+            self.button.setText(f"Verbindung zum Core ({state})")
+        else:
+            self.button.setText("Verbindung zum Core")
+
+
 class ControlPanel(QtWidgets.QWidget):
     """Status, mode, job buttons, view options and (in the training mode) editing of the model."""
 

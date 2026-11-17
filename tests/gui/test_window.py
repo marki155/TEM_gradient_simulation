@@ -216,3 +216,27 @@ def test_workspace_loading_and_saving_by_name(tmp_path, qapp, pump):
         connection.close()
         window.close()
         server.stop()
+
+
+def test_link_panel_shows_the_core_and_can_stop_it(tmp_path, qapp, pump):
+    from temsim.service.jobs import Clock
+    from temsim.service.server import Server
+    core = Server("tcp://127.0.0.1:0", "cpu", Clock(0.2))
+    endpoint = core.start()
+    connection = Connection(endpoint, timeout=60.0)
+    w = MainWindow(connection)
+    try:
+        link, c = w.link, w.controller
+        assert link.endpoint_label.text() == endpoint and link.device_label.text() == "cpu"
+        connection.last_seen -= 10.0                       # a quiet core is asked
+        c.check_link()
+        pump(lambda: "verbunden" in link.state_label.text() and link.rtt_label.text().endswith("ms"))
+        c.shutdown_core()
+        pump(lambda: "gestoppt" in link.state_label.text())
+        core._thread.join(10.0)
+        assert not core._thread.is_alive() and not link.shutdown_btn.isEnabled()
+    finally:
+        c._link_timer.stop()
+        connection.close(timeout=2.0)
+        w.close()
+        core.stop()

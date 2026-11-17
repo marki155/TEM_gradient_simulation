@@ -218,7 +218,7 @@ class Session:
 
     def info(self) -> Dict[str, Any]:
         if self.model is None:
-            return {"open": False, "workspace": self.workspace}
+            return {"open": False, "workspace": self.workspace, "device": self.device}
         model, a = self.model, self.assembly
         imaging = model.experiment.imaging
         return {"open": True, "workspace": self.workspace, "kind": a.kind, "revision": self.revision, "device": self.device,
