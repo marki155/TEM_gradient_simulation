@@ -36,9 +36,14 @@ Implementation
 
 from __future__ import annotations
 
+import os
+import shutil
+import sys
+import tempfile
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
 from PySide6 import QtCore, QtWidgets
 
 from temsim.data.schema import Experiment, TrainSettings
@@ -78,6 +83,7 @@ class Controller(QtCore.QObject):
         self.values, self.train = values, train
         self.detection = detection if detection is not None else DetectionPanel()
         self._detections_pending = False
+        self._processes: set = set()                  # running ML tools (temsim_ml), kept alive here
         self.info: Dict[str, Any] = {}
         self.experiment: Optional[Experiment] = None
         self.state, self.job_kind = "idle", None
@@ -134,10 +140,8 @@ class Controller(QtCore.QObject):
         p.length_spin.valueChanged.connect(self.on_gradient_settings)
 
         d = self.detection
-        d.train_btn.clicked.connect(self.start_detector)
-        d.predict_btn.clicked.connect(self.predict_detector)
-        d.export_btn.clicked.connect(self.export_detected)
-        d.refresh_btn.clicked.connect(self.request_models)
+        d.train_btn.clicked.connect(self.open_train_window)
+        d.predict_btn.clicked.connect(self.open_predict_window)
         d.show_pred.toggled.connect(self.on_show_detections)
         d.show_dev.toggled.connect(self.on_show_detections)
         d.tolerance.valueChanged.connect(lambda _=None: self.request_detections())
@@ -196,7 +200,6 @@ class Controller(QtCore.QObject):
         self.control.set_state(self.state, self.job_kind, open_=bool(info.get("open")))
         self.insert.show_values(config)
         self.detection.set_available(bool(info.get("i_target")), self.state == "idle")
-        self.request_models()
         if experiment is None:
             return
         self.seeding.set_stem(info.get("mode") == "stem_haadf")
@@ -227,17 +230,10 @@ class Controller(QtCore.QObject):
         if previous != "idle" and self.state == "idle":
             self.render()
             self.request_values()
-            if previous_kind == "detector":
-                self.request_models()
-                self.request_detections(force=True)
         if not self.info.get("open") and data.get("open"):
             self.refresh_model()
 
     def on_light(self, data: Dict[str, Any]) -> None:
-        if data.get("kind") == "detector":            # not a loss of the model: no point of the loss curve
-            self.detection.show_progress(data)
-            self.control.set_progress(data.get("count"), data.get("train_loss"))
-            return
         if data.get("kind") == "seeding":
             step, loss = data.get("trials"), data.get("loss")
         elif data.get("kind") == "propeller":
@@ -469,31 +465,66 @@ class Controller(QtCore.QObject):
         self.send(lambda: self.client.insert_minima(**options), done)
 
     # ------------------------------------------------------------------ atom detector
-    def request_models(self) -> None:
-        def done(listing) -> None:
-            self.detection.set_models(listing.get("models", []), listing.get("current"))
-        self.send(self.client.detector_models, done)
+    def open_predict_window(self) -> None:
+        """Start the predict tool with the images of this run; a confirmed result comes back as a file."""
 
-    def start_detector(self) -> None:
-        options = self.detection.train_options()
-        if not options["name"]:
-            self.notify("Bitte einen Namen fuer den Detektor angeben")
+        frame = self.canvas.frame
+        if frame is None or frame.i_target is None:
+            self.notify("Vorhersage braucht Target und I-Target dieses Laufs")
             return
-        self.detection.progress_label.setText("startet ...")
-        self.send(lambda: self.client.start_detector(**options),
-                  lambda _status: self.notify(f"Detektor {options['name']} wird trainiert"))
+        folder = tempfile.mkdtemp(prefix="temsim_ml_")
+        target, second = os.path.join(folder, "target.npy"), os.path.join(folder, "i_target.npy")
+        handoff = os.path.join(folder, "handoff.npz")
+        np.save(target, np.asarray(frame.target, dtype=np.float32))
+        np.save(second, np.asarray(frame.i_target, dtype=np.float32))
 
-    def predict_detector(self) -> None:
-        options = self.detection.predict_options()
-        if options["name"] is None and not self.info.get("detector"):
-            self.notify("Erst einen Detektor trainieren oder einen gespeicherten waehlen")
-            return
+        def finished() -> None:
+            try:
+                if os.path.exists(handoff):           # absent: closed without "Übernehmen"
+                    with np.load(handoff) as data:
+                        self.apply_prediction(data["positions"], data["intensity"])
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+        self._start_process("temsim_ml.predict", ["--target", target, "--i-target", second, "--handoff", handoff],
+                            finished)
+
+    def apply_prediction(self, positions, intensity) -> None:
+        """A prediction confirmed in the predict interface: the core decides what the fit lacks."""
+
+        tolerance = float(self.detection.tolerance.value())
 
         def done(result) -> None:
             summary, arrays = result
+            self.canvas.show_detections = True
+            set_quietly(self.detection.show_pred, True)
             self.show_detections(summary, arrays)
-            self.notify(f"Vorhersage: {summary['predicted']} Atome, {summary['new']} fehlen im Fit")
-        self.send(lambda: self.client.detector_predict(**options), done)
+            self.notify(f"Übernommen: {summary['predicted']} Atome, {summary['new']} fehlen im Fit "
+                        f"(einfügen über 'Atome einfügen → Aus ML-Vorhersage')")
+        self.send(lambda: self.client.set_detection(positions, intensity, tolerance), done)
+
+    def open_train_window(self) -> None:
+        """Start the training tool for the open run (it opens the run in a local session of its own)."""
+
+        self._start_process("temsim_ml.train", ["--run", self.info.get("out_dir") or ""])
+
+    def _start_process(self, module: str, arguments: List[str], on_finished: Optional[Callable[[], None]] = None) -> None:
+        """``python -m module`` as a process of its own: the ML tools import torch, this interface may not."""
+
+        process = QtCore.QProcess(self)
+        environment = QtCore.QProcessEnvironment.systemEnvironment()
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        environment.insert("PYTHONPATH", os.pathsep.join(p for p in (root, environment.value("PYTHONPATH")) if p))
+        process.setProcessEnvironment(environment)
+        process.setProcessChannelMode(QtCore.QProcess.ForwardedChannels)
+
+        def finished(*_args) -> None:
+            self._processes.discard(process)
+            if on_finished is not None:
+                on_finished()
+        process.finished.connect(finished)
+        process.errorOccurred.connect(lambda error: self.notify(f"{module} startet nicht: {error}"))
+        self._processes.add(process)
+        process.start(sys.executable, ["-m", module, *arguments])
 
     def show_detections(self, summary, arrays) -> None:
         self.detection.show_result(summary)
@@ -531,10 +562,6 @@ class Controller(QtCore.QObject):
                         f"{report['atoms']} Atome")
             self.render()
         self.send(lambda: self.client.insert_detected(**options), done)
-
-    def export_detected(self) -> None:
-        tolerance = float(self.detection.tolerance.value())
-        self.send(lambda: self.client.export_detected(tolerance), lambda path: self.notify(f"exportiert: {path}"))
 
     def on_seeding_config(self, patch: Dict[str, Any]) -> None:
         self.send(lambda: self.client.seeding_config(patch))

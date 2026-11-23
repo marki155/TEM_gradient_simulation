@@ -209,6 +209,15 @@ class Detection:
         return path
 
     # ------------------------------------------------------------------ prediction
+    def set_prediction(self, positions, intensity, model: str = "extern") -> Dict[str, Any]:
+        """Take a prediction made elsewhere (the standalone predict interface) as the current one."""
+
+        positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
+        intensity = np.asarray(intensity, dtype=np.float64).reshape(-1)
+        shape = np.asarray(self.session.require_model() and self.session.assembly.target).shape
+        self.prediction = Prediction(positions, intensity, np.zeros(shape, dtype=np.float32), model)
+        return self.summary()
+
     def predict(self, name: Optional[str] = None, threshold: float = 0.3, min_distance_A: float = 0.8) -> Dict[str, Any]:
         if name and name != self.name:
             self.load(name)

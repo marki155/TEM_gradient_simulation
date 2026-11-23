@@ -263,6 +263,13 @@ class Client:
         reply = self.call("detector_result", {"tolerance_A": tolerance_A})
         return reply.result, reply.arrays
 
+    def set_detection(self, positions: np.ndarray, intensity: np.ndarray,
+                      tolerance_A: float = 0.5) -> Tuple[Dict[str, Any], Dict[str, np.ndarray]]:
+        reply = self.call("set_detection", {"tolerance_A": tolerance_A},
+                          {"positions": np.asarray(positions, dtype=np.float64),
+                           "intensity": np.asarray(intensity, dtype=np.float64)})
+        return reply.result, reply.arrays
+
     def insert_detected(self, **options) -> Dict[str, Any]:
         return self.call("insert_detected", options).result["report"]
 

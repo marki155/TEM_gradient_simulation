@@ -411,6 +411,12 @@ class Server:
     def cmd_detector_result(self, identity, args, arrays) -> Result:
         return self.session.detection.result(float(args.get("tolerance_A", 0.5)))
 
+    def cmd_set_detection(self, identity, args, arrays) -> Result:
+        """Take a prediction made in the standalone interface and compare it with the fit."""
+
+        self.session.detection.set_prediction(arrays["positions"], arrays["intensity"], args.get("model", "extern"))
+        return self.session.detection.result(float(args.get("tolerance_A", 0.5)))
+
     def cmd_insert_detected(self, identity, args, arrays) -> Result:
         report = self.session.detection.insert(**args)
         self.clock.frame_now()

@@ -114,6 +114,7 @@ COMMANDS: Dict[str, str] = {
     "detector_models": "the saved detectors (<workspace>/models)",
     "detector_predict": "predict the atoms of the target with a detector and compare them with the fitted ones",
     "detector_result": "the last prediction (arrays pred.pos, pred.int, pred.new, fit.unconfirmed)",
+    "set_detection": "take a prediction made elsewhere (positions, intensity) as the current one and compare it",
     "insert_detected": "insert the predicted atoms that the fit lacks (with the predicted intensity)",
     "export_detected": "write the prediction and the comparison as ml_detections.csv to the output folder",
     "pause": "stop after the current step, keep the job",

@@ -242,8 +242,11 @@ def test_link_panel_shows_the_core_and_can_stop_it(tmp_path, qapp, pump):
         core.stop()
 
 
-def test_detector_trains_predicts_shows_and_inserts(server, tmp_path, qapp, pump):
+def test_detector_handoff_shows_and_inserts(server, tmp_path, qapp, pump):
+    """The predict tool hands positions back; the main GUI overlays them and inserts the new ones."""
+
     import os
+
     path, _, target = make_run(tmp_path / "run", n=(20, 12))
     np.save(os.path.join(path, "i_target.npy"), (target ** 2).astype(np.float32))
     server.session.set_workspace(str(tmp_path / "ws"))
@@ -254,29 +257,44 @@ def test_detector_trains_predicts_shows_and_inserts(server, tmp_path, qapp, pump
     try:
         pump(lambda: w.controller.experiment is not None and w.canvas.frame is not None)
         d = w.detection
-        pump(lambda: d.train_btn.isEnabled())
+        pump(lambda: d.predict_btn.isEnabled())
         assert not d.missing_label.isVisibleTo(d)
-        d.name_edit.setText("gui")
-        d.steps.setValue(6)
-        d.patch.setValue(32)
-        d.batch.setValue(2)
-        d.train_btn.click()
-        pump(lambda: w.controller.job_kind == "detector")
-        pump(lambda: w.controller.state == "idle" and d.model_combo.findData("gui") >= 0)
-        assert w.control.mode == "training"                     # the detector does not switch the mode
-        d.model_combo.setCurrentIndex(d.model_combo.findData("gui"))
-        d.threshold.setValue(0.01)
-        d.show_pred.setChecked(True)
+
+        # the ML tools are processes of their own (they import torch): record instead of starting them
+        started = []
+        w.controller._start_process = lambda module, args, done=None: started.append((module, args, done))
+
+        # the predict tool gets the images of the open run (needs i_target) and a handoff file
+        w.controller.open_predict_window()
+        module, args, finished = started[-1]
+        assert module == "temsim_ml.predict"
+        given = dict(zip(args[::2], args[1::2]))
+        assert np.array_equal(np.load(given["--target"]), w.canvas.frame.target.astype(np.float32))
+        assert np.load(given["--i-target"]).shape == w.canvas.frame.i_target.shape
+
+        # "Übernehmen" there writes the confirmed prediction: one atom in a gap, one on a fitted atom
+        from temsim_ml.predict import write_handoff
+        fitted, _ = server.session.detection.fitted_atoms()
+        write_handoff(given["--handoff"], np.array([fitted[0] + (4.0, 4.0), fitted[0]]), np.array([3.0, 6.0]))
         d.show_dev.setChecked(True)
-        d.predict_btn.click()
+        finished()                                               # the process ends: the GUI takes the file
         pump(lambda: d.result_label.text() != "-")
-        assert len(w.canvas.detected) == len(w.canvas.detected_new)
+        assert d.show_pred.isChecked() and not os.path.exists(os.path.dirname(given["--handoff"]))
+        assert len(w.canvas.detected) >= 1
+
+        # insert the ones the fit lacks (checks off so the gap atom goes in)
         w.control.set_mode("insert")
         w.insert.method_combo.setCurrentIndex(w.insert.method_combo.findData("detector"))
         assert w.insert.detector_box.isVisibleTo(w.insert)
+        w.insert.det_collisions.setChecked(False)
+        w.insert.det_loss.setChecked(False)
         revision = w.canvas.frame.revision
         w.insert.insert_detected_btn.click()
         pump(lambda: w.canvas.frame.revision != revision)
+
+        # the training tool is started for this run
+        w.controller.open_train_window()
+        assert started[-1][:2] == ("temsim_ml.train", ["--run", server.session.info()["out_dir"]])
     finally:
         w.controller.finish(False)
         connection.close()

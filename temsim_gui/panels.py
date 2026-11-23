@@ -685,79 +685,41 @@ class InsertPanel(QtWidgets.QGroupBox):
 
 
 class DetectionPanel(CollapsibleSection):
-    """The atom detector: train a U-Net on the fitted atoms, predict, show and export the comparison."""
+    """ML-Detektion: two buttons that open the standalone predict and train interfaces, plus the overlay.
 
-    NEW = "(neu)"
+    Training and prediction themselves live in their own windows (``temsim_gui.train_gui`` and
+    ``temsim_gui.predict``).  This panel only launches them and shows the comparison of a handed-back
+    prediction with the fit (which the core computes).
+    """
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
-        super().__init__("ML-Detektion (U-Net)", expanded=False, parent=parent)
+        super().__init__("ML-Detektion", expanded=False, parent=parent)
         self.setToolTip(
-            "Die gefitteten Atome (Position + Intensitaet I, Occupancy >= 0.5, im Loss-Bereich) sind Trainingsdaten:\n"
-            "ein U-Net lernt aus Target und I-Target (2 Kanaele) eine Heatmap, deren Flecken an den Atomen sitzen\n"
-            "und deren Hoehe I ist. Danach findet es die Atome im selben Target (Vorhersage).\n"
-            "Die unteren Zeilen (Holdout) werden nie trainiert: Val-Loss und F1 dort zeigen, ob das Netz\n"
-            "verallgemeinert. Modelle liegen unter <workspace>/models und koennen mit weiteren Laeufen\n"
-            "weitertrainiert werden. Braucht i_target.tif.")
+            "Atome per neuronalem Netz finden. Zwei eigene Fenster:\n"
+            "- Vorhersage: ein globales Modell (~/data/models) auf Target + I-Target anwenden. Nach 'Übernehmen'\n"
+            "  gehen die Positionen hierher zurueck; der Core entscheidet, welche dem Fit fehlen, und fuegt sie ein\n"
+            "  (Methode 'Aus ML-Vorhersage' bei 'Atome einfuegen').\n"
+            "- Training: ein Modell nur auf diesem Lauf trainieren (mit Fortschrittsbalken), dann 'als global setzen'.\n"
+            "Braucht i_target.tif.")
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         self.content_layout.addLayout(form)
-        self.missing_label = QtWidgets.QLabel("Kein I-Target geladen: Training und Vorhersage sind gesperrt.")
+        self.missing_label = QtWidgets.QLabel("Kein I-Target geladen: ML-Vorhersage ist gesperrt.")
         self.missing_label.setStyleSheet("color: #c62828")
         self.missing_label.setWordWrap(True)
         form.addRow(self.missing_label)
 
-        self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItem(self.NEW, None)
-        self.model_combo.setToolTip("Gespeicherte Detektoren im Workspace. '(neu)': ein neues Netz trainieren.")
-        self.refresh_btn = QtWidgets.QPushButton("Liste")
-        self.refresh_btn.setToolTip("Liste der gespeicherten Detektoren neu lesen.")
-        form.addRow("Detektor", row_of(self.model_combo, self.refresh_btn))
-        self.name_edit = QtWidgets.QLineEdit("detector")
-        self.name_edit.setToolTip("Name, unter dem ein neuer Detektor gespeichert wird (Buchstaben, Ziffern, _ . -).\n"
-                                  "Ein vorhandener Name wird ueberschrieben.")
-        form.addRow("Name (neu)", self.name_edit)
-        self.resume_check = QtWidgets.QCheckBox("Gewaehlten Detektor weitertrainieren")
-        self.resume_check.setToolTip("Trainiert den oben gewaehlten Detektor mit diesem Lauf weiter (so lernt er\n"
-                                     "nacheinander aus mehreren Laeufen). Fleckbreite und Skala bleiben die des Modells.")
-        form.addRow(self.resume_check)
-        self.steps = int_spin(3000, 1, 1_000_000, 500, tip="Optimierer-Schritte (je Schritt ein Batch zufaelliger Ausschnitte).")
-        self.lr = double_spin(1e-3, 1e-6, 1.0, 1e-4, 6, tip="Lernrate (AdamW).")
-        self.sigma = double_spin(0.3, 0.05, 5.0, 0.05, 2, suffix=" A",
-                                 tip="Breite der Gauss-Flecken der Label-Heatmap (mind. 1 px).")
-        self.holdout = int_spin(15, 0, 50, 5, tip="Unterer Teil des Bildes in Prozent, der nicht trainiert wird\n"
-                                                  "(Validierung). 0 = keine Validierung.")
-        self.holdout.setSuffix(" %")
-        self.patch = int_spin(128, 16, 1024, 16, tip="Seitenlaenge der Trainings-Ausschnitte in Pixeln.")
-        self.batch = int_spin(8, 1, 128, 1, tip="Ausschnitte je Schritt.")
-        form.addRow("Schritte", self.steps)
-        form.addRow("Lernrate", self.lr)
-        form.addRow("Fleckbreite", self.sigma)
-        form.addRow("Holdout", self.holdout)
-        form.addRow("Ausschnitt / Batch", row_of(self.patch, self.batch))
-        self.train_btn = QtWidgets.QPushButton("Detektor trainieren")
-        self.train_btn.setToolTip("Laeuft als Job im Core (Pause/Resume/Stop gelten). Am Ende wird das Modell\n"
-                                  "gespeichert und sagt die Atome dieses Targets vorher.")
+        self.predict_btn = QtWidgets.QPushButton("Vorhersage-GUI öffnen …")
+        self.predict_btn.setToolTip("Öffnet das Vorhersage-Fenster, vorbelegt mit Target und I-Target dieses Laufs.")
+        self.train_btn = QtWidgets.QPushButton("Training-GUI öffnen …")
+        self.train_btn.setToolTip("Öffnet das Trainings-Fenster für diesen Lauf (Fortschrittsbalken, als global setzen).")
+        form.addRow(self.predict_btn)
         form.addRow(self.train_btn)
-        self.progress_label = QtWidgets.QLabel("-")
-        form.addRow("Training", self.progress_label)
 
-        self.threshold = double_spin(0.3, 0.01, 10.0, 0.05, 2,
-                                     tip="Ein Peak der Heatmap zaehlt als Atom, wenn er hoeher ist als dieser Bruchteil\n"
-                                         "der typischen Intensitaet (Median der Trainings-Atome).")
-        self.min_distance = double_spin(0.8, 0.05, 10.0, 0.05, 2, suffix=" A",
-                                        tip="Mindestabstand zweier vorhergesagter Atome.")
         self.tolerance = double_spin(0.5, 0.05, 5.0, 0.05, 2, suffix=" A",
                                      tip="Vorhersage und gefittetes Atom gelten als dasselbe Atom, wenn sie naeher\n"
-                                         "als das liegen.")
-        form.addRow("Peak-Schwelle", self.threshold)
-        form.addRow("Mindestabstand", self.min_distance)
+                                         "als das liegen (bestimmt, was 'neu' ist).")
         form.addRow("Toleranz Vergleich", self.tolerance)
-        self.predict_btn = QtWidgets.QPushButton("Vorhersagen")
-        self.predict_btn.setToolTip("Den gewaehlten Detektor auf das Target anwenden und mit den gefitteten Atomen vergleichen.")
-        self.export_btn = QtWidgets.QPushButton("Exportieren")
-        self.export_btn.setToolTip("Schreibt ml_detections.csv (Zeile, Spalte, I, Status: matched / new / unconfirmed)\n"
-                                   "und ml_heatmap.npy in den Ausgabeordner.")
-        form.addRow(row_of(self.predict_btn, self.export_btn))
         self.show_pred = QtWidgets.QCheckBox("Vorhersage anzeigen")
         self.show_pred.setToolTip("Kreise: vorhergesagte Atome mit gefittetem Partner (weiss) und ohne (cyan +:\n"
                                   "dort fehlt dem Fit vermutlich ein Atom).")
@@ -769,48 +731,11 @@ class DetectionPanel(CollapsibleSection):
         form.addRow("Ergebnis", self.result_label)
         self.set_available(False, True)
 
-    # ------------------------------------------------------------------ settings out
-    @property
-    def chosen(self) -> Optional[str]:
-        return self.model_combo.currentData()
-
-    def train_options(self) -> Dict[str, Any]:
-        resume = self.resume_check.isChecked() and self.chosen is not None
-        name = self.chosen if resume else self.name_edit.text().strip()
-        return {"name": name, "resume": resume, "steps": int(self.steps.value()), "lr": float(self.lr.value()),
-                "sigma_A": float(self.sigma.value()), "holdout": self.holdout.value() / 100.0,
-                "patch": int(self.patch.value()), "batch": int(self.batch.value())}
-
-    def predict_options(self) -> Dict[str, Any]:
-        return {"name": self.chosen, "threshold": float(self.threshold.value()),
-                "min_distance_A": float(self.min_distance.value()), "tolerance_A": float(self.tolerance.value())}
-
     # ------------------------------------------------------------------ showing
     def set_available(self, has_target: bool, idle: bool) -> None:
         self.missing_label.setVisible(not has_target)
-        self.train_btn.setEnabled(has_target and idle)
-        self.predict_btn.setEnabled(has_target and idle)
-
-    def set_models(self, models: Sequence[Dict[str, Any]], current: Optional[str] = None) -> None:
-        keep = current or self.chosen
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        self.model_combo.addItem(self.NEW, None)
-        for m in models:
-            f1 = m.get("val_f1")
-            extra = f", F1 {f1:.2f}" if isinstance(f1, (int, float)) else ""
-            self.model_combo.addItem(f"{m['name']} ({m.get('steps') or 0} Schritte, {m.get('runs') or 0} Laeufe{extra})",
-                                     m["name"])
-        self.model_combo.setCurrentIndex(max(self.model_combo.findData(keep), 0))
-        self.model_combo.blockSignals(False)
-
-    def show_progress(self, status: Dict[str, Any]) -> None:
-        parts = [f"{status.get('count', 0)} / {status.get('limit', '?')}"]
-        for key, label in (("train_loss", "Loss"), ("val_loss", "Val-Loss"), ("val_f1", "Val-F1")):
-            value = status.get(key)
-            if value is not None:
-                parts.append(f"{label} {value:.4g}")
-        self.progress_label.setText(", ".join(parts))
+        self.predict_btn.setEnabled(has_target)
+        self.train_btn.setEnabled(has_target)
 
     def show_result(self, summary: Dict[str, Any]) -> None:
         self.result_label.setText(f"{summary.get('predicted', 0)} vorhergesagt ({summary.get('model') or '-'}): "
