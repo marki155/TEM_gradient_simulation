@@ -17,7 +17,9 @@ data for a network that finds atoms in the image (Part II, Section 8).  The
   predicted atoms without a fitted partner are *new*, fitted atoms without a
   predicted partner are *unconfirmed*,
 * inserts the new ones (with the predicted intensity, through the checks of the
-  seeding) and writes the comparison as a table.
+  seeding) and writes the comparison as a table,
+* freezes the open reconstruction as an entry of the collection of good
+  reconstructions (Part II, Section 8.4), from which the tools train.
 
 Implementation
 ==============
@@ -34,7 +36,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from scipy.spatial import cKDTree
 
 from ..learning import detection as det
 from ..physics.structure import atomic_number_of
@@ -65,6 +66,8 @@ class Detection:
         self.name: Optional[str] = None
         self.trainer: Optional[det.DetectorTrainer] = None
         self.prediction: Optional[Prediction] = None
+        #: the collection of good reconstructions (None: ``~/data/ml_collection``)
+        self.collection_root: Optional[str] = None
 
     def reset(self) -> None:
         """A new reconstruction was opened: the prediction belonged to the old target."""
@@ -147,6 +150,28 @@ class Detection:
     def pixel_A(self) -> float:
         return self.session.require_model().experiment.imaging.pixel_size_nm * 10.0
 
+    # ------------------------------------------------------------------ collection
+    def snapshot(self) -> Dict[str, Any]:
+        """The open reconstruction as training data: images, fitted atoms in the valid region, pixel size."""
+
+        target, second, valid = self._inputs()
+        positions, intensity = self._inside(*self.fitted_atoms(), valid)
+        if len(positions) == 0:
+            raise DetectionError("no atoms to learn from (occupancy >= 0.5 inside the loss mask)")
+        return {"target": target, "second": second, "valid": valid, "positions": positions, "intensity": intensity,
+                "pixel_A": self.pixel_A(), "source": self.session.assembly.out_dir or ""}
+
+    def collection(self) -> det.Collection:
+        return det.Collection(self.collection_root)
+
+    def add_to_collection(self, groups=(), name: str = "") -> Dict[str, Any]:
+        """Freeze the open reconstruction as an entry of the collection."""
+
+        snapshot = self.snapshot()
+        name = name or os.path.basename(os.path.normpath(snapshot["source"])) or "lauf"
+        entry_id = self.collection().add(snapshot, name, groups)
+        return {"id": entry_id, "name": name, "atoms": int(len(snapshot["positions"])), "groups": list(groups)}
+
     # ------------------------------------------------------------------ training
     def start_training(self, name: str, resume: bool = False, sigma_A: float = 0.3, holdout: float = 0.15,
                        **config) -> det.DetectorTrainer:
@@ -173,15 +198,10 @@ class Detection:
         cfg = det.DetectorConfig(**config)
         if net is not None:
             cfg.base, cfg.depth = net.config["base"], net.config["depth"]
-        # the validation score must not merge atoms closer than the defaults (dense lattices, projected layers)
-        spacing = np.inf
-        if len(positions) > 1:
-            spacing = float(np.percentile(cKDTree(positions).query(positions, k=2)[0][:, 1], 10))
-        tolerance_px = max(1.0, min(0.5 / pixel_A, 0.5 * spacing))
-        min_distance_px = max(1.0, min(0.8 / pixel_A, 0.7 * spacing))
+        tolerance_px, min_distance_px = det.validation_scales(positions, pixel_A)
         self.trainer = det.DetectorTrainer([sample], cfg, net, self.session.device, tolerance_px=tolerance_px,
                                            min_distance_px=min_distance_px)
-        self.meta = {**meta, "sigma_px": sigma_px, "scale": scale, "pixel_A": pixel_A,
+        self.meta = {**meta, "sigma_px": sigma_px, "sigma_A": sigma_px * pixel_A, "scale": scale, "pixel_A": pixel_A,
                      "channels": ["target", "i_target"], "base": cfg.base, "depth": cfg.depth}
         if pixel_A and meta.get("pixel_A") and abs(meta["pixel_A"] - pixel_A) > 0.05 * pixel_A:
             self.session.assembly.notes.append(f"detector {name}: pixel size {pixel_A:.3g} A differs from "

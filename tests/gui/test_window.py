@@ -252,12 +252,20 @@ def test_detector_handoff_shows_and_inserts(server, tmp_path, qapp, pump):
     server.session.set_workspace(str(tmp_path / "ws"))
     with Client(server.endpoint, timeout=60.0) as c:
         c.open_run(path)
+    server.session.detection.collection_root = str(tmp_path / "coll")
     connection = Connection(server.endpoint, timeout=60.0)
     w = MainWindow(connection)
     try:
         pump(lambda: w.controller.experiment is not None and w.canvas.frame is not None)
         d = w.detection
         pump(lambda: d.predict_btn.isEnabled())
+
+        # the open run goes into the collection, into a new group
+        d.group_combo.setEditText("Handverlesen")
+        d.collect_btn.click()
+        pump(lambda: d.group_combo.findText("Handverlesen") >= 0)
+        entries = server.session.detection.collection().entries("Handverlesen")
+        assert len(entries) == 1 and entries[0]["atoms"] > 0
         assert not d.missing_label.isVisibleTo(d)
 
         # the ML tools are processes of their own (they import torch): record instead of starting them

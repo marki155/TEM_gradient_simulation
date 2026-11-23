@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
+from PySide6 import QtCore
 
 from temsim.learning import detection as det
 from temsim_ml import models
@@ -65,4 +66,52 @@ def test_train_worker_saves_a_local_model(tmp_path, qapp):
     assert result["ok"], result["message"]
     assert seen and seen[-1][:2] == (30, 30)
     meta = det.read_meta(result["path"])
-    assert meta["steps"] == 30 and meta["sources"][0]["run"] == path and meta["base"] == 8
+    assert meta["steps"] == 30 and meta["sources"][0]["data"][0]["source"] == path and meta["base"] == 8
+    assert meta["sigma_A"] == pytest.approx(0.4)
+
+
+def _collection_with_entries(tmp_path, n=2):
+    path, _, target = make_run(tmp_path / "run")
+    np.save(os.path.join(path, "i_target.npy"), (target ** 2).astype(np.float32))
+    from temsim_ml.train import run_snapshot
+    snapshot = run_snapshot(path, "cpu")
+    collection = det.Collection(str(tmp_path / "coll"))
+    ids = [collection.add(snapshot, f"e{k}", ["Optimiert"] if k == 0 else ["Handverlesen"]) for k in range(n)]
+    return collection, ids
+
+
+def test_train_worker_continues_a_model_on_collection_entries(tmp_path, qapp):
+    collection, ids = _collection_with_entries(tmp_path)
+    base = det.save_detector(str(tmp_path / "global" / "g"), det.UNet(2, 8, 2),
+                             {"scale": 5.0, "sigma_A": 0.5, "pixel_A": 0.2, "steps": 7, "sources": [{"old": 1}]})
+    result = {}
+    worker = TrainWorker("", "g", str(tmp_path / "local"), steps=10, sigma_A=0.3, holdout=0.2, device="cpu",
+                         entries=ids, collection=collection.root, resume=base, batch=2, patch=32, base=32)
+    worker.done.connect(lambda ok, message, where: result.update(ok=ok, message=message, path=where))
+    worker.run()
+    assert result["ok"], result["message"]
+    meta = det.read_meta(result["path"])
+    # the model's own architecture, width and scale stay; steps and sources accumulate
+    assert meta["base"] == 8 and meta["scale"] == 5.0 and meta["sigma_A"] == 0.5 and meta["steps"] == 17
+    assert len(meta["sources"]) == 2 and [d["entry"] for d in meta["sources"][1]["data"]] == ids
+
+
+def test_trainer_window_lists_tags_and_chooses_entries(tmp_path, qapp):
+    from temsim_ml.train import TrainerWindow
+    collection, ids = _collection_with_entries(tmp_path)
+    window = TrainerWindow(device="cpu", collection=collection.root)
+    try:
+        window.use_collection.setChecked(True)
+        assert window.entry_list.count() == 2 and sorted(window.chosen_entries()) == sorted(ids)
+        window.filter_combo.setCurrentIndex(window.filter_combo.findData("Optimiert"))
+        assert window.chosen_entries() == [ids[0]]                     # only the shown group is trained
+        window.entry_list.item(0).setCheckState(QtCore.Qt.Unchecked)
+        assert window.chosen_entries() == [] and not window.train_btn.isEnabled()
+        window.filter_combo.setCurrentIndex(0)                         # all: the tick is remembered
+        assert window.chosen_entries() == [ids[1]]
+        window.entry_list.selectAll()
+        window.tag_combo.setEditText("Handverlesen")
+        window.tag_selected(True)
+        assert all("Handverlesen" in e["groups"] for e in collection.entries())
+    finally:
+        window.close()

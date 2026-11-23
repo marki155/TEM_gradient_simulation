@@ -142,6 +142,7 @@ class Controller(QtCore.QObject):
         d = self.detection
         d.train_btn.clicked.connect(self.open_train_window)
         d.predict_btn.clicked.connect(self.open_predict_window)
+        d.collect_btn.clicked.connect(self.add_to_collection)
         d.show_pred.toggled.connect(self.on_show_detections)
         d.show_dev.toggled.connect(self.on_show_detections)
         d.tolerance.valueChanged.connect(lambda _=None: self.request_detections())
@@ -200,6 +201,7 @@ class Controller(QtCore.QObject):
         self.control.set_state(self.state, self.job_kind, open_=bool(info.get("open")))
         self.insert.show_values(config)
         self.detection.set_available(bool(info.get("i_target")), self.state == "idle")
+        self.request_collection()
         if experiment is None:
             return
         self.seeding.set_stem(info.get("mode") == "stem_haadf")
@@ -501,6 +503,20 @@ class Controller(QtCore.QObject):
             self.notify(f"Übernommen: {summary['predicted']} Atome, {summary['new']} fehlen im Fit "
                         f"(einfügen über 'Atome einfügen → Aus ML-Vorhersage')")
         self.send(lambda: self.client.set_detection(positions, intensity, tolerance), done)
+
+    def request_collection(self) -> None:
+        self.send(self.client.collection_info, lambda info: self.detection.set_groups(info.get("groups", [])))
+
+    def add_to_collection(self) -> None:
+        """Freeze the open reconstruction (on the core) as an entry of the collection."""
+
+        group = self.detection.group
+
+        def done(entry) -> None:
+            where = f" in Gruppe '{group}'" if group else " (ohne Gruppe)"
+            self.notify(f"Sammlung: '{entry['name']}' mit {entry['atoms']} Atomen aufgenommen{where}")
+            self.request_collection()
+        self.send(lambda: self.client.collection_add([group] if group else [], ""), done)
 
     def open_train_window(self) -> None:
         """Start the training tool for the open run (it opens the run in a local session of its own)."""

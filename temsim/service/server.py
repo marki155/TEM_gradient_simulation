@@ -411,6 +411,13 @@ class Server:
     def cmd_detector_result(self, identity, args, arrays) -> Result:
         return self.session.detection.result(float(args.get("tolerance_A", 0.5)))
 
+    def cmd_collection_info(self, identity, args, arrays) -> Result:
+        collection = self.session.detection.collection()
+        return {"root": collection.root, "groups": collection.groups(), "entries": len(collection.entries())}, {}
+
+    def cmd_collection_add(self, identity, args, arrays) -> Result:
+        return self.session.detection.add_to_collection(args.get("groups") or (), args.get("name") or ""), {}
+
     def cmd_set_detection(self, identity, args, arrays) -> Result:
         """Take a prediction made in the standalone interface and compare it with the fit."""
 

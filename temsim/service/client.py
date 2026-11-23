@@ -270,6 +270,12 @@ class Client:
                            "intensity": np.asarray(intensity, dtype=np.float64)})
         return reply.result, reply.arrays
 
+    def collection_info(self) -> Dict[str, Any]:
+        return self.call("collection_info").result
+
+    def collection_add(self, groups=(), name: str = "") -> Dict[str, Any]:
+        return self.call("collection_add", {"groups": list(groups), "name": name}).result
+
     def insert_detected(self, **options) -> Dict[str, Any]:
         return self.call("insert_detected", options).result["report"]
 

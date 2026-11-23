@@ -699,7 +699,9 @@ class DetectionPanel(CollapsibleSection):
             "- Vorhersage: ein globales Modell (~/data/models) auf Target + I-Target anwenden. Nach 'Übernehmen'\n"
             "  gehen die Positionen hierher zurueck; der Core entscheidet, welche dem Fit fehlen, und fuegt sie ein\n"
             "  (Methode 'Aus ML-Vorhersage' bei 'Atome einfuegen').\n"
-            "- Training: ein Modell nur auf diesem Lauf trainieren (mit Fortschrittsbalken), dann 'als global setzen'.\n"
+            "- Training: ein Modell auf diesem Lauf oder auf Eintraegen der Sammlung trainieren (mit\n"
+            "  Fortschrittsbalken), dann 'als global setzen'.\n"
+            "- Sammlung: gute Optimierungen als Schnappschuss sammeln, in Gruppen (Schlagworte).\n"
             "Braucht i_target.tif.")
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -715,6 +717,18 @@ class DetectionPanel(CollapsibleSection):
         self.train_btn.setToolTip("Öffnet das Trainings-Fenster für diesen Lauf (Fortschrittsbalken, als global setzen).")
         form.addRow(self.predict_btn)
         form.addRow(self.train_btn)
+
+        self.group_combo = QtWidgets.QComboBox()
+        self.group_combo.setEditable(True)
+        self.group_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.group_combo.setMinimumContentsLength(10)
+        self.group_combo.setToolTip("Gruppe des neuen Eintrags (z.B. 'Optimiert', 'Handverlesen'). Ein neuer Name\n"
+                                    "legt die Gruppe an; leer = ohne Gruppe. Zuordnen und Auswaehlen in der Training-GUI.")
+        self.collect_btn = QtWidgets.QPushButton("Zur Sammlung")
+        self.collect_btn.setToolTip("Den jetzigen Stand dieses Laufs (Target, I-Target, gefittete Atome mit I) als\n"
+                                    "Schnappschuss in die Sammlung guter Optimierungen (~/data/ml_collection) legen.\n"
+                                    "Aus der Sammlung wird in der Training-GUI trainiert.")
+        form.addRow("Sammlung", row_of(self.group_combo, self.collect_btn))
 
         self.tolerance = double_spin(0.5, 0.05, 5.0, 0.05, 2, suffix=" A",
                                      tip="Vorhersage und gefittetes Atom gelten als dasselbe Atom, wenn sie naeher\n"
@@ -736,6 +750,19 @@ class DetectionPanel(CollapsibleSection):
         self.missing_label.setVisible(not has_target)
         self.predict_btn.setEnabled(has_target)
         self.train_btn.setEnabled(has_target)
+        self.collect_btn.setEnabled(has_target)
+
+    @property
+    def group(self) -> str:
+        return self.group_combo.currentText().strip()
+
+    def set_groups(self, groups: Sequence[str]) -> None:
+        text = self.group_combo.currentText()
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        self.group_combo.addItems(list(groups))
+        self.group_combo.setEditText(text)
+        self.group_combo.blockSignals(False)
 
     def show_result(self, summary: Dict[str, Any]) -> None:
         self.result_label.setText(f"{summary.get('predicted', 0)} vorhergesagt ({summary.get('model') or '-'}): "

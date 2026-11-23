@@ -109,6 +109,17 @@ def test_insert_uses_the_predicted_intensity_and_export_writes_a_table(run):
         os.path.join(os.path.dirname(path), "ml_heatmap.npy"))
 
 
+def test_the_open_run_goes_into_the_collection(run, tmp_path):
+    s = run
+    s.detection.collection_root = str(tmp_path / "coll")
+    entry = s.detection.add_to_collection(["Optimiert"])
+    fitted, _ = s.detection._inside(*s.detection.fitted_atoms())
+    assert entry["atoms"] == len(fitted) and entry["name"] == "run"
+    loaded = s.detection.collection().load(entry["id"])
+    assert loaded["second"].shape == loaded["target"].shape and loaded["source"] == s.assembly.out_dir
+    assert s.detection.collection().groups() == ["Optimiert"]
+
+
 def det_prediction(positions, intensity):
     from temsim.service.detection import Prediction
     return Prediction(positions, intensity, np.zeros((64, 72), np.float32), "fake")

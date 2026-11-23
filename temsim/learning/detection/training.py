@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
+from scipy.spatial import cKDTree
 
 from . import labels
 from .unet import UNet, predict
@@ -70,10 +71,27 @@ class Sample:
     positions: np.ndarray              # (n, 2) the atoms of the label
     split_row: int                     # rows >= split_row are held out
     name: str = ""
+    tolerance_px: Optional[float] = None      # validation of this sample (None: the trainer's)
+    min_distance_px: Optional[float] = None
 
     @property
     def shape(self):
         return self.label.shape
+
+
+def validation_scales(positions: np.ndarray, pixel_A: float):
+    """``(tolerance_px, min_distance_px)`` for the validation score of one image.
+
+    0.5 and 0.8 Angstrom, but never more than half (0.7 times) the typical distance of neighbouring atoms,
+    so that dense lattices and projected layers are not merged; at least one pixel.
+    """
+
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
+    spacing = math.inf
+    if len(positions) > 1:
+        spacing = float(np.percentile(cKDTree(positions).query(positions, k=2)[0][:, 1], 10))
+    pixel_A = float(pixel_A) or 1.0
+    return max(1.0, min(0.5 / pixel_A, 0.5 * spacing)), max(1.0, min(0.8 / pixel_A, 0.7 * spacing))
 
 
 def make_sample(target, second, positions, intensities, scale: float, sigma_px: float,
@@ -197,11 +215,11 @@ class DetectorTrainer:
             label, valid = s.label[s.split_row:], s.valid[s.split_row:]
             pred = torch.as_tensor(heat)
             losses.append(float(self.weighted_loss(pred, torch.as_tensor(label), torch.as_tensor(valid, dtype=torch.float32))))
-            found, _ = labels.find_peaks(heat, self.threshold, self.min_distance_px, valid)
+            found, _ = labels.find_peaks(heat, self.threshold, s.min_distance_px or self.min_distance_px, valid)
             truth = s.positions[s.positions[:, 0] >= s.split_row] - (s.split_row, 0)
             inside = valid[np.clip(truth[:, 0].astype(int), 0, valid.shape[0] - 1),
                            np.clip(truth[:, 1].astype(int), 0, valid.shape[1] - 1)] if len(truth) else np.zeros(0, bool)
-            f1s.append(labels.scores(found, truth[inside], self.tolerance_px)[2])
+            f1s.append(labels.scores(found, truth[inside], s.tolerance_px or self.tolerance_px)[2])
         if not losses:
             return None
         self.val_loss, self.val_f1 = float(np.mean(losses)), float(np.mean(f1s))
