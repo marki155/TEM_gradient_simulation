@@ -249,6 +249,26 @@ class Client:
     def start_propeller(self, **options) -> Dict[str, Any]:
         return self.call("start_propeller", options).result["status"]
 
+    def start_detector(self, **options) -> Dict[str, Any]:
+        return self.call("start_detector", options).result["status"]
+
+    def detector_models(self) -> Dict[str, Any]:
+        return self.call("detector_models").result
+
+    def detector_predict(self, **options) -> Tuple[Dict[str, Any], Dict[str, np.ndarray]]:
+        reply = self.call("detector_predict", options)
+        return reply.result, reply.arrays
+
+    def detector_result(self, tolerance_A: float = 0.5) -> Tuple[Dict[str, Any], Dict[str, np.ndarray]]:
+        reply = self.call("detector_result", {"tolerance_A": tolerance_A})
+        return reply.result, reply.arrays
+
+    def insert_detected(self, **options) -> Dict[str, Any]:
+        return self.call("insert_detected", options).result["report"]
+
+    def export_detected(self, tolerance_A: float = 0.5) -> str:
+        return self.call("export_detected", {"tolerance_A": tolerance_A}).result["path"]
+
     def start_seeding(self, **options) -> Dict[str, Any]:
         return self.call("start_seeding", options).result["status"]
 

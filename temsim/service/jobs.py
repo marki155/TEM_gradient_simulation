@@ -77,6 +77,8 @@ class Job:
     """One unit of work per :meth:`advance`; ``done`` ends the job."""
 
     kind = "job"
+    #: whether a unit can change the model (else no frames are drawn and nothing is saved for it)
+    changes_model = True
 
     def __init__(self, session: Session):
         self.session = session
@@ -203,3 +205,37 @@ class PropellerJob(Job):
         s = self.seeder
         return {"kind": self.kind, "done": self.done, "count": self.count, "limit": self.total, "split": self.split,
                 "atoms": s.n_atoms, "loss": s.loss if math.isfinite(s.loss) else None}
+
+
+class DetectorJob(Job):
+    """Train the atom detector (:mod:`temsim.service.detection`) on the fitted atoms of the open run; at the end
+    the detector is saved and predicts the atoms of the target."""
+
+    kind = "detector"
+    BUDGET = 0.4
+    changes_model = False
+
+    def __init__(self, session: Session, name: str = "detector", resume: bool = False, **options):
+        super().__init__(session)
+        self.trainer = session.detection.start_training(name, resume, **options)
+        self.limit = int(self.trainer.config.steps)
+        self.path: Optional[str] = None
+
+    def advance(self, capture: bool = False) -> Dict[str, Any]:
+        t = self.trainer
+        t.run(self.limit - t.steps, self.BUDGET)
+        if t.steps >= self.limit:
+            self.path = self.session.detection.finish_training()
+            self.done = True
+        return self.status()
+
+    def status(self) -> Dict[str, Any]:
+        t = self.trainer
+        out = {"kind": self.kind, "done": self.done, "count": t.steps, "limit": self.limit,
+               "train_loss": t.loss if math.isfinite(t.loss) else None, "val_loss": t.val_loss, "val_f1": t.val_f1,
+               "model": self.session.detection.name}
+        if self.path:
+            out["path"] = self.path
+            prediction = self.session.detection.prediction
+            out["predicted"] = None if prediction is None else int(len(prediction.positions))
+        return out

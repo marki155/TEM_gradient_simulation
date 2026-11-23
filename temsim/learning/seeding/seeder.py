@@ -498,19 +498,23 @@ class Seeder:
 
     # ------------------------------------------------------------------ given points
     def filter_points(self, points, commit=False, check_margin=True, check_collisions=True,
-                      check_loss=True) -> np.ndarray:
+                      check_loss=True, options=None) -> np.ndarray:
         """Check given points in priority order against the criteria of an ``add`` trial.
 
         Per point: inside margin/region, ``max_atoms``, collision rule, and loss not worse.
         ``commit=False`` tests every point independently against the current state and changes
-        nothing; ``commit=True`` inserts the accepted points one after the other.  Returns the
+        nothing; ``commit=True`` inserts the accepted points one after the other.  ``options``: a
+        relative weight per point (default: the best of the weight options).  Returns the
         accepted positions (after the collision rule); ``filter_report`` counts the reasons.
         """
 
         accepted = []
         count = self.store.n
         report = self.filter_report = {"outside": 0, "full": 0, "loss": 0, "accepted": 0}
-        for point in np.asarray(points, dtype=np.float64).reshape(-1, 2):
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        weights = None if options is None else np.broadcast_to(np.asarray(options, dtype=np.float64), (len(points),))
+        for k, point in enumerate(points):
+            option = None if weights is None else weights[k:k + 1]
             if self.config.max_atoms is not None and count >= self.config.max_atoms:
                 self.stats.full = True
                 report["full"] += 1
@@ -528,12 +532,12 @@ class Seeder:
             if not check_loss:
                 ok = True
                 if commit:
-                    self.store.apply(graveyard, np.array([xy]))
+                    self.store.apply(graveyard, np.array([xy]), option)
                     self._version += 1
             elif commit:
-                ok = self._accept_or_reject(graveyard, np.array([xy]), len(graveyard), merged)
+                ok = self._accept_or_reject(graveyard, np.array([xy]), len(graveyard), merged, options=option)
             else:
-                ok = self._would_accept(graveyard, xy)
+                ok = self._would_accept(graveyard, xy, option)
             if ok:
                 accepted.append(xy)
                 count += 1 - len(graveyard)
@@ -542,15 +546,15 @@ class Seeder:
                 report["loss"] += 1
         return np.array(accepted, dtype=np.float64).reshape(-1, 2)
 
-    def _would_accept(self, remove, xy) -> bool:
+    def _would_accept(self, remove, xy, option=None) -> bool:
         add = np.array([xy])
         if self.uses_local:
-            for option in self._option_list():
-                trial = self._local_trial(remove, add, np.array([option]))
+            for value in (self._option_list() if option is None else [float(option[0])]):
+                trial = self._local_trial(remove, add, np.array([value]))
                 if trial is not None and math.isfinite(trial.loss) and trial.loss <= self.loss:
                     return True
             return False
-        token = self.store.apply(remove, add)
+        token = self.store.apply(remove, add, option)
         try:
             new_loss = self.evaluate()
         finally:

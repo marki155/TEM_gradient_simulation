@@ -240,3 +240,44 @@ def test_link_panel_shows_the_core_and_can_stop_it(tmp_path, qapp, pump):
         connection.close(timeout=2.0)
         w.close()
         core.stop()
+
+
+def test_detector_trains_predicts_shows_and_inserts(server, tmp_path, qapp, pump):
+    import os
+    path, _, target = make_run(tmp_path / "run", n=(20, 12))
+    np.save(os.path.join(path, "i_target.npy"), (target ** 2).astype(np.float32))
+    server.session.set_workspace(str(tmp_path / "ws"))
+    with Client(server.endpoint, timeout=60.0) as c:
+        c.open_run(path)
+    connection = Connection(server.endpoint, timeout=60.0)
+    w = MainWindow(connection)
+    try:
+        pump(lambda: w.controller.experiment is not None and w.canvas.frame is not None)
+        d = w.detection
+        pump(lambda: d.train_btn.isEnabled())
+        assert not d.missing_label.isVisibleTo(d)
+        d.name_edit.setText("gui")
+        d.steps.setValue(6)
+        d.patch.setValue(32)
+        d.batch.setValue(2)
+        d.train_btn.click()
+        pump(lambda: w.controller.job_kind == "detector")
+        pump(lambda: w.controller.state == "idle" and d.model_combo.findData("gui") >= 0)
+        assert w.control.mode == "training"                     # the detector does not switch the mode
+        d.model_combo.setCurrentIndex(d.model_combo.findData("gui"))
+        d.threshold.setValue(0.01)
+        d.show_pred.setChecked(True)
+        d.show_dev.setChecked(True)
+        d.predict_btn.click()
+        pump(lambda: d.result_label.text() != "-")
+        assert len(w.canvas.detected) == len(w.canvas.detected_new)
+        w.control.set_mode("insert")
+        w.insert.method_combo.setCurrentIndex(w.insert.method_combo.findData("detector"))
+        assert w.insert.detector_box.isVisibleTo(w.insert)
+        revision = w.canvas.frame.revision
+        w.insert.insert_detected_btn.click()
+        pump(lambda: w.canvas.frame.revision != revision)
+    finally:
+        w.controller.finish(False)
+        connection.close()
+        w.close()

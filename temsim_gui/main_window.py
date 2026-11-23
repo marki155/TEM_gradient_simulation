@@ -24,7 +24,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from .canvas import PlotCanvas
 from .connection import Connection, SpawnedCore
 from .controller import Controller
-from .panels import INSERT, ConnectionPanel, ControlPanel, InsertPanel, StrainPanel
+from .panels import INSERT, ConnectionPanel, ControlPanel, DetectionPanel, InsertPanel, StrainPanel
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
 from .widgets import CollapsibleSection
@@ -65,7 +65,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strain_section.content_layout.addWidget(self.strain)
         self.control.add_mode_panel(self.insert)
         self.link = ConnectionPanel()
-        for widget in (self.link, self.control, self.strain_section):
+        self.detection = DetectionPanel()
+        for widget in (self.link, self.control, self.detection, self.strain_section):
             column_layout.addWidget(widget)
         column_layout.addStretch(1)
         scroll = QtWidgets.QScrollArea()
@@ -94,7 +95,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.insert.method_changed.connect(self.apply_mode)
         self.apply_mode()
         self.controller = Controller(connection, self.canvas, self.control, self.insert,
-                                     self.strain, self.values, self.train, self)
+                                     self.strain, self.values, self.train, self, self.detection)
         self.controller.remote = core is None and not is_local(connection.endpoint)
         self.controller.notified.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self.controller.refresh_model()

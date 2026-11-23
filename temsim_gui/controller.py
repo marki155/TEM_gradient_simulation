@@ -48,7 +48,7 @@ from .canvas import PlotCanvas
 from .connection import Connection
 from .frame_model import FrameModel
 from .open_dialog import OpenDialog
-from .panels import INSERT, TRAINING, ConnectionPanel, ControlPanel, InsertPanel, StrainPanel
+from .panels import INSERT, TRAINING, ConnectionPanel, ControlPanel, DetectionPanel, InsertPanel, StrainPanel
 from .widgets import set_quietly
 from .train_editor import TrainEditor
 from .values_editor import ValuesEditor
@@ -70,12 +70,14 @@ class Controller(QtCore.QObject):
 
     def __init__(self, connection: Connection, canvas: PlotCanvas, control: ControlPanel, insert: InsertPanel,
                  strain: StrainPanel, values: ValuesEditor, train: TrainEditor,
-                 parent: Optional[QtCore.QObject] = None):
+                 parent: Optional[QtCore.QObject] = None, detection: Optional[DetectionPanel] = None):
         super().__init__(parent)
         self.connection, self.canvas, self.control = connection, canvas, control
         self.insert, self.strain = insert, strain
         self.minima, self.seeding = insert.minima, insert.seeding
         self.values, self.train = values, train
+        self.detection = detection if detection is not None else DetectionPanel()
+        self._detections_pending = False
         self.info: Dict[str, Any] = {}
         self.experiment: Optional[Experiment] = None
         self.state, self.job_kind = "idle", None
@@ -131,6 +133,16 @@ class Controller(QtCore.QObject):
             widget.toggled.connect(self.on_gradient_settings)
         p.length_spin.valueChanged.connect(self.on_gradient_settings)
 
+        d = self.detection
+        d.train_btn.clicked.connect(self.start_detector)
+        d.predict_btn.clicked.connect(self.predict_detector)
+        d.export_btn.clicked.connect(self.export_detected)
+        d.refresh_btn.clicked.connect(self.request_models)
+        d.show_pred.toggled.connect(self.on_show_detections)
+        d.show_dev.toggled.connect(self.on_show_detections)
+        d.tolerance.valueChanged.connect(lambda _=None: self.request_detections())
+        self.insert.insert_detected_btn.clicked.connect(self.insert_detected)
+
         m = self.minima
         m.show_check.toggled.connect(self.on_show_minima)
         m.threshold.valueChanged.connect(self._later)
@@ -183,6 +195,8 @@ class Controller(QtCore.QObject):
         self.experiment = experiment
         self.control.set_state(self.state, self.job_kind, open_=bool(info.get("open")))
         self.insert.show_values(config)
+        self.detection.set_available(bool(info.get("i_target")), self.state == "idle")
+        self.request_models()
         if experiment is None:
             return
         self.seeding.set_stem(info.get("mode") == "stem_haadf")
@@ -199,21 +213,31 @@ class Controller(QtCore.QObject):
 
     # ------------------------------------------------------------------ events
     def on_status(self, data: Dict[str, Any]) -> None:
-        previous = self.state
+        previous, previous_kind = self.state, self.job_kind
         job = data.get("job") or {}
         self.state = data.get("state", "idle")
         self.job_kind = job.get("kind") if self.state != "idle" else None
         self.control.set_state(self.state, self.job_kind, open_=bool(data.get("open", True)))
         self.insert.propeller_btn.setEnabled(self.state == "idle" and bool(data.get("open", True)))
-        if self.job_kind is not None:
-            self.control.set_mode(INSERT if self.job_kind in ("seeding", "propeller") else TRAINING)
+        self.detection.set_available(bool(self.info.get("i_target")), self.state == "idle")
+        if self.job_kind in ("seeding", "propeller"):
+            self.control.set_mode(INSERT)
+        elif self.job_kind == "training":
+            self.control.set_mode(TRAINING)
         if previous != "idle" and self.state == "idle":
             self.render()
             self.request_values()
+            if previous_kind == "detector":
+                self.request_models()
+                self.request_detections(force=True)
         if not self.info.get("open") and data.get("open"):
             self.refresh_model()
 
     def on_light(self, data: Dict[str, Any]) -> None:
+        if data.get("kind") == "detector":            # not a loss of the model: no point of the loss curve
+            self.detection.show_progress(data)
+            self.control.set_progress(data.get("count"), data.get("train_loss"))
+            return
         if data.get("kind") == "seeding":
             step, loss = data.get("trials"), data.get("loss")
         elif data.get("kind") == "propeller":
@@ -251,6 +275,7 @@ class Controller(QtCore.QObject):
         if now - self._values_asked > VALUES_INTERVAL:
             self.request_values()
         self.request_minima()
+        self.request_detections()
 
     def on_error(self, message: str, trace: str) -> None:
         self.errors.append(message)
@@ -442,6 +467,74 @@ class Controller(QtCore.QObject):
             self.render()
 
         self.send(lambda: self.client.insert_minima(**options), done)
+
+    # ------------------------------------------------------------------ atom detector
+    def request_models(self) -> None:
+        def done(listing) -> None:
+            self.detection.set_models(listing.get("models", []), listing.get("current"))
+        self.send(self.client.detector_models, done)
+
+    def start_detector(self) -> None:
+        options = self.detection.train_options()
+        if not options["name"]:
+            self.notify("Bitte einen Namen fuer den Detektor angeben")
+            return
+        self.detection.progress_label.setText("startet ...")
+        self.send(lambda: self.client.start_detector(**options),
+                  lambda _status: self.notify(f"Detektor {options['name']} wird trainiert"))
+
+    def predict_detector(self) -> None:
+        options = self.detection.predict_options()
+        if options["name"] is None and not self.info.get("detector"):
+            self.notify("Erst einen Detektor trainieren oder einen gespeicherten waehlen")
+            return
+
+        def done(result) -> None:
+            summary, arrays = result
+            self.show_detections(summary, arrays)
+            self.notify(f"Vorhersage: {summary['predicted']} Atome, {summary['new']} fehlen im Fit")
+        self.send(lambda: self.client.detector_predict(**options), done)
+
+    def show_detections(self, summary, arrays) -> None:
+        self.detection.show_result(summary)
+        self.canvas.set_detections(arrays.get("pred.pos"), arrays.get("pred.new"), arrays.get("fit.unconfirmed"))
+
+    def on_show_detections(self, *_args) -> None:
+        d = self.detection
+        self.canvas.show_detections, self.canvas.show_deviations = d.show_pred.isChecked(), d.show_dev.isChecked()
+        self.request_detections(force=True)
+
+    def request_detections(self, force: bool = False) -> None:
+        """The comparison with the fit changes with every frame; it is asked for only while it is shown."""
+
+        d = self.detection
+        wanted = force or d.show_pred.isChecked() or d.show_dev.isChecked()
+        if not wanted or self._detections_pending or not self.info.get("open"):
+            return
+        self._detections_pending = True
+        tolerance = float(d.tolerance.value())
+
+        def done(result) -> None:
+            self._detections_pending = False
+            self.show_detections(*result)
+
+        def failed(_exc) -> None:                     # nothing predicted yet: nothing to show
+            self._detections_pending = False
+            self.canvas.set_detections(None)
+        self.connection.submit(lambda: self.client.detector_result(tolerance), done, failed)
+
+    def insert_detected(self) -> None:
+        options = {**self.insert.detector_options(), "tolerance_A": float(self.detection.tolerance.value())}
+
+        def done(report) -> None:
+            self.notify(f"{report['accepted']} von {report['candidates']} vorhergesagten Atomen eingefuegt, "
+                        f"{report['atoms']} Atome")
+            self.render()
+        self.send(lambda: self.client.insert_detected(**options), done)
+
+    def export_detected(self) -> None:
+        tolerance = float(self.detection.tolerance.value())
+        self.send(lambda: self.client.export_detected(tolerance), lambda path: self.notify(f"exportiert: {path}"))
 
     def on_seeding_config(self, patch: Dict[str, Any]) -> None:
         self.send(lambda: self.client.seeding_config(patch))

@@ -38,7 +38,7 @@ import numpy as np
 import zmq
 
 from . import assemble, protocol
-from .jobs import Clock, Job, PropellerJob, SeedingJob, TrainingJob
+from .jobs import Clock, DetectorJob, Job, PropellerJob, SeedingJob, TrainingJob
 from .sender import Flow, FrameSender, Packet, package
 from .session import Session, SessionError
 
@@ -47,11 +47,12 @@ IDLE_POLL_MS = 50
 
 #: commands that change what a save would contain
 CHANGES_MODEL = frozenset({"set_values", "set_train", "set_param", "set_loss", "set_regularisation",
-                           "set_active_group", "edit", "insert_minima", "seeding_config"})
+                           "set_active_group", "edit", "insert_minima", "insert_detected", "seeding_config"})
 #: commands after which the model is saved at once (the user has done something that is expensive to redo)
 #: commands after which a picture that is waiting to be sent would be wrong
-CANCELS_FRAMES = frozenset({"set_values", "set_train", "set_active_group", "edit", "insert_minima", "set_window"})
-SAVES_AT_ONCE = frozenset({"pause", "stop", "edit", "insert_minima"})
+CANCELS_FRAMES = frozenset({"set_values", "set_train", "set_active_group", "edit", "insert_minima", "insert_detected",
+                            "set_window"})
+SAVES_AT_ONCE = frozenset({"pause", "stop", "edit", "insert_minima", "insert_detected"})
 LIGHT_INTERVAL = 0.05
 #: while training, every this many steps the images of that step are sent (0: only the paced frames)
 FRAME_STEPS = 10
@@ -182,14 +183,15 @@ class Server:
             self.sender.submit(job.captured)
             job.captured = None
         paced = self.clock.frame_due() and (bool(self.frame_extras) or not self._fast_frames())
-        if job.done or self.clock.urgent or paced:
+        if job.changes_model and (job.done or self.clock.urgent or paced):
             self._emit_frame()
-        self.dirty = True
-        if self.clock.save_due():
+        self.dirty = self.dirty or job.changes_model
+        if self.dirty and self.clock.save_due():
             self._autosave("interval")
         if job.done:
             self.job = None
-            self._autosave("job finished")
+            if job.changes_model:
+                self._autosave("job finished")
             self._emit_status()
 
     def _emit_frame(self) -> None:
@@ -388,6 +390,34 @@ class Server:
         self.session.require_model()
         keys = ("layer", "distance_A", "angles", "min_gain", "first")
         return self._start(PropellerJob(self.session, **{k: args[k] for k in keys if k in args}))
+
+    def cmd_start_detector(self, identity, args, arrays) -> Result:
+        self.session.require_model()
+        return self._start(DetectorJob(self.session, **args))
+
+    def cmd_detector_models(self, identity, args, arrays) -> Result:
+        detection = self.session.detection
+        try:
+            root = detection.root()
+        except RuntimeError:
+            root = None
+        return {"root": root, "models": detection.models(), "current": detection.name}, {}
+
+    def cmd_detector_predict(self, identity, args, arrays) -> Result:
+        tolerance = float(args.pop("tolerance_A", 0.5))
+        self.session.detection.predict(**args)
+        return self.session.detection.result(tolerance)
+
+    def cmd_detector_result(self, identity, args, arrays) -> Result:
+        return self.session.detection.result(float(args.get("tolerance_A", 0.5)))
+
+    def cmd_insert_detected(self, identity, args, arrays) -> Result:
+        report = self.session.detection.insert(**args)
+        self.clock.frame_now()
+        return {"report": report}, {}
+
+    def cmd_export_detected(self, identity, args, arrays) -> Result:
+        return {"path": self.session.detection.export(float(args.get("tolerance_A", 0.5)))}, {}
 
     def cmd_pause(self, identity, args, arrays) -> Result:
         if self.job is not None:

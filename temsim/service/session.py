@@ -70,6 +70,7 @@ from ..learning.trainer import Trainer
 from ..physics import optics, strain as strain_fields
 from . import assemble, workspace as workspaces
 from .assemble import Assembly
+from .detection import Detection
 
 STRAIN_MAP_RESOLUTION = 256
 CTF_MAX_ANGLE_MRAD = 42.0
@@ -129,6 +130,8 @@ class Session:
         self.candidates = np.zeros((0, 2))
         #: optional second target (``i_target.tif``) that is only shown, never trained against
         self.alt_target: Optional[np.ndarray] = None
+        #: the atom detector (U-Net) trained on the fitted atoms; see :mod:`temsim.service.detection`
+        self.detection = Detection(self)
 
     # ------------------------------------------------------------------ opening
     @property
@@ -160,6 +163,7 @@ class Session:
         self.trainer, self.seeder = Trainer(model), None
         self.seed_layer = 0
         self.candidates = np.zeros((0, 2))
+        self.detection.reset()
         self.revision += 1
         return self.info()
 
@@ -230,6 +234,7 @@ class Session:
                 "active_group": model.settings.active_group, "out_dir": a.out_dir, "notes": list(a.notes),
                 "steps": self.trainer.steps if self.trainer else 0,
                 "window": None if model.objective.window is None else list(model.objective.window),
+                "i_target": self.alt_target is not None, "detector": self.detection.name,
                 "seeding": None if self.seeder is None else self.seeding_status()}
 
     # ------------------------------------------------------------------ settings

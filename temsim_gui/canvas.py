@@ -63,6 +63,13 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.minima_points = np.zeros((0, 2))
         self.minima_verified = True
         self.ctf_note = ""
+        #: the prediction of the atom detector: positions, whether a fitted partner is missing, unconfirmed fitted atoms
+        self.show_detections = False
+        self.show_deviations = False
+        self.detected = np.zeros((0, 2))
+        self.detected_new = np.zeros(0, dtype=bool)
+        self.unconfirmed = np.zeros((0, 2))
+        self._detection_artists: list = []
         #: which target the target tile shows: ``"target"`` or ``"i_target"`` (if the frame has one)
         self.target_choice = "target"
 
@@ -240,7 +247,7 @@ class PlotCanvas(FigureCanvasQTAgg):
                 self.zoom_hist_lines.append(line)
             ax.legend(fontsize="x-small")
 
-        self._quivers, self._minima_artists = [], []
+        self._quivers, self._minima_artists, self._detection_artists = [], [], []
         self._window_artists = []
         self._draw_work_window()
         if self.frame is not None:
@@ -415,6 +422,7 @@ class PlotCanvas(FigureCanvasQTAgg):
         self._refresh_arrows()
         self._refresh_compare()
         self._refresh_minima()
+        self._refresh_detections()
         self._refresh_zoom_hist()
         if self.target_scatter is not None and len(self.target_scatter.get_offsets()):
             self.target_scatter.set_sizes(np.full(len(self.target_scatter.get_offsets()),
@@ -532,6 +540,41 @@ class PlotCanvas(FigureCanvasQTAgg):
         self.minima_points = np.zeros((0, 2)) if points is None else np.asarray(points, dtype=float).reshape(-1, 2)
         self.minima_verified = verified
         self._refresh_minima()
+        self.draw_idle()
+
+    def _refresh_detections(self) -> None:
+        self._drop(self._detection_artists)
+        if not (self.show_detections or self.show_deviations):
+            return
+        for key in self.overlay_keys():
+            ax = self.axes_by_key.get(key)
+            if ax is None:
+                continue
+            size = self._marker_size(ax)
+            xlim, ylim = ax.get_xlim(), ax.get_ylim()
+            marks = []
+            if self.show_detections and len(self.detected):
+                seen = overlays.inside(self.detected, xlim, ylim)
+                marks.append((self.detected[seen & ~self.detected_new], dict(marker="o", facecolors="none",
+                              edgecolors="white", s=size * 4, linewidths=0.8)))
+                marks.append((self.detected[seen & self.detected_new], dict(marker="+", c="cyan", s=size * 6,
+                              linewidths=1.4)))
+            if self.show_deviations and len(self.unconfirmed):
+                seen = overlays.inside(self.unconfirmed, xlim, ylim)
+                marks.append((self.unconfirmed[seen], dict(marker="x", c="red", s=size * 5, linewidths=1.3)))
+            for points, style in marks:
+                if len(points):
+                    self._detection_artists.append(ax.scatter(points[:, 1], points[:, 0], zorder=7, **style))
+
+    def set_detections(self, positions=None, new=None, unconfirmed=None) -> None:
+        """The detector's atoms (``None``: none) as the core compared them with the fit."""
+
+        self.detected = np.zeros((0, 2)) if positions is None else np.asarray(positions, dtype=float).reshape(-1, 2)
+        self.detected_new = (np.zeros(len(self.detected), dtype=bool) if new is None
+                             else np.asarray(new, dtype=bool).reshape(-1))
+        self.unconfirmed = (np.zeros((0, 2)) if unconfirmed is None
+                            else np.asarray(unconfirmed, dtype=float).reshape(-1, 2))
+        self._refresh_detections()
         self.draw_idle()
 
     # ------------------------------------------------------------------ work window
